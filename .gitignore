@@ -1,0 +1,40 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## NuGet
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nupkg
+**/[Pp]roject.assets.json
+**/[Pp]roject.nuget.cache
+
+## Visual Studio
+.vs/
+*.rsuser
+*.sln.docstates
+
+## Rider
+.idea/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+## User-specific
+*.suo
+*.user
+*.userprefs
+*.sln.docstates
+
+## OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
