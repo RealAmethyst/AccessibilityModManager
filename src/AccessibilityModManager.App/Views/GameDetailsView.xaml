@@ -5,6 +5,7 @@
              d:DataContext="{d:DesignInstance vm:GameDetailsViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:sys="clr-namespace:System;assembly=System.Runtime"
              mc:Ignorable="d"
              AutomationProperties.Name="Game details">
 
@@ -47,11 +48,11 @@
                    Target="{Binding ElementName=ChannelSelector}"
                    VerticalAlignment="Center"/>
             <ComboBox x:Name="ChannelSelector"
-                      SelectedValue="{Binding SelectedChannel}"
+                      SelectedItem="{Binding SelectedChannel}"
                       AutomationProperties.Name="Channel"
                       MinWidth="120">
-                <ComboBoxItem Content="stable"/>
-                <ComboBoxItem Content="beta"/>
+                <sys:String>stable</sys:String>
+                <sys:String>beta</sys:String>
             </ComboBox>
         </StackPanel>
 

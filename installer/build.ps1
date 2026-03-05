@@ -36,13 +36,13 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# Step 3: Publish (self-contained, normal directory layout)
-Write-Host "`n--- Publishing self-contained ---" -ForegroundColor Yellow
+# Step 3: Publish (framework-dependent)
+Write-Host "`n--- Publishing ---" -ForegroundColor Yellow
 $AppProj = Join-Path $Root "src\AccessibilityModManager.App\AccessibilityModManager.App.csproj"
 dotnet publish $AppProj `
     -c $Configuration `
     -r win-x64 `
-    --self-contained true `
+    --self-contained false `
     -p:DebugType=none `
     -p:DebugSymbols=false `
     -o $PublishDir

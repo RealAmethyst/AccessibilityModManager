@@ -5,15 +5,12 @@
              d:DataContext="{d:DesignInstance vm:SettingsViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:sys="clr-namespace:System;assembly=System.Runtime"
              mc:Ignorable="d"
              AutomationProperties.Name="Settings">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="16" MaxWidth="600" HorizontalAlignment="Left">
-            <TextBlock Text="Settings"
-                       FontSize="24" FontWeight="Bold"
-                       AutomationProperties.HeadingLevel="Level1"
-                       Margin="0,0,0,16"/>
+        <StackPanel Margin="16,8,16,16" MaxWidth="600" HorizontalAlignment="Left">
 
             <Label Content="Plugin Registry URL"
                    Target="{Binding ElementName=RegistryUrlBox}"
@@ -27,11 +24,11 @@
                    Target="{Binding ElementName=ChannelCombo}"
                    AutomationProperties.Name="Default channel"/>
             <ComboBox x:Name="ChannelCombo"
-                      SelectedValue="{Binding DefaultChannel}"
+                      SelectedItem="{Binding DefaultChannel}"
                       AutomationProperties.Name="Default channel"
                       Margin="0,4,0,16">
-                <ComboBoxItem Content="stable"/>
-                <ComboBoxItem Content="beta"/>
+                <sys:String>stable</sys:String>
+                <sys:String>beta</sys:String>
             </ComboBox>
 
             <StackPanel Orientation="Horizontal" Margin="0,0,0,16">

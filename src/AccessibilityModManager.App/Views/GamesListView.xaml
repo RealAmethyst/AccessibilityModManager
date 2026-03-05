@@ -8,28 +8,13 @@
              mc:Ignorable="d"
              AutomationProperties.Name="Games">
 
-    <Grid Margin="16">
+    <Grid Margin="16,8,16,16">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0"
-                   Text="Games"
-                   FontSize="24" FontWeight="Bold"
-                   AutomationProperties.HeadingLevel="Level1"
-                   Margin="0,0,0,8"/>
-
-        <Button Grid.Row="1"
-                Content="Refresh Games"
-                Command="{Binding RefreshGamesCommand}"
-                AutomationProperties.Name="Refresh games"
-                HorizontalAlignment="Left"
-                Margin="0,0,0,12"/>
-
-        <ListView Grid.Row="2"
+        <ListView Grid.Row="0"
                   ItemsSource="{Binding Games}"
                   AutomationProperties.Name="Games"
                   HorizontalContentAlignment="Stretch"
@@ -86,7 +71,7 @@
             </ListView.ItemTemplate>
         </ListView>
 
-        <TextBlock Grid.Row="3"
+        <TextBlock Grid.Row="1"
                    Text="{Binding StatusMessage}"
                    AutomationProperties.LiveSetting="Polite"
                    Margin="0,8,0,0"/>

@@ -9,6 +9,11 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = viewModel;
-        Loaded += async (_, _) => await viewModel.InitializeCommand.ExecuteAsync(null);
+        Loaded += async (_, _) =>
+        {
+            await viewModel.InitializeCommand.ExecuteAsync(null);
+            // Set focus to the first tab so screen readers announce it
+            TabHeaders.Focus();
+        };
     }
 }

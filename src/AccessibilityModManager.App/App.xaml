@@ -11,6 +11,7 @@
         <converters:CountToVisibilityConverter x:Key="CountToVisConverter"/>
         <converters:NotInstalledToVisibilityConverter x:Key="NotInstalledToVisConverter"/>
         <converters:NullToCollapsedConverter x:Key="NullToCollapsedConverter"/>
+        <converters:TabIndexToVisibilityConverter x:Key="TabIndexToVisConverter"/>
 
         <!-- Link-style button: looks like a hyperlink -->
         <Style x:Key="LinkButtonStyle" TargetType="Button">
