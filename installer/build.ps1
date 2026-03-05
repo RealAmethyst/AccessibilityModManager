@@ -1,4 +1,4 @@
-# Accessibility Mod Manager — Build & Package Script
+# Accessibility Mod Manager - Build & Package Script
 # Usage: powershell -ExecutionPolicy Bypass -File installer\build.ps1
 #
 # Prerequisites:
@@ -12,6 +12,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+# Ensure dotnet is on PATH
+$DotnetDir = "C:\Program Files\dotnet"
+if (Test-Path $DotnetDir) {
+    $env:PATH = "$DotnetDir;$env:PATH"
+}
 
 Write-Host "=== Building Accessibility Mod Manager v$Version ===" -ForegroundColor Cyan
 
@@ -88,7 +94,7 @@ if ($Iscc) {
         Write-Host "`nInstaller: $InstallerPath ($InstallerSizeMB MB)" -ForegroundColor Green
     }
 } else {
-    Write-Host "`nInno Setup not found — skipping installer build." -ForegroundColor Yellow
+    Write-Host "`nInno Setup not found - skipping installer build." -ForegroundColor Yellow
     Write-Host "Install Inno Setup 6 from: https://jrsoftware.org/isdl.php"
     Write-Host "Then re-run this script, or compile installer\setup.iss manually."
 }
