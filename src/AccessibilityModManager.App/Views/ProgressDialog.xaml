@@ -1,0 +1,52 @@
+<Window x:Class="AccessibilityModManager.App.Views.ProgressDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:AccessibilityModManager.App.ViewModels"
+        d:DataContext="{d:DesignInstance vm:ProgressDialogViewModel}"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="{Binding Title}"
+        Height="200" Width="450"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        AutomationProperties.Name="Progress">
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="{Binding Message}"
+                   TextWrapping="Wrap"
+                   FontSize="14"
+                   AutomationProperties.LiveSetting="Polite"
+                   Margin="0,0,0,12"/>
+
+        <ProgressBar Grid.Row="1"
+                     Value="{Binding Percentage}"
+                     Minimum="0" Maximum="100"
+                     Height="24"
+                     AutomationProperties.Name="Progress"
+                     Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="2"
+                   Text="{Binding StepDescription}"
+                   Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                   AutomationProperties.LiveSetting="Polite"/>
+
+        <Button Grid.Row="4"
+                Content="Cancel"
+                Command="{Binding CancelCommand}"
+                IsEnabled="{Binding IsCancellable}"
+                AutomationProperties.Name="Cancel"
+                HorizontalAlignment="Right"
+                MinWidth="80"/>
+    </Grid>
+</Window>

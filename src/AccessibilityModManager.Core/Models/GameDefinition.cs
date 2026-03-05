@@ -10,6 +10,7 @@ public sealed class GameDefinition
     public string? SteamAppId { get; init; }
     public string? ExeName { get; init; }
     public List<PathProbeRule> ProbeRules { get; init; } = [];
+    public List<Dependency> Dependencies { get; init; } = [];
 }
 
 /// <summary>

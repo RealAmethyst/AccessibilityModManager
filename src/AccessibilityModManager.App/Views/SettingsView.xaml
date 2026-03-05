@@ -1,0 +1,51 @@
+<UserControl x:Class="AccessibilityModManager.App.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:AccessibilityModManager.App.ViewModels"
+             d:DataContext="{d:DesignInstance vm:SettingsViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             AutomationProperties.Name="Settings">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="16" MaxWidth="600" HorizontalAlignment="Left">
+            <TextBlock Text="Settings"
+                       FontSize="24" FontWeight="Bold"
+                       AutomationProperties.HeadingLevel="Level1"
+                       Margin="0,0,0,16"/>
+
+            <Label Content="Plugin Registry URL"
+                   Target="{Binding ElementName=RegistryUrlBox}"
+                   AutomationProperties.Name="Plugin registry URL"/>
+            <TextBox x:Name="RegistryUrlBox"
+                     Text="{Binding PluginRegistryUrl, UpdateSourceTrigger=PropertyChanged}"
+                     AutomationProperties.Name="Plugin registry URL"
+                     Margin="0,4,0,16"/>
+
+            <Label Content="Default Channel"
+                   Target="{Binding ElementName=ChannelCombo}"
+                   AutomationProperties.Name="Default channel"/>
+            <ComboBox x:Name="ChannelCombo"
+                      SelectedValue="{Binding DefaultChannel}"
+                      AutomationProperties.Name="Default channel"
+                      Margin="0,4,0,16">
+                <ComboBoxItem Content="stable"/>
+                <ComboBoxItem Content="beta"/>
+            </ComboBox>
+
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
+                <Button Content="Save Settings"
+                        Command="{Binding SaveSettingsCommand}"
+                        AutomationProperties.Name="Save"
+                        Margin="0,0,8,0"/>
+                <Button Content="Open Logs"
+                        Command="{Binding OpenLogsCommand}"
+                        AutomationProperties.Name="Open logs"/>
+            </StackPanel>
+
+            <TextBlock Text="{Binding StatusMessage}"
+                       AutomationProperties.LiveSetting="Polite"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

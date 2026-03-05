@@ -18,6 +18,6 @@ public sealed class DependencyStatus
 
 public interface IDependencyChecker
 {
-    Task<List<DependencyStatus>> CheckAsync(GameInstall game, ModRelease release, CancellationToken ct = default);
+    Task<List<DependencyStatus>> CheckAsync(GameInstall game, CancellationToken ct = default);
     Task FixAsync(Dependency dep, CancellationToken ct = default);
 }

@@ -4,4 +4,7 @@
     <Project Path="src/AccessibilityModManager.Core/AccessibilityModManager.Core.csproj" />
     <Project Path="src/AccessibilityModManager.Infrastructure/AccessibilityModManager.Infrastructure.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AccessibilityModManager.Tests/AccessibilityModManager.Tests.csproj" />
+  </Folder>
 </Solution>
