@@ -1,0 +1,107 @@
+Accessibility Mod Manager — Source-Available License
+Version 1.0
+
+Copyright (c) 2026 Accessibility Mod Manager Contributors. All rights reserved.
+
+1. DEFINITIONS
+
+   "Software" means the Accessibility Mod Manager application, including all
+   source code, binaries, documentation, and associated files in this
+   repository.
+
+   "Security Mechanisms" means all code and functionality related to plugin
+   registry signature verification, SHA256 package verification, zip-slip
+   prevention, manifest action allowlisting, receipt tamper detection, plugin
+   collision detection, HTTPS enforcement, and any other security or integrity
+   checks present in the Software.
+
+   "Plugin Content" means any mod packages, plugin repository indexes, game
+   definitions, or other content authored and distributed by plugin authors
+   through the Software's plugin system.
+
+   "Official Distribution" means the Software as distributed by the copyright
+   holders through official channels (GitHub releases, official website, or
+   other channels designated by the copyright holders).
+
+2. PERMITTED USES
+
+   You may:
+
+   a) View, read, and study the source code for personal, educational, or
+      security auditing purposes.
+
+   b) Submit contributions (pull requests, bug reports, patches) to the
+      official repository, subject to the project's contribution guidelines.
+
+   c) Build the Software from source for personal use, provided no
+      modifications are made to Security Mechanisms.
+
+   d) Create plugins and plugin content that integrate with the Software's
+      plugin system as intended.
+
+3. RESTRICTIONS
+
+   You may NOT:
+
+   a) Remove, disable, weaken, bypass, or modify any Security Mechanisms,
+      whether in source or binary form.
+
+   b) Distribute modified versions of the Software, in source or binary form,
+      without prior written permission from the copyright holders.
+
+   c) Distribute unmodified copies of the Software outside of linking to or
+      directing users to the Official Distribution.
+
+   d) Use the Software's source code, in whole or in part, to create a
+      competing or derivative application.
+
+   e) Use the Software to circumvent, bypass, or undermine protections that
+      plugin authors have placed on their Plugin Content, including but not
+      limited to access controls, distribution restrictions, or licensing
+      terms.
+
+   f) Redistribute, rehost, mirror, or repackage Plugin Content obtained
+      through the Software without explicit permission from the respective
+      plugin author.
+
+   g) Use the Software or its source code for any purpose that would harm
+      the safety, security, or accessibility of end users.
+
+4. CONTRIBUTIONS
+
+   By submitting a contribution to this project, you agree to license your
+   contribution under the same terms as this license and you confirm that you
+   have the right to do so. Copyright in contributions remains with the
+   contributor, but the copyright holders are granted an irrevocable,
+   worldwide, royalty-free license to use, modify, and distribute the
+   contribution as part of the Software.
+
+5. PLUGIN AUTHORS
+
+   Plugin authors retain full ownership and copyright of their Plugin Content.
+   Listing a plugin in the Software's registry does not transfer any rights
+   in the Plugin Content to the Software's copyright holders or to users of
+   the Software beyond what is necessary to install, update, and uninstall
+   the plugin as intended.
+
+6. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+   THE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY,
+   WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF,
+   OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+7. TERMINATION
+
+   Your rights under this license terminate automatically if you violate any
+   of its terms. Upon termination, you must destroy all copies of the Software
+   in your possession.
+
+8. GOVERNING LAW
+
+   This license shall be governed by and interpreted in accordance with
+   applicable copyright law. If any provision of this license is found to be
+   unenforceable, the remaining provisions shall remain in full effect.

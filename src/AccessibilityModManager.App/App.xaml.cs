@@ -41,7 +41,21 @@ public partial class App : Application
 
         // Infrastructure — services
         services.AddSingleton<IConfigService, ConfigService>();
-        services.AddSingleton<IPluginRegistryClient, PluginRegistryClient>();
+
+        // Registry signature verification (RSA-PSS/SHA256)
+        // TODO: Set your real RSA public key PEM to enable signature verification.
+        // Generate key pair:  openssl genrsa -out registry-private.pem 4096
+        // Extract public key: openssl rsa -in registry-private.pem -pubout -out registry-public.pem
+        // Sign registry:      openssl dgst -sha256 -sigopt rsa_padding_mode:pss -sign registry-private.pem registry.json | base64 > registry.json.sig
+        // Replace with your PEM string to enable signature verification
+        var registryPublicKeyPem = GetRegistryPublicKey();
+        if (registryPublicKeyPem != null)
+            services.AddSingleton(new RegistrySignatureVerifier(registryPublicKeyPem, logger));
+
+        services.AddSingleton<IPluginRegistryClient>(sp => new PluginRegistryClient(
+            sp.GetRequiredService<HttpClient>(),
+            sp.GetRequiredService<ILogger>(),
+            sp.GetService<RegistrySignatureVerifier>()));
         services.AddSingleton<IPluginRepoClient, PluginRepoClient>();
         services.AddSingleton<IPluginStateStore, PluginStateStore>();
         services.AddSingleton<IReceiptStore, ReceiptStore>();
@@ -124,6 +138,12 @@ public partial class App : Application
                 });
             });
     }
+
+    /// <summary>
+    /// Returns the RSA public key PEM for registry signature verification,
+    /// or null to skip verification (development only).
+    /// </summary>
+    private static string? GetRegistryPublicKey() => null;
 
     protected override void OnExit(ExitEventArgs e)
     {

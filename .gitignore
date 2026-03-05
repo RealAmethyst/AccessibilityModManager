@@ -26,6 +26,8 @@ obj/
 [Rr]elease/
 x64/
 x86/
+publish/
+dist/
 
 ## User-specific
 *.suo
