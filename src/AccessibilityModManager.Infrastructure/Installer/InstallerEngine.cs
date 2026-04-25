@@ -22,6 +22,7 @@ public sealed class InstallerEngine : IInstallerEngine
     private readonly ManifestParser _manifestParser;
     private readonly SafeZipExtractor _zipExtractor;
     private readonly IReceiptStore _receiptStore;
+    private readonly IDependencyChecker _dependencyChecker;
     private readonly ILogger _logger;
 
     public InstallerEngine(
@@ -31,6 +32,7 @@ public sealed class InstallerEngine : IInstallerEngine
         ManifestParser manifestParser,
         SafeZipExtractor zipExtractor,
         IReceiptStore receiptStore,
+        IDependencyChecker dependencyChecker,
         ILogger logger)
     {
         _backupManager = backupManager;
@@ -39,12 +41,16 @@ public sealed class InstallerEngine : IInstallerEngine
         _manifestParser = manifestParser;
         _zipExtractor = zipExtractor;
         _receiptStore = receiptStore;
+        _dependencyChecker = dependencyChecker;
         _logger = logger;
     }
 
     public async Task<InstallReceipt> InstallAsync(GameInstall game, ModRelease release, string packageZipPath, CancellationToken ct = default)
     {
         _logger.Information("Starting install: {PluginId}/{GameId} v{Version}", release.PluginId, release.GameId, release.Version);
+
+        // Pre-check: required dependencies must be installed
+        await EnsureRequiredDependenciesPresent(game, ct);
 
         // Check for conflicting installs from other plugins
         var existingReceipts = await _receiptStore.LoadAllForGameAsync(game.Game.GameId);
@@ -65,6 +71,9 @@ public sealed class InstallerEngine : IInstallerEngine
     public async Task<InstallReceipt> UpdateAsync(GameInstall game, ModRelease release, string packageZipPath, CancellationToken ct = default)
     {
         _logger.Information("Starting update: {PluginId}/{GameId} to v{Version}", release.PluginId, release.GameId, release.Version);
+
+        // Pre-check: required dependencies must be installed
+        await EnsureRequiredDependenciesPresent(game, ct);
 
         // Uninstall the old version first
         await UninstallAsync(game, release.PluginId, ct);
@@ -244,6 +253,29 @@ public sealed class InstallerEngine : IInstallerEngine
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Verifies that every dependency declared on the game with <c>Required = true</c> is
+    /// currently <see cref="DependencyStatusKind.Installed"/>. Throws otherwise so the install
+    /// is aborted before any file is touched.
+    /// </summary>
+    private async Task EnsureRequiredDependenciesPresent(GameInstall game, CancellationToken ct)
+    {
+        if (game.Game.Dependencies.Count == 0) return;
+
+        var statuses = await _dependencyChecker.CheckAsync(game, ct);
+        var blockers = statuses
+            .Where(s => s.Dependency.Required && s.Status != DependencyStatusKind.Installed)
+            .ToList();
+
+        if (blockers.Count == 0) return;
+
+        var summary = string.Join("; ", blockers.Select(b =>
+            $"{b.Dependency.Id} ({b.Status}{(string.IsNullOrEmpty(b.Details) ? "" : ": " + b.Details)})"));
+
+        _logger.Error("Install blocked — required dependencies not satisfied: {Summary}", summary);
+        throw new MissingRequiredDependencyException(blockers, summary);
     }
 
     /// <summary>

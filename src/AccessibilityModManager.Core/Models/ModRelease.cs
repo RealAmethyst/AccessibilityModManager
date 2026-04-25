@@ -13,6 +13,10 @@ public sealed class ModRelease
     public required string Sha256 { get; init; }
     public string? ChangelogUrl { get; init; }
     public CompatibilityInfo? Compatibility { get; init; }
+
+    // Used by the Version ComboBox's SelectedItem announcement and anywhere else that falls back
+    // to ToString. Without this override the screen reader would say the type's full name.
+    public override string ToString() => Version;
 }
 
 public sealed class CompatibilityInfo

@@ -120,10 +120,18 @@ public sealed class DependencyChecker : IDependencyChecker
         // File/folder presence relative to game install
         if (!string.IsNullOrEmpty(dep.Check.FilePath))
         {
-            var fullPath = Path.GetFullPath(Path.Combine(gameInstallPath, dep.Check.FilePath));
+            // Normalize BOTH paths through GetFullPath so the StartsWith check below isn't
+            // foiled by trivial separator differences (forward vs back slashes, mixed case).
+            // Without this, a gameInstallPath like "c:/program files/.../game" — which can
+            // come from VDF parsing or a folder picker — fails the path-traversal check
+            // because GetFullPath canonicalizes the resolved path with backslashes but the
+            // base still has forward slashes, and StartsWith mismatches purely on that.
+            var normalizedBase = Path.GetFullPath(gameInstallPath);
+            var fullPath = Path.GetFullPath(Path.Combine(normalizedBase, dep.Check.FilePath));
 
-            // Path traversal protection
-            if (!fullPath.StartsWith(gameInstallPath, StringComparison.OrdinalIgnoreCase))
+            // Path traversal protection — separator-aware now that both sides are canonical.
+            if (!fullPath.StartsWith(normalizedBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(fullPath, normalizedBase, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.Warning("Dependency check path escapes game directory: {Path}", dep.Check.FilePath);
                 return new DependencyStatus
@@ -194,22 +202,22 @@ public sealed class DependencyChecker : IDependencyChecker
                     };
                 }
 
-                // Version comparison if MinVersion is specified
+                // Version comparison if MinVersion is specified.
+                // Uses VersionComparer (SemVer-leaning) so BepInEx/MelonLoader-style versions
+                // like "5.4.21" or "6.0.0-pre.1" compare correctly, plus dotted runtime versions
+                // like "10.0.1234.0".
                 if (!string.IsNullOrEmpty(dep.MinVersion))
                 {
                     var installedStr = value.ToString();
-                    if (Version.TryParse(installedStr, out var installed) &&
-                        Version.TryParse(dep.MinVersion, out var minVersion))
+                    if (LooksLikeVersion(installedStr) && LooksLikeVersion(dep.MinVersion) &&
+                        VersionComparer.Instance.Compare(installedStr, dep.MinVersion) < 0)
                     {
-                        if (installed < minVersion)
+                        return new DependencyStatus
                         {
-                            return new DependencyStatus
-                            {
-                                Dependency = dep,
-                                Status = DependencyStatusKind.Incompatible,
-                                Details = $"Installed: {installed}, required: >= {minVersion}"
-                            };
-                        }
+                            Dependency = dep,
+                            Status = DependencyStatusKind.Incompatible,
+                            Details = $"Installed: {installedStr}, required: >= {dep.MinVersion}"
+                        };
                     }
                 }
             }
@@ -231,6 +239,16 @@ public sealed class DependencyChecker : IDependencyChecker
             };
         }
     }
+
+    /// <summary>
+    /// Conservative "is this string a version?" check — first character is a digit, rest is
+    /// digits/letters/dots/dashes. Avoids comparing "Some Display Name" as a version, which would
+    /// give nonsense ordering.
+    /// </summary>
+    private static bool LooksLikeVersion(string? s) =>
+        !string.IsNullOrEmpty(s) &&
+        char.IsDigit(s[0]) &&
+        s.All(c => char.IsLetterOrDigit(c) || c == '.' || c == '-');
 
     private DependencyStatus CheckAbsoluteFile(Dependency dep)
     {

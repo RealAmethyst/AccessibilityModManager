@@ -41,6 +41,45 @@ public class DependencyCheckerTests : IDisposable
     }
 
     [Fact]
+    public async Task CheckAsync_FrameworkDep_ForwardSlashGameInstallPath_StillDetectsExistingFile()
+    {
+        // Regression: a gameInstallPath with forward slashes (from VDF parsing or a folder
+        // picker) used to fail the path-traversal check spuriously, returning Missing even
+        // when the dependency was present.
+        var melonLoaderDir = Path.Combine(_tempDir, "MelonLoader");
+        Directory.CreateDirectory(melonLoaderDir);
+
+        // Use forward slashes deliberately. The dep checker must normalize before comparing.
+        var forwardSlashPath = _tempDir.Replace('\\', '/');
+
+        var game = new GameInstall
+        {
+            Game = new GameDefinition
+            {
+                GameId = "test-game",
+                DisplayName = "Test Game",
+                Dependencies = new List<Dependency>
+                {
+                    new()
+                    {
+                        Id = "melonloader",
+                        Type = "framework",
+                        Check = new DependencyCheck { FilePath = "MelonLoader" }
+                    }
+                }
+            },
+            PluginId = "test-plugin",
+            InstallPath = forwardSlashPath,
+            IsValid = true
+        };
+
+        var results = await _checker.CheckAsync(game);
+
+        Assert.Single(results);
+        Assert.Equal(DependencyStatusKind.Installed, results[0].Status);
+    }
+
+    [Fact]
     public async Task CheckAsync_FrameworkDep_FileMissing_ReturnsMissing()
     {
         var game = MakeGameInstall(new Dependency
@@ -111,6 +150,50 @@ public class DependencyCheckerTests : IDisposable
 
         Assert.Single(results);
         Assert.Equal(DependencyStatusKind.Missing, results[0].Status);
+    }
+
+    [Fact]
+    public async Task CheckAsync_SystemDep_VersionTooLow_ReturnsIncompatible()
+    {
+        // Use a registry value we know exists with a string value, with an absurdly high MinVersion.
+        var game = MakeGameInstall(new Dependency
+        {
+            Id = "windows-version",
+            Type = "system",
+            MinVersion = "999.0.0",
+            Check = new DependencyCheck
+            {
+                RegistryKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                RegistryValue = "CurrentVersion"
+            }
+        });
+
+        var results = await _checker.CheckAsync(game);
+
+        Assert.Single(results);
+        // CurrentVersion is something like "6.3" — definitely less than 999.0.0.
+        Assert.Equal(DependencyStatusKind.Incompatible, results[0].Status);
+    }
+
+    [Fact]
+    public async Task CheckAsync_SystemDep_VersionMet_ReturnsInstalled()
+    {
+        var game = MakeGameInstall(new Dependency
+        {
+            Id = "windows-version",
+            Type = "system",
+            MinVersion = "1.0",
+            Check = new DependencyCheck
+            {
+                RegistryKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                RegistryValue = "CurrentVersion"
+            }
+        });
+
+        var results = await _checker.CheckAsync(game);
+
+        Assert.Single(results);
+        Assert.Equal(DependencyStatusKind.Installed, results[0].Status);
     }
 
     [Fact]

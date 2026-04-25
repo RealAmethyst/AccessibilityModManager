@@ -29,7 +29,13 @@ public sealed class PluginRepoClient : IPluginRepoClient
 
         _logger.Information("Fetching repo index for plugin {PluginId} from {Url}", plugin.Id, plugin.RepoIndexUrl);
 
-        var response = await _httpClient.GetAsync(plugin.RepoIndexUrl, ct);
+        // Cache-Control: no-cache asks caches in the path (notably the GitHub raw-URL CDN) to
+        // revalidate rather than serve a stale snapshot. Without this, a freshly-pushed
+        // index.json can be invisible to the manager for several minutes.
+        var request = new HttpRequestMessage(HttpMethod.Get, plugin.RepoIndexUrl);
+        request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
+        request.Headers.Pragma.ParseAdd("no-cache");
+        var response = await _httpClient.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
 
         var json = await response.Content.ReadAsStringAsync(ct);

@@ -1,39 +1,58 @@
-<UserControl x:Class="AccessibilityModManager.App.Views.GamesListView"
+<UserControl x:Class="AccessibilityModManager.App.Views.DeveloperDetailsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:AccessibilityModManager.App.ViewModels"
-             d:DataContext="{d:DesignInstance vm:GamesListViewModel}"
+             d:DataContext="{d:DesignInstance vm:DeveloperDetailsViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
-             AutomationProperties.Name="Mods">
+             AutomationProperties.Name="Developer details">
 
-    <Grid Margin="16,8,16,16">
+    <UserControl.InputBindings>
+        <!-- Escape navigates back, mirroring GameDetailsView. -->
+        <KeyBinding Key="Escape" Command="{Binding GoBackCommand}"/>
+    </UserControl.InputBindings>
+
+    <Grid Margin="16">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <ListView Grid.Row="0"
-                  x:Name="GamesList"
+        <!-- Header with back button -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button x:Name="BackButton"
+                    Content="Back"
+                    Command="{Binding GoBackCommand}"
+                    AutomationProperties.Name="Back"
+                    Margin="0,0,12,0"/>
+            <TextBlock Text="{Binding Author}"
+                       FontSize="24" FontWeight="Bold"
+                       AutomationProperties.HeadingLevel="Level1"
+                       VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- List of mods this developer makes (one per supported game) -->
+        <ListView Grid.Row="1"
+                  x:Name="ModsList"
                   ItemsSource="{Binding Mods}"
                   AutomationProperties.Name="Mods"
                   HorizontalContentAlignment="Stretch"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
             <ListView.InputBindings>
-                <!-- Pressing Enter on the focused mod opens that mod's details. -->
+                <!-- Pressing Enter on a mod opens the Game Details view for that game. -->
                 <KeyBinding Key="Enter"
-                            Command="{Binding OpenGameDetailsCommand}"
+                            Command="{Binding OpenModCommand}"
                             CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListView}}"/>
             </ListView.InputBindings>
             <ListView.ItemContainerStyle>
                 <Style TargetType="ListViewItem">
-                    <!-- Same announcement format as Developer Details: "ModName for GameName, status". -->
                     <Setter Property="AutomationProperties.Name" Value="{Binding AnnouncementText}"/>
                 </Style>
             </ListView.ItemContainerStyle>
             <ListView.ItemTemplate>
-                <DataTemplate DataType="{x:Type vm:ModItemViewModel}">
+                <DataTemplate DataType="{x:Type vm:DeveloperModItemViewModel}">
                     <Border Padding="12" BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
                             BorderThickness="0,0,0,1">
                         <Grid>
@@ -57,30 +76,13 @@
                                        Text="{Binding StatusText}"
                                        VerticalAlignment="Center"
                                        Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-
-                            <!-- Per-mod folder helpers. Multiple mods sharing a game produce
-                                 duplicate buttons — they all act on the same game folder. -->
-                            <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
-                                        Orientation="Horizontal" Margin="0,8,0,0">
-                                <Button Content="Open Folder"
-                                        Command="{Binding DataContext.OpenGameFolderCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                        CommandParameter="{Binding}"
-                                        Visibility="{Binding IsDetected, Converter={StaticResource BoolToVisConverter}}"
-                                        AutomationProperties.Name="{Binding GameDisplayName, StringFormat='{}{0} folder'}"
-                                        Margin="0,0,8,0"/>
-                                <Button Content="Browse for Folder"
-                                        Command="{Binding DataContext.BrowseForGameCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                        CommandParameter="{Binding}"
-                                        Visibility="{Binding IsDetected, Converter={StaticResource InvertBoolToVisConverter}}"
-                                        AutomationProperties.Name="{Binding GameDisplayName, StringFormat='Browse for {0}'}"/>
-                            </StackPanel>
                         </Grid>
                     </Border>
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
 
-        <TextBlock Grid.Row="1"
+        <TextBlock Grid.Row="2"
                    Text="{Binding StatusMessage}"
                    AutomationProperties.LiveSetting="Polite"
                    Margin="0,8,0,0"/>

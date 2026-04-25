@@ -3,9 +3,9 @@
 
 #define MyAppName "Accessibility Mod Manager"
 #define MyAppVersion "1.0.0"
-#define MyAppPublisher "Accessibility Mod Manager"
+#define MyAppPublisher "Amethyst"
 #define MyAppExeName "AccessibilityModManager.App.exe"
-#define MyAppURL "https://github.com/your-org/accessibility-mod-manager"
+#define MyAppURL "https://github.com/RealAmethyst/AccessibilityModManager"
 #define DotNetVersion "10.0"
 #define DotNetDownloadUrl "https://dotnet.microsoft.com/en-us/download/dotnet/10.0"
 
@@ -29,6 +29,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Source-available license — users must accept before installing.
+LicenseFile=..\LICENSE
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -47,10 +49,6 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
-
-[UninstallDelete]
-; Clean up logs on uninstall (user config/receipts in AppData are preserved)
-Type: filesandordirs; Name: "{localappdata}\AccessibilityModManager\logs"
 
 [Code]
 function IsDotNetInstalled(): Boolean;
@@ -78,5 +76,26 @@ begin
       ShellExec('open', '{#DotNetDownloadUrl}', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
     end;
     Result := False;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  AppDataPath: String;
+begin
+  // After the program files have been removed, optionally wipe user data.
+  if CurUninstallStep = usPostUninstall then
+  begin
+    AppDataPath := ExpandConstant('{localappdata}\AccessibilityModManager');
+    if DirExists(AppDataPath) then
+    begin
+      if MsgBox('Also remove all settings, plugin states, install receipts, and logs?' + #13#10 + #13#10 +
+               'Choose No to keep this data so a future reinstall picks up where you left off.' + #13#10 +
+               'Choose Yes to fully remove every trace of the application.',
+               mbConfirmation, MB_YESNO) = IDYES then
+      begin
+        DelTree(AppDataPath, True, True, True);
+      end;
+    end;
   end;
 end;

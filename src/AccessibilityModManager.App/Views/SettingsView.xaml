@@ -12,13 +12,8 @@
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="16,8,16,16" MaxWidth="600" HorizontalAlignment="Left">
 
-            <Label Content="Plugin Registry URL"
-                   Target="{Binding ElementName=RegistryUrlBox}"
-                   AutomationProperties.Name="Plugin registry URL"/>
-            <TextBox x:Name="RegistryUrlBox"
-                     Text="{Binding PluginRegistryUrl, UpdateSourceTrigger=PropertyChanged}"
-                     AutomationProperties.Name="Plugin registry URL"
-                     Margin="0,4,0,16"/>
+            <!-- The registry URL is hardcoded and not user-editable on purpose; it's the trust
+                 anchor for signature verification. -->
 
             <Label Content="Default Channel"
                    Target="{Binding ElementName=ChannelCombo}"

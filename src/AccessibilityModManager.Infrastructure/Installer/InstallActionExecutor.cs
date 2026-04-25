@@ -85,14 +85,10 @@ public sealed class InstallActionExecutor
         foreach (var sourceFile in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
         {
             var relativeToSource = Path.GetRelativePath(sourceDir, sourceFile);
-            var targetFile = Path.Combine(targetDir, relativeToSource);
+            var combined = Path.Combine(action.TargetDir, relativeToSource);
+            // ResolveSafe validates the combined relative path against gameDir consistently with CopyFile/ReplaceFile.
+            var targetFile = ResolveSafe(gameDir, combined, $"copyFolder entry '{relativeToSource}'");
             var relativeToGame = Path.GetRelativePath(gameDir, targetFile);
-
-            // Validate the resolved target stays within game dir
-            var fullTarget = Path.GetFullPath(targetFile);
-            var fullGameDir = Path.GetFullPath(gameDir);
-            if (!fullTarget.StartsWith(fullGameDir + Path.DirectorySeparatorChar))
-                throw new InvalidOperationException($"Path escape in copyFolder: {relativeToSource}");
 
             var existed = File.Exists(targetFile);
 

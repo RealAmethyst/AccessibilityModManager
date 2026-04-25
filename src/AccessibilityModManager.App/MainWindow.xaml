@@ -13,63 +13,74 @@
         AutomationProperties.Name="Accessibility Mod Manager">
 
     <Grid>
-        <!-- Main navigation layout -->
-        <Grid Visibility="{Binding IsDetailsOpen, Converter={StaticResource InvertBoolToVisConverter}}">
+        <!-- Main navigation layout — visible only when no overlay is shown. -->
+        <Grid Visibility="{Binding IsMainContentVisible, Converter={StaticResource BoolToVisConverter}}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
-            <!-- Tab headers only -->
+            <!-- Tab headers only. Mods is index 0 so it's the default landing tab. -->
             <TabControl x:Name="TabHeaders"
                         Grid.Row="0"
                         SelectedIndex="{Binding SelectedTabIndex}">
-                <TabItem Header="Plugins" AutomationProperties.Name="Plugins"/>
-                <TabItem Header="Games" AutomationProperties.Name="Games"/>
+                <TabItem Header="Mods" AutomationProperties.Name="Mods"/>
+                <TabItem Header="Developers" AutomationProperties.Name="Developers"/>
                 <TabItem Header="Settings" AutomationProperties.Name="Settings"/>
             </TabControl>
 
             <!-- Per-tab heading + action buttons (outside tab control) -->
             <StackPanel Grid.Row="1" Margin="16,12,16,0">
-                <!-- Plugins heading -->
+                <!-- Mods heading (tab index 0) -->
                 <StackPanel Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=0}">
-                    <TextBlock Text="Plugins" FontSize="24" FontWeight="Bold"
+                    <TextBlock Text="Mods" FontSize="24" FontWeight="Bold"
                                AutomationProperties.HeadingLevel="Level1" Margin="0,0,0,8"/>
-                    <Button Content="Refresh Plugins"
-                            Command="{Binding PluginsVm.LoadPluginsCommand}"
-                            AutomationProperties.Name="Refresh plugins"
-                            HorizontalAlignment="Left" Margin="0,0,0,4"/>
-                </StackPanel>
-                <!-- Games heading -->
-                <StackPanel Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=1}">
-                    <TextBlock Text="Games" FontSize="24" FontWeight="Bold"
-                               AutomationProperties.HeadingLevel="Level1" Margin="0,0,0,8"/>
-                    <Button Content="Refresh Games"
+                    <Button Content="Refresh Mods"
                             Command="{Binding GamesListVm.RefreshGamesCommand}"
-                            AutomationProperties.Name="Refresh games"
+                            AutomationProperties.Name="Refresh mods"
                             HorizontalAlignment="Left" Margin="0,0,0,4"/>
                 </StackPanel>
-                <!-- Settings heading -->
+                <!-- Developers heading (tab index 1) -->
+                <StackPanel Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=1}">
+                    <TextBlock Text="Developers" FontSize="24" FontWeight="Bold"
+                               AutomationProperties.HeadingLevel="Level1" Margin="0,0,0,8"/>
+                    <Button Content="Refresh Developers"
+                            Command="{Binding PluginsVm.LoadPluginsCommand}"
+                            AutomationProperties.Name="Refresh developers"
+                            HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                </StackPanel>
+                <!-- Settings heading (tab index 2) -->
                 <StackPanel Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=2}">
                     <TextBlock Text="Settings" FontSize="24" FontWeight="Bold"
                                AutomationProperties.HeadingLevel="Level1" Margin="0,0,0,8"/>
                 </StackPanel>
             </StackPanel>
 
-            <!-- Tab content -->
+            <!-- Tab content. Each view is wrapped in a Grid that keeps the inherited
+                 MainViewModel DataContext so the Visibility binding resolves correctly.
+                 The inner view sets its own DataContext to the relevant child VM. -->
             <Grid Grid.Row="2">
-                <views:PluginsView DataContext="{Binding PluginsVm}"
-                                   Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=0}"/>
-                <views:GamesListView DataContext="{Binding GamesListVm}"
-                                     Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=1}"/>
-                <views:SettingsView DataContext="{Binding SettingsVm}"
-                                    Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=2}"/>
+                <Grid Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=0}">
+                    <views:GamesListView x:Name="GamesTabView" DataContext="{Binding GamesListVm}"/>
+                </Grid>
+                <Grid Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=1}">
+                    <views:PluginsView x:Name="DevelopersTabView" DataContext="{Binding PluginsVm}"/>
+                </Grid>
+                <Grid Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=2}">
+                    <views:SettingsView DataContext="{Binding SettingsVm}"/>
+                </Grid>
             </Grid>
         </Grid>
 
-        <!-- Game details overlay -->
-        <views:GameDetailsView DataContext="{Binding GameDetailsVm}"
-                               Visibility="{Binding IsDetailsOpen, Converter={StaticResource BoolToVisConverter}}"/>
+        <!-- Developer details overlay — visible when its VM is set AND Game Details isn't on top. -->
+        <Grid Visibility="{Binding IsDeveloperDetailsVisible, Converter={StaticResource BoolToVisConverter}}">
+            <views:DeveloperDetailsView x:Name="DeveloperDetailsViewControl" DataContext="{Binding DeveloperDetailsVm}"/>
+        </Grid>
+
+        <!-- Game details overlay (top of the z-stack). -->
+        <Grid Visibility="{Binding IsDetailsOpen, Converter={StaticResource BoolToVisConverter}}">
+            <views:GameDetailsView DataContext="{Binding GameDetailsVm}"/>
+        </Grid>
     </Grid>
 </Window>

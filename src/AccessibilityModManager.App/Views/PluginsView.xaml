@@ -6,7 +6,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
-             AutomationProperties.Name="Plugins">
+             AutomationProperties.Name="Developers">
 
     <Grid Margin="16,8,16,16">
         <Grid.RowDefinitions>
@@ -15,10 +15,24 @@
         </Grid.RowDefinitions>
 
         <ListView Grid.Row="0"
+                  x:Name="DevelopersList"
                   ItemsSource="{Binding Plugins}"
-                  AutomationProperties.Name="Plugins"
+                  AutomationProperties.Name="Developers"
                   HorizontalContentAlignment="Stretch"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListView.InputBindings>
+                <!-- Pressing Enter on a developer opens their list of mods. -->
+                <KeyBinding Key="Enter"
+                            Command="{Binding OpenDeveloperDetailsCommand}"
+                            CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListView}}"/>
+            </ListView.InputBindings>
+            <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                    <!-- Without this, the screen reader announces the bound type's full name
+                         (e.g. "AccessibilityModManager.App.ViewModels.PluginItemViewModel"). -->
+                    <Setter Property="AutomationProperties.Name" Value="{Binding Author}"/>
+                </Style>
+            </ListView.ItemContainerStyle>
             <ListView.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:PluginItemViewModel}">
                     <Border Padding="12" BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
@@ -36,17 +50,14 @@
                             </Grid.RowDefinitions>
 
                             <TextBlock Grid.Row="0" Grid.Column="0"
-                                       FontSize="16" FontWeight="SemiBold">
-                                <Run Text="{Binding Name, Mode=OneWay}"/>
-                                <Run Text=" by " Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-                                <Run Text="{Binding Author, Mode=OneWay}" Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-                            </TextBlock>
+                                       Text="{Binding Author, Mode=OneWay}"
+                                       FontSize="16" FontWeight="SemiBold"/>
 
                             <CheckBox Grid.Row="0" Grid.Column="1"
                                       IsChecked="{Binding IsEnabled}"
                                       IsEnabled="{Binding IsBuiltIn, Converter={StaticResource InvertBoolConverter}}"
                                       Content="Enabled"
-                                      AutomationProperties.Name="{Binding Name, StringFormat='{}{0} enabled'}"
+                                      AutomationProperties.Name="{Binding Author, StringFormat='{}{0} enabled'}"
                                       VerticalAlignment="Center"/>
 
                             <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
@@ -62,10 +73,11 @@
                                         Command="{Binding OpenLinkCommand}"
                                         CommandParameter="{Binding Website}"
                                         Visibility="{Binding Website, Converter={StaticResource NullToCollapsedConverter}}"
-                                        AutomationProperties.Name="{Binding Name, StringFormat='{}{0} Website'}"
+                                        AutomationProperties.Name="{Binding Author, StringFormat='{}{0} website'}"
                                         Margin="0,0,8,0"
                                         Style="{StaticResource LinkButtonStyle}"/>
-                                <ItemsControl ItemsSource="{Binding Links}">
+                                <ItemsControl ItemsSource="{Binding Links}"
+                                              Visibility="{Binding Links.Count, Converter={StaticResource CountToVisConverter}}">
                                     <ItemsControl.ItemsPanel>
                                         <ItemsPanelTemplate>
                                             <StackPanel Orientation="Horizontal"/>
@@ -87,7 +99,7 @@
                             <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
                                        Margin="0,4,0,0"
                                        Visibility="{Binding IsBuiltIn, Converter={StaticResource BoolToVisConverter}}">
-                                <Run Text="Built-in plugin" FontStyle="Italic"/>
+                                <Run Text="Built-in developer" FontStyle="Italic"/>
                             </TextBlock>
                         </Grid>
                     </Border>

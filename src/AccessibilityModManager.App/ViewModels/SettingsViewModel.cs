@@ -14,9 +14,6 @@ public partial class SettingsViewModel : ObservableObject
     private readonly ILogger _logger;
 
     [ObservableProperty]
-    private string _pluginRegistryUrl = string.Empty;
-
-    [ObservableProperty]
     private string _defaultChannel = "stable";
 
     [ObservableProperty]
@@ -34,7 +31,6 @@ public partial class SettingsViewModel : ObservableObject
         try
         {
             var config = await _configService.LoadAsync();
-            PluginRegistryUrl = config.PluginRegistryUrl;
             DefaultChannel = config.DefaultChannel;
         }
         catch (Exception ex)
@@ -50,7 +46,6 @@ public partial class SettingsViewModel : ObservableObject
         try
         {
             var config = await _configService.LoadAsync();
-            config.PluginRegistryUrl = PluginRegistryUrl;
             config.DefaultChannel = DefaultChannel;
             await _configService.SaveAsync(config);
             StatusMessage = "Settings saved.";

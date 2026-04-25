@@ -37,6 +37,22 @@ dist/
 
 ## Claude
 CLAUDE.md
+.claude/
+
+## Internal session docs (operational notes, not for the public repo)
+BUILTIN_PLUGIN_QUESTIONS.md
+BUNDLE_MELONLOADER.md
+ENCRYPT_KEY_STEPS.md
+FIRST_RELEASE_STEPS.md
+NEXT_STEPS.md
+PUBLISH_BLINDDUEL_V1.8.0.md
+PUBLISH_BUNDLED_MODS.md
+PUBLISH_FIRST_MODS.md
+QUESTIONS_FOR_OLA.md
+REGISTRY_REPO_SETUP.md
+REGISTRY_SIGNING_GUIDE.md
+SHIP_v1.0.0.md
+SIGN_REGISTRY_V0.3.0.md
 
 ## OS
 Thumbs.db

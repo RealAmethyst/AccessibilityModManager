@@ -2,12 +2,18 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:AccessibilityModManager.App.ViewModels"
+             xmlns:controls="clr-namespace:AccessibilityModManager.App.Controls"
              d:DataContext="{d:DesignInstance vm:GameDetailsViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:sys="clr-namespace:System;assembly=System.Runtime"
              mc:Ignorable="d"
              AutomationProperties.Name="Game details">
+
+    <UserControl.InputBindings>
+        <!-- Escape navigates back to the games list, just like the Back button. -->
+        <KeyBinding Key="Escape" Command="{Binding GoBackCommand}"/>
+    </UserControl.InputBindings>
 
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -21,7 +27,8 @@
 
         <!-- Header with back button -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button Content="Back"
+            <Button x:Name="BackButton"
+                    Content="Back"
                     Command="{Binding GoBackCommand}"
                     AutomationProperties.Name="Back"
                     Margin="0,0,12,0"/>
@@ -31,19 +38,25 @@
                        VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Install path and folder button -->
+        <!-- Install path and per-game action buttons -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
             <TextBlock VerticalAlignment="Center" Margin="0,0,8,0">
                 <Run Text="Install path: "/>
                 <Run Text="{Binding InstallPath, Mode=OneWay}" FontWeight="SemiBold"/>
             </TextBlock>
+            <Button Content="Play"
+                    Command="{Binding PlayCommand}"
+                    Visibility="{Binding AnyModInstalled, Converter={StaticResource BoolToVisConverter}}"
+                    AutomationProperties.Name="{Binding DisplayName, StringFormat='Play {0}'}"
+                    Margin="0,0,8,0"/>
             <Button Content="Open Folder"
                     Command="{Binding OpenGameFolderCommand}"
                     AutomationProperties.Name="Open folder"/>
         </StackPanel>
 
-        <!-- Channel selector -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,12">
+        <!-- Channel selector — only shown when more than one channel exists across releases. -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,12"
+                    Visibility="{Binding HasMultipleChannels, Converter={StaticResource BoolToVisConverter}}">
             <Label Content="Channel"
                    Target="{Binding ElementName=ChannelSelector}"
                    VerticalAlignment="Center"/>
@@ -56,15 +69,22 @@
             </ComboBox>
         </StackPanel>
 
-        <!-- Mod releases grouped by plugin -->
-        <ListView Grid.Row="3"
-                  ItemsSource="{Binding ModGroups}"
-                  AutomationProperties.Name="Available mods"
-                  HorizontalContentAlignment="Stretch"
-                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-            <ListView.ItemTemplate>
+        <!-- Mod release(s) for this game. FlatItemsControl is an ItemsControl that doesn't
+             announce itself as a "list" to screen readers — the default ItemsControlAutomationPeer
+             reports List as its role and NVDA reads it even when there's only one item. -->
+        <controls:FlatItemsControl Grid.Row="3"
+                                   x:Name="ModGroupsList"
+                                   ItemsSource="{Binding ModGroups}">
+            <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:ModReleaseGroup}">
-                    <Border Padding="12" Margin="0,0,0,8"
+                    <!-- ContentControl is a Control so it supports IsTabStop. Focusable + not
+                         a Tab stop = the OperationCompleted handler can programmatically focus
+                         it to announce the new state, while Tab skips straight to the controls
+                         inside (version selector, action buttons). -->
+                    <ContentControl Focusable="True" IsTabStop="False"
+                                    AutomationProperties.Name="{Binding AnnouncementText}"
+                                    Margin="0,0,0,8">
+                    <Border Padding="12"
                             BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
                             BorderThickness="1" CornerRadius="4">
                         <Grid>
@@ -75,7 +95,8 @@
                             </Grid.RowDefinitions>
 
                             <TextBlock Grid.Row="0" FontSize="16" FontWeight="SemiBold">
-                                <Run Text="Plugin: "/>
+                                <Run Text="{Binding ModName, Mode=OneWay}"/>
+                                <Run Text=" by "/>
                                 <Run Text="{Binding PluginId, Mode=OneWay}"/>
                                 <Run Text=" — "/>
                                 <Run Text="{Binding InstalledVersion, Mode=OneWay, TargetNullValue='not installed',
@@ -102,35 +123,45 @@
                                         Command="{Binding DataContext.InstallCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                         CommandParameter="{Binding}"
                                         Visibility="{Binding IsInstalled, Converter={StaticResource InvertBoolToVisConverter}}"
-                                        AutomationProperties.Name="{Binding PluginId, StringFormat='Install {0}'}"
+                                        AutomationProperties.Name="{Binding InstallButtonName}"
                                         Margin="0,0,8,0"/>
                                 <Button Content="Update"
                                         Command="{Binding DataContext.UpdateCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                         CommandParameter="{Binding}"
                                         Visibility="{Binding CanUpdate, Converter={StaticResource BoolToVisConverter}}"
-                                        AutomationProperties.Name="{Binding PluginId, StringFormat='Update {0}'}"
+                                        AutomationProperties.Name="{Binding UpdateButtonName}"
                                         Margin="0,0,8,0"/>
                                 <Button Content="Uninstall"
                                         Command="{Binding DataContext.UninstallCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                         CommandParameter="{Binding}"
                                         Visibility="{Binding IsInstalled, Converter={StaticResource BoolToVisConverter}}"
-                                        AutomationProperties.Name="{Binding PluginId, StringFormat='Uninstall {0}'}"/>
+                                        AutomationProperties.Name="{Binding UninstallButtonName}"/>
                             </StackPanel>
                         </Grid>
                     </Border>
+                    </ContentControl>
                 </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
+            </ItemsControl.ItemTemplate>
+        </controls:FlatItemsControl>
 
         <!-- Dependencies -->
         <Expander Grid.Row="4" Header="Dependencies"
                   AutomationProperties.Name="Dependencies"
                   Margin="0,8,0,0"
                   Visibility="{Binding Dependencies.Count, Converter={StaticResource CountToVisConverter}}">
-            <ItemsControl ItemsSource="{Binding Dependencies}" Margin="8">
+            <StackPanel Margin="8">
+                <Button Content="Recheck"
+                        Command="{Binding RecheckDependenciesCommand}"
+                        AutomationProperties.Name="Recheck dependencies"
+                        HorizontalAlignment="Left"
+                        Margin="0,0,0,8"/>
+                <ItemsControl ItemsSource="{Binding Dependencies}">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate DataType="{x:Type vm:DependencyItemViewModel}">
-                        <StackPanel Orientation="Horizontal" Margin="0,4">
+                        <!-- AutomationProperties.Name on the StackPanel root so the screen reader
+                             announces "<dep id>, <status>" instead of the type's full name. -->
+                        <StackPanel Orientation="Horizontal" Margin="0,4"
+                                    AutomationProperties.Name="{Binding AnnouncementText}">
                             <TextBlock VerticalAlignment="Center" MinWidth="200">
                                 <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/>
                                 <Run Text=" — "/>
@@ -144,11 +175,13 @@
                         </StackPanel>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
-            </ItemsControl>
+                </ItemsControl>
+            </StackPanel>
         </Expander>
 
         <!-- Status -->
         <TextBlock Grid.Row="5"
+                   x:Name="StatusMessageBlock"
                    Text="{Binding StatusMessage}"
                    AutomationProperties.LiveSetting="Assertive"
                    Margin="0,8,0,0"/>
