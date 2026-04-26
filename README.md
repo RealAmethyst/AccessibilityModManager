@@ -36,8 +36,8 @@ The manager refuses to do anything that isn't verifiable end-to-end:
 ## Getting your plugin listed
 
 1. Make a dedicated GitHub repo for your plugin index (one repo per plugin author works well — it can be separate from the repos that hold your actual mod code).
-2. Open an issue on the registry repo asking to be listed. Include your plugin id, your display name, and the URL to your plugin index repo.
-3. Once the registry maintainer signs your entry into the registry, the manager picks it up automatically on the next refresh.
+2. Open the AuthorTool on that project. The tool checks the public registry on load and shows a banner with your status: listed, not listed, or unreachable. If you're not listed yet, the **Request listing** button opens a pre-filled GitHub issue on the registry repo with your plugin id, display name, and repo URL ready to submit — no manual issue-writing needed.
+3. Once the registry maintainer signs your entry into the registry, the manager picks it up automatically on the next refresh, and the AuthorTool's banner flips to "listed".
 
 ## The AuthorTool
 
@@ -47,7 +47,7 @@ What the tool gives you:
 
 - **Edit your plugin index** — add games, fill in display names, descriptions, tags, languages, dependencies. The tool writes a valid `index.json` for you so you never have to hand-edit JSON.
 - **Build wrapped ZIPs** — point the tool at a folder containing your mod's files. It generates the manager's `manifest.json`, validates lifecycle scripts, and produces a SHA256-stable ZIP ready to upload.
-- **Upload releases to your mod's own GitHub repo** — the tool uses `gh` to create a GitHub release on your mod's repo, attach the wrapped ZIP as an asset, and write the resulting public URL + SHA256 back into your plugin index. This is intentional: your mod stays on its own repo (where your users already look for it), and your plugin index simply points at those release assets. One click does the asset upload AND the index commit + push, so the SHA256 in your plugin index always matches the asset on disk.
+- **Upload releases to your mod's own GitHub repo** — the tool uses `gh` to create a GitHub release on your mod's repo and attach the wrapped ZIP as an asset, then writes the resulting public URL + SHA256 back into your plugin index. This is intentional: your mod stays on its own repo (where your users already look for it), and your plugin index simply points at those release assets. The plugin index repo itself is *not* released — it's just a regular `git commit` + `git push` of the updated `index.json`. One click does the asset upload, the index commit, and the index push together, so the SHA256 in your plugin index always matches the asset that's live on GitHub.
 - **Lifecycle script editor** — fill in the executable path, the what / why / modifies descriptions, and whether the script needs admin. The tool validates that each declared script is actually bundled in your source folder before producing the ZIP.
 
 ## Releasing a new version
@@ -56,8 +56,8 @@ What the tool gives you:
 2. Pick the game, click **Add release**.
 3. Type the version, pick the GitHub repo for the mod, click **Build…**
 4. Point at the source folder containing your mod's files; the tool wraps it into `{game}-v{version}-amm.zip`.
-5. Click **Upload and save**. The tool uploads the asset to the mod's GitHub release page and stages the new release in your plugin index.
-6. Confirm the **commit and push** prompt — your plugin index gets committed and pushed to GitHub in the same gesture.
+5. Click **Upload and save**. The tool creates / updates the GitHub release on the mod's repo, attaches the wrapped ZIP as an asset, and stages the new entry in your plugin index.
+6. Confirm the **commit and push** prompt — your `index.json` gets committed and pushed to your plugin-index repo (a normal commit, not a GitHub release).
 7. Users see the update on their next manager refresh.
 
 ## Building from source
