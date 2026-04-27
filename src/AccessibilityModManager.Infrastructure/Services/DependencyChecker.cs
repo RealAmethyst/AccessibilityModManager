@@ -45,7 +45,10 @@ public sealed class DependencyChecker : IDependencyChecker
                 }
             };
 
-            _logger.Debug("Dependency {DepId} ({Type}): {Status}", dep.Id, dep.Type, status.Status);
+            _logger.Information("Dependency {DepId} ({Type}, check={CheckPath}): {Status} ({Details})",
+                dep.Id, dep.Type,
+                dep.Check?.FilePath ?? dep.Check?.RegistryKey ?? "(none)",
+                status.Status, status.Details ?? "ok");
             results.Add(status);
         }
 

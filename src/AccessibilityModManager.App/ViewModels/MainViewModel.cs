@@ -1,11 +1,34 @@
+using System.Reflection;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Serilog;
 
 namespace AccessibilityModManager.App.ViewModels;
 
 public partial class MainViewModel : ObservableObject
 {
+    private readonly UpdateChecker _updateChecker;
+    private readonly ILogger _logger;
+    private readonly Action<string, string> _showInfoDialog;
+    private readonly Func<string, string, bool> _confirmDialog;
+    private readonly Action<UpdateInfo> _runUpdate;
+
+    /// <summary>
+    /// Pops the modal Update Available dialog. Set by App.xaml.cs at construction time.
+    /// Receives the available update info + the current app version so the dialog can render
+    /// the headline ("Version X is available, you're on Y") and the changelog.
+    /// </summary>
+    private readonly Action<UpdateInfo, Version>? _showUpdateDialog;
+
+    [ObservableProperty]
+    private UpdateInfo? _availableUpdate;
+
+    public string? AvailableUpdateText =>
+        AvailableUpdate is not null
+            ? $"Version {AvailableUpdate.Version} is available. You're on {GetCurrentVersion()}."
+            : null;
     [ObservableProperty]
     private int _selectedTabIndex;
 
@@ -47,34 +70,69 @@ public partial class MainViewModel : ObservableObject
     public MainViewModel(
         PluginsViewModel pluginsVm,
         GamesListViewModel gamesListVm,
-        SettingsViewModel settingsVm)
+        SettingsViewModel settingsVm,
+        UpdateChecker updateChecker,
+        ILogger logger,
+        Action<string, string> showInfoDialog,
+        Func<string, string, bool> confirmDialog,
+        Action<UpdateInfo> runUpdate,
+        Action<UpdateInfo, Version>? showUpdateDialog = null)
     {
         PluginsVm = pluginsVm;
         GamesListVm = gamesListVm;
         SettingsVm = settingsVm;
-
-        // When a plugin is enabled/disabled, the active set of games changes — invalidate the
-        // Games cache so the user doesn't have to remember to refresh. If they're currently on
-        // the Games tab, refresh immediately.
-        PluginsVm.PluginEnabledChanged += OnPluginEnabledChanged;
+        _updateChecker = updateChecker;
+        _logger = logger;
+        _showInfoDialog = showInfoDialog;
+        _confirmDialog = confirmDialog;
+        _runUpdate = runUpdate;
+        _showUpdateDialog = showUpdateDialog;
     }
 
-    private void OnPluginEnabledChanged()
+    private static Version GetCurrentVersion()
     {
-        // The Mods tab is index 0 — its content depends on which developers are enabled, so
-        // toggling a developer invalidates the cache and (if currently visible) re-runs detection.
-        _gamesLoaded = false;
-        if (SelectedTabIndex == 0)
+        var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+        return asm.GetName().Version ?? new Version(0, 0, 0, 0);
+    }
+
+    private async Task CheckForUpdateAsync()
+    {
+        try
         {
-            _ = LoadCurrentTabAsync();
+            var info = await _updateChecker.CheckForUpdateAsync(GetCurrentVersion());
+            if (info != null)
+            {
+                AvailableUpdate = info;
+                OnPropertyChanged(nameof(AvailableUpdateText));
+
+                // Pop the modal Update Available dialog instead of leaving an inline banner
+                // for the user to discover. The dialog kicks off the install when the user
+                // clicks Install; otherwise it just closes and we forget about it for the
+                // session.
+                _showUpdateDialog?.Invoke(info, GetCurrentVersion());
+            }
         }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Background update check failed");
+        }
+    }
+
+    [RelayCommand]
+    private void InstallUpdate()
+    {
+        if (AvailableUpdate is null) return;
+        _runUpdate(AvailableUpdate);
     }
 
     [RelayCommand]
     private async Task InitializeAsync()
     {
         // Default tab (index 0) is Mods — load it on startup.
+        // Kick off the update check in parallel; it's best-effort and shouldn't block the UI.
+        var checkTask = CheckForUpdateAsync();
         await LoadCurrentTabAsync();
+        await checkTask;
     }
 
     partial void OnSelectedTabIndexChanged(int value)

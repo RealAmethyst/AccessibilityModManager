@@ -1,0 +1,214 @@
+<UserControl x:Class="AccessibilityModManager.AuthorTool.Views.RegistryAdminView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance vm:RegistryAdminViewModel}">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,12">
+            <Button DockPanel.Dock="Left"
+                    Content="Back"
+                    Command="{Binding GoBackCommand}"
+                    AutomationProperties.Name="Back to project picker"
+                    Margin="0,0,12,0"/>
+            <TextBlock Text="Registry admin"
+                       FontSize="22" FontWeight="Bold"
+                       AutomationProperties.HeadingLevel="Level1"
+                       VerticalAlignment="Center"/>
+        </DockPanel>
+
+        <!-- Repo + key pickers -->
+        <Grid Grid.Row="1" Margin="0,0,0,8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="160"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Registry repo:" VerticalAlignment="Center"/>
+            <TextBox Grid.Row="0" Grid.Column="1"
+                     Text="{Binding RegistryRepoPath, Mode=OneWay}"
+                     IsReadOnly="True"
+                     AutomationProperties.Name="Local registry repo path (auto-cloned)"/>
+            <Button Grid.Row="0" Grid.Column="2"
+                    Content="Refresh"
+                    Command="{Binding RefreshRepoCommand}"
+                    AutomationProperties.Name="Re-clone or pull the registry repo"
+                    Margin="8,0,0,0"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Private key (PEM):" VerticalAlignment="Center" Margin="0,8,0,0"/>
+            <TextBox Grid.Row="1" Grid.Column="1"
+                     Text="{Binding PrivateKeyPath, Mode=OneWay}"
+                     IsReadOnly="True"
+                     AutomationProperties.Name="Private key path"
+                     Margin="0,8,0,0"/>
+            <Button Grid.Row="1" Grid.Column="2"
+                    Content="Pick..."
+                    Command="{Binding PickPrivateKeyCommand}"
+                    AutomationProperties.Name="Pick private key"
+                    Margin="8,8,0,0"/>
+        </Grid>
+
+        <!-- Issues -->
+        <DockPanel Grid.Row="2" LastChildFill="False" Margin="0,8,0,4">
+            <Button DockPanel.Dock="Right"
+                    Content="Refresh issues"
+                    Command="{Binding RefreshIssuesCommand}"
+                    AutomationProperties.Name="Refresh registry issue list"/>
+            <TextBlock Text="Open issues on the registry repo"
+                       FontSize="16" FontWeight="SemiBold"
+                       AutomationProperties.HeadingLevel="Level2"
+                       VerticalAlignment="Center"/>
+        </DockPanel>
+
+        <ListBox Grid.Row="3"
+                 x:Name="IssuesList"
+                 ItemsSource="{Binding Issues}"
+                 SelectedItem="{Binding SelectedIssue}"
+                 AutomationProperties.Name="Open issues on the registry repo"
+                 MinHeight="120"
+                 MaxHeight="240"
+                 Margin="0,0,0,8">
+            <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem">
+                    <Setter Property="AutomationProperties.Name">
+                        <Setter.Value>
+                            <MultiBinding StringFormat="{}{0}, {1}, {2}">
+                                <Binding Path="DisplayTitle"/>
+                                <Binding Path="DisplaySubtitle"/>
+                                <Binding Path="ParseStatusText"/>
+                            </MultiBinding>
+                        </Setter.Value>
+                    </Setter>
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                </Style>
+            </ListBox.ItemContainerStyle>
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Grid.Column="0">
+                            <Run Text="{Binding DisplayTitle, Mode=OneWay}" FontWeight="SemiBold"/>
+                        </TextBlock>
+                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                   Text="{Binding DisplaySubtitle}"
+                                   FontSize="11" Foreground="#888"/>
+                        <TextBlock Grid.Row="2" Grid.Column="0"
+                                   FontSize="11" TextWrapping="Wrap">
+                            <Run Text="{Binding ParseStatusText, Mode=OneWay}" Foreground="#444"/>
+                            <LineBreak/>
+                            <Run Text="{Binding ValidationStatusText, Mode=OneWay}" Foreground="#666"/>
+                        </TextBlock>
+                        <StackPanel Grid.Row="0" Grid.RowSpan="3" Grid.Column="1"
+                                    Orientation="Horizontal" VerticalAlignment="Top">
+                            <Button Content="Accept and merge"
+                                    Command="{Binding DataContext.AcceptAndMergeCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                    CommandParameter="{Binding}"
+                                    IsEnabled="{Binding CanAccept}"
+                                    AutomationProperties.Name="Accept this issue and merge into the registry"
+                                    Margin="0,0,4,0"/>
+                            <Button Content="Close (re-submit)"
+                                    Command="{Binding DataContext.RejectUnparseableCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                    CommandParameter="{Binding}"
+                                    AutomationProperties.Name="Close issue with re-submit comment"
+                                    Margin="0,0,4,0"/>
+                            <Button Content="Open"
+                                    Command="{Binding DataContext.OpenIssueCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                    CommandParameter="{Binding}"
+                                    AutomationProperties.Name="Open this issue in browser"/>
+                        </StackPanel>
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <!-- JSON editor -->
+        <Grid Grid.Row="4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <DockPanel Grid.Row="0" LastChildFill="False" Margin="0,0,0,4">
+                <Button DockPanel.Dock="Right"
+                        Content="Save JSON"
+                        Command="{Binding SaveJsonCommand}"
+                        AutomationProperties.Name="Save edited registry JSON"/>
+                <TextBlock VerticalAlignment="Center">
+                    <Run Text="plugin-registry.json " FontWeight="SemiBold"/>
+                    <Run Text="(unsaved)" Foreground="#B00"
+                         d:Text="(unsaved)"/>
+                </TextBlock>
+            </DockPanel>
+
+            <TextBox Grid.Row="1"
+                     Text="{Binding RegistryJsonContent, UpdateSourceTrigger=PropertyChanged}"
+                     AcceptsReturn="True"
+                     AcceptsTab="False"
+                     TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     AutomationProperties.Name="Registry JSON editor"
+                     MinHeight="180"/>
+        </Grid>
+
+        <!-- Password + actions -->
+        <Grid Grid.Row="5" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="160"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Key password:" VerticalAlignment="Center"/>
+            <PasswordBox Grid.Column="1"
+                         x:Name="PasswordBox"
+                         AutomationProperties.Name="Private key password"/>
+        </Grid>
+
+        <DockPanel Grid.Row="6" Margin="0,12,0,0">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="Sign"
+                        Click="Sign_Click"
+                        AutomationProperties.Name="Sign the registry"
+                        Margin="0,0,8,0" MinWidth="80"/>
+                <Button Content="Commit + push"
+                        Command="{Binding CommitAndPushCommand}"
+                        AutomationProperties.Name="Commit and push registry changes"
+                        Margin="0,0,8,0" MinWidth="120"/>
+                <Button Content="Publish release"
+                        Command="{Binding PublishReleaseCommand}"
+                        AutomationProperties.Name="Publish a new GitHub release with the signed registry"
+                        MinWidth="130"/>
+            </StackPanel>
+            <TextBlock Text="{Binding StatusMessage}"
+                       AutomationProperties.LiveSetting="Polite"
+                       TextWrapping="Wrap"
+                       VerticalAlignment="Center"/>
+        </DockPanel>
+    </Grid>
+</UserControl>

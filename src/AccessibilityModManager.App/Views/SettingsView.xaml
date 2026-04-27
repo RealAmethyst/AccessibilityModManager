@@ -36,6 +36,32 @@
                         AutomationProperties.Name="Open logs"/>
             </StackPanel>
 
+            <!-- Patreon section. Some mod authors offer beta builds to their patrons; sign
+                 in here so the manager can read your tier membership and unlock those
+                 builds. The manager only ever reads memberships — no posting, no profile
+                 access beyond your name + email. -->
+            <TextBlock Text="Patreon"
+                       FontSize="16" FontWeight="SemiBold"
+                       AutomationProperties.HeadingLevel="Level2"
+                       Margin="0,8,0,4"/>
+            <TextBlock Text="{Binding PatreonStatusText}"
+                       TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite"
+                       Margin="0,0,0,8"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
+                <Button Content="{Binding SignInButtonText}"
+                        Command="{Binding SignInOrOutOfPatreonCommand}"
+                        IsEnabled="{Binding PatreonBusy, Converter={StaticResource InvertBoolConverter}}"
+                        AutomationProperties.Name="{Binding SignInButtonText}"
+                        Margin="0,0,8,0"
+                        MinWidth="160"/>
+                <Button Content="Refresh status"
+                        Command="{Binding RefreshPatreonStatusCommand}"
+                        IsEnabled="{Binding IsSignedInToPatreon}"
+                        Visibility="{Binding IsSignedInToPatreon, Converter={StaticResource BoolToVisConverter}}"
+                        AutomationProperties.Name="Refresh Patreon entitlement status"/>
+            </StackPanel>
+
             <TextBlock Text="{Binding StatusMessage}"
                        AutomationProperties.LiveSetting="Polite"/>
         </StackPanel>

@@ -1,0 +1,148 @@
+<UserControl x:Class="AccessibilityModManager.AuthorTool.Views.LifecycleScriptEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance vm:LifecycleScriptEditorViewModel}">
+
+    <Border BorderBrush="#CCCCCC" BorderThickness="1" Padding="12" CornerRadius="4">
+        <StackPanel>
+            <TextBlock Text="{Binding HookLabel}"
+                       FontSize="14"
+                       FontWeight="Bold"
+                       AutomationProperties.HeadingLevel="Level3"
+                       Margin="0,0,0,4"/>
+
+            <CheckBox Content="Include this script in the manifest"
+                      IsChecked="{Binding IsEnabled}"
+                      AutomationProperties.Name="{Binding HookLabel, StringFormat=Include {0} script in the manifest}"
+                      Margin="0,0,0,8"/>
+
+            <Grid IsEnabled="{Binding IsEnabled}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Script file:" VerticalAlignment="Center" Margin="0,4"/>
+                <Grid Grid.Row="0" Grid.Column="1" Margin="0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="{Binding PickedFileDisplay}"
+                               AutomationProperties.Name="Picked script file"
+                               AutomationProperties.LiveSetting="Polite"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"
+                               Margin="0,0,8,0"/>
+                    <Button Grid.Column="1"
+                            Content="Browse..."
+                            Click="BrowseScript_Click"
+                            AutomationProperties.Name="Browse for script file"
+                            Padding="12,4"/>
+                </Grid>
+
+                <TextBlock Grid.Row="1" Grid.Column="1"
+                           Text="{Binding SourcePathDisplay}"
+                           AutomationProperties.LiveSetting="Polite"
+                           Foreground="#666"
+                           FontStyle="Italic"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="What it does:" VerticalAlignment="Top" Margin="0,8"/>
+                <TextBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding What, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="40"
+                         AutomationProperties.Name="What the script does"
+                         AutomationProperties.HelpText="Plain language: tell the user what this script does, e.g. Patches version.dll for compatibility."
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Why it's needed:" VerticalAlignment="Top" Margin="0,8"/>
+                <TextBox Grid.Row="3" Grid.Column="1"
+                         Text="{Binding Why, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="40"
+                         AutomationProperties.Name="Why this script is needed"
+                         AutomationProperties.HelpText="Explain the user-visible reason — e.g. without this the mod cannot intercept the launcher."
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="What it modifies:" VerticalAlignment="Top" Margin="0,8"/>
+                <TextBox Grid.Row="4" Grid.Column="1"
+                         Text="{Binding Modifies, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="40"
+                         AutomationProperties.Name="What the script modifies"
+                         AutomationProperties.HelpText="Be concrete: which files, registry keys, settings. The user sees this on the warning dialog."
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Needs admin:" VerticalAlignment="Center" Margin="0,4"/>
+                <CheckBox Grid.Row="5" Grid.Column="1"
+                          IsChecked="{Binding NeedsAdmin}"
+                          Content="Script requires administrator rights (UAC prompt will be shown)"
+                          AutomationProperties.HelpText="Only check this when the script truly needs admin — flag is shown to the user as a warning."
+                          AutomationProperties.Name="Needs administrator rights"
+                          Margin="0,8"/>
+
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Failure is fatal:" VerticalAlignment="Center" Margin="0,4"/>
+                <CheckBox Grid.Row="6" Grid.Column="1"
+                          IsChecked="{Binding FailureFatal}"
+                          Content="If the script fails, abort the install and roll back"
+                          AutomationProperties.HelpText="Recommended on for pre/post install. When off, a non-zero exit only logs and the install continues."
+                          AutomationProperties.Name="Failure is fatal"
+                          Margin="0,8"/>
+
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="Run from game folder:" VerticalAlignment="Center" Margin="0,4"/>
+                <CheckBox Grid.Row="7" Grid.Column="1"
+                          IsChecked="{Binding RunFromGameFolder}"
+                          Content="Copy the script into the game folder before running, then remove it"
+                          AutomationProperties.HelpText="Turn this on for scripts that read or write files using their own location (e.g. a patcher that opens version.dll next to itself). The manager copies the script into the game folder, runs it, and removes it afterward. Combine with 'Install to game folder' below to keep the script after the run."
+                          AutomationProperties.Name="Run from game folder"
+                          Margin="0,8"/>
+
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="Install to game folder:" VerticalAlignment="Center" Margin="0,4"/>
+                <CheckBox Grid.Row="8" Grid.Column="1"
+                          IsChecked="{Binding InstallToGameFolder}"
+                          Content="Also copy this script to the game folder so it sticks around after install"
+                          AutomationProperties.HelpText="Off by default. Scripts run from a temp folder during install and are not installed to the game folder unless you check this. Turn on for scripts users may want to re-run later or that other game files reference relatively."
+                          AutomationProperties.Name="Install to game folder"
+                          Margin="0,8"/>
+
+                <TextBlock Grid.Row="9" Grid.Column="0" Text="Run on updates:" VerticalAlignment="Center" Margin="0,4"/>
+                <CheckBox Grid.Row="9" Grid.Column="1"
+                          IsChecked="{Binding RunOnUpdate}"
+                          Content="Also run this script every time the mod is updated"
+                          AutomationProperties.HelpText="Off by default — script only runs on the first install. Turn on for scripts that need to re-apply when the mod's installed files change, e.g. a version.dll patcher. Has no effect on post-uninstall hooks."
+                          AutomationProperties.Name="Run on mod updates"
+                          Margin="0,8"/>
+            </Grid>
+
+            <TextBlock Margin="0,12,0,0"
+                       TextWrapping="Wrap"
+                       Foreground="#666"
+                       FontStyle="Italic">
+                <Run Text="How this works: by default, scripts run from a temp folder and never touch the game folder. Use 'Run from game folder' for scripts that locate their own files relative to themselves (most installers / patchers). Use 'Install to game folder' to keep the script around after the run. By default scripts fire only on first install — check 'Run on updates' to re-fire them every update. Picked file paths are remembered per game across AuthorTool sessions."/>
+            </TextBlock>
+        </StackPanel>
+    </Border>
+</UserControl>

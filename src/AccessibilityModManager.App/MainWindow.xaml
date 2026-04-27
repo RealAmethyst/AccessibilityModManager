@@ -18,20 +18,26 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
+            <!-- Update notification is now a modal dialog (UpdateAvailableDialog) that pops
+                 on launch when an update is found. No inline banner here — Row 0 is reserved
+                 as a no-op spacer to keep the rest of the grid layout the same. -->
+
+
             <!-- Tab headers only. Mods is index 0 so it's the default landing tab. -->
             <TabControl x:Name="TabHeaders"
-                        Grid.Row="0"
+                        Grid.Row="1"
                         SelectedIndex="{Binding SelectedTabIndex}">
                 <TabItem Header="Mods" AutomationProperties.Name="Mods"/>
-                <TabItem Header="Developers" AutomationProperties.Name="Developers"/>
+                <TabItem Header="Authors" AutomationProperties.Name="Authors"/>
                 <TabItem Header="Settings" AutomationProperties.Name="Settings"/>
             </TabControl>
 
             <!-- Per-tab heading + action buttons (outside tab control) -->
-            <StackPanel Grid.Row="1" Margin="16,12,16,0">
+            <StackPanel Grid.Row="2" Margin="16,12,16,0">
                 <!-- Mods heading (tab index 0) -->
                 <StackPanel Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=0}">
                     <TextBlock Text="Mods" FontSize="24" FontWeight="Bold"
@@ -41,13 +47,13 @@
                             AutomationProperties.Name="Refresh mods"
                             HorizontalAlignment="Left" Margin="0,0,0,4"/>
                 </StackPanel>
-                <!-- Developers heading (tab index 1) -->
+                <!-- Authors heading (tab index 1) -->
                 <StackPanel Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=1}">
-                    <TextBlock Text="Developers" FontSize="24" FontWeight="Bold"
+                    <TextBlock Text="Authors" FontSize="24" FontWeight="Bold"
                                AutomationProperties.HeadingLevel="Level1" Margin="0,0,0,8"/>
-                    <Button Content="Refresh Developers"
+                    <Button Content="Refresh Authors"
                             Command="{Binding PluginsVm.LoadPluginsCommand}"
-                            AutomationProperties.Name="Refresh developers"
+                            AutomationProperties.Name="Refresh authors"
                             HorizontalAlignment="Left" Margin="0,0,0,4"/>
                 </StackPanel>
                 <!-- Settings heading (tab index 2) -->
@@ -60,7 +66,7 @@
             <!-- Tab content. Each view is wrapped in a Grid that keeps the inherited
                  MainViewModel DataContext so the Visibility binding resolves correctly.
                  The inner view sets its own DataContext to the relevant child VM. -->
-            <Grid Grid.Row="2">
+            <Grid Grid.Row="3">
                 <Grid Visibility="{Binding SelectedTabIndex, Converter={StaticResource TabIndexToVisConverter}, ConverterParameter=0}">
                     <views:GamesListView x:Name="GamesTabView" DataContext="{Binding GamesListVm}"/>
                 </Grid>

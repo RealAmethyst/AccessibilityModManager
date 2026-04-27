@@ -92,6 +92,7 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <TextBlock Grid.Row="0" FontSize="16" FontWeight="SemiBold">
@@ -104,8 +105,29 @@
                                      Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
                             </TextBlock>
 
+                            <!-- Mod description (only when set). TextBox + input-blocking is
+                                 the same pattern as ChangelogDialog: NVDA stays in focus mode
+                                 so the user can arrow through the text, but the box can't
+                                 actually be edited. Plain TextBlock would be invisible to the
+                                 screen reader because the surrounding ContentControl's
+                                 AutomationProperties.Name overrides nested elements. -->
+                            <TextBox Grid.Row="1"
+                                     Text="{Binding Description, Mode=OneWay}"
+                                     IsReadOnly="False"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     Padding="0"
+                                     Margin="0,8,0,0"
+                                     Loaded="DescriptionBox_Loaded"
+                                     PreviewTextInput="DescriptionBox_PreviewTextInput"
+                                     PreviewKeyDown="DescriptionBox_PreviewKeyDown"
+                                     AutomationProperties.Name="Mod description"
+                                     Visibility="{Binding HasDescription, Converter={StaticResource BoolToVisConverter}}"/>
+
                             <!-- Version selector -->
-                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
                                 <Label Content="Version"
                                        Target="{Binding ElementName=VersionCombo}"
                                        VerticalAlignment="Center"/>
@@ -118,7 +140,7 @@
                             </StackPanel>
 
                             <!-- Action buttons -->
-                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+                            <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
                                 <Button Content="Install"
                                         Command="{Binding DataContext.InstallCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                         CommandParameter="{Binding}"
@@ -135,7 +157,13 @@
                                         Command="{Binding DataContext.UninstallCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                         CommandParameter="{Binding}"
                                         Visibility="{Binding IsInstalled, Converter={StaticResource BoolToVisConverter}}"
-                                        AutomationProperties.Name="{Binding UninstallButtonName}"/>
+                                        AutomationProperties.Name="{Binding UninstallButtonName}"
+                                        Margin="0,0,8,0"/>
+                                <Button Content="View changelog"
+                                        Command="{Binding DataContext.ViewChangelogCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                        CommandParameter="{Binding}"
+                                        Visibility="{Binding HasChangelog, Converter={StaticResource BoolToVisConverter}}"
+                                        AutomationProperties.Name="View changelog for the selected release"/>
                             </StackPanel>
                         </Grid>
                     </Border>
@@ -144,40 +172,9 @@
             </ItemsControl.ItemTemplate>
         </controls:FlatItemsControl>
 
-        <!-- Dependencies -->
-        <Expander Grid.Row="4" Header="Dependencies"
-                  AutomationProperties.Name="Dependencies"
-                  Margin="0,8,0,0"
-                  Visibility="{Binding Dependencies.Count, Converter={StaticResource CountToVisConverter}}">
-            <StackPanel Margin="8">
-                <Button Content="Recheck"
-                        Command="{Binding RecheckDependenciesCommand}"
-                        AutomationProperties.Name="Recheck dependencies"
-                        HorizontalAlignment="Left"
-                        Margin="0,0,0,8"/>
-                <ItemsControl ItemsSource="{Binding Dependencies}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="{x:Type vm:DependencyItemViewModel}">
-                        <!-- AutomationProperties.Name on the StackPanel root so the screen reader
-                             announces "<dep id>, <status>" instead of the type's full name. -->
-                        <StackPanel Orientation="Horizontal" Margin="0,4"
-                                    AutomationProperties.Name="{Binding AnnouncementText}">
-                            <TextBlock VerticalAlignment="Center" MinWidth="200">
-                                <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/>
-                                <Run Text=" — "/>
-                                <Run Text="{Binding StatusText, Mode=OneWay}"/>
-                            </TextBlock>
-                            <Button Content="Fix"
-                                    Command="{Binding FixCommand}"
-                                    Visibility="{Binding StatusKind, Converter={StaticResource NotInstalledToVisConverter}}"
-                                    AutomationProperties.Name="{Binding Name, StringFormat='Fix {0}'}"
-                                    Margin="8,0,0,0"/>
-                        </StackPanel>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </StackPanel>
-        </Expander>
+        <!-- Dependencies section removed per F7=B — auto-install handles missing deps as a
+             step in the install flow now, so the user never has to manage them by hand. The
+             grid still has a Row=4 reserved as a no-op spacer to keep status on Row=5. -->
 
         <!-- Status -->
         <TextBlock Grid.Row="5"

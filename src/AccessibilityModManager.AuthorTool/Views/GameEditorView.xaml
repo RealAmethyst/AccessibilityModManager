@@ -1,0 +1,225 @@
+<UserControl x:Class="AccessibilityModManager.AuthorTool.Views.GameEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:views="clr-namespace:AccessibilityModManager.AuthorTool.Views"
+             xmlns:controls="clr-namespace:AccessibilityModManager.AuthorTool.Controls"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance vm:GameItemViewModel}">
+    <UserControl.Resources>
+        <DataTemplate DataType="{x:Type vm:DependencyItemViewModel}">
+            <views:DependencyEditorView/>
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:LifecycleScriptEditorViewModel}">
+            <views:LifecycleScriptEditorView/>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <TabControl>
+        <TabItem Header="General" AutomationProperties.Name="General">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                <StackPanel>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Game ID:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Text="{Binding GameId, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Game ID"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Display name:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="1" Grid.Column="1"
+                                 Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Game display name"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Mod name:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="2" Grid.Column="1"
+                                 Text="{Binding ModName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Mod display name"
+                                 AutomationProperties.HelpText="The mod's name as users see it in the manager. Example: BlindDuel, DigimonNOAccess"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Description:" VerticalAlignment="Top" Margin="0,8"/>
+                        <TextBox Grid.Row="3" Grid.Column="1"
+                                 Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 MinHeight="80"
+                                 AutomationProperties.Name="Mod description"
+                                 AutomationProperties.HelpText="Short description shown to users in the manager so they know what this mod does."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Steam App ID:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="4" Grid.Column="1"
+                                 Text="{Binding SteamAppId, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Steam App ID"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Exe name (optional):" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="5" Grid.Column="1"
+                                 Text="{Binding ExeName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Executable filename"
+                                 AutomationProperties.HelpText="Filename like MasterDuel.exe. Not a steam:// URL. Used as a folder verification check and as a launch fallback when no Steam ID is set."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
+                        <controls:FlatComboBox Grid.Row="6" Grid.Column="1"
+                                  IsEditable="True"
+                                  ItemsSource="{Binding DataContext.AvailableGitHubRepos, RelativeSource={RelativeSource AncestorType=UserControl, AncestorLevel=2}}"
+                                  Text="{Binding PerGameSourceRepo, UpdateSourceTrigger=PropertyChanged}"
+                                  AutomationProperties.Name="GitHub repo for this game"
+                                  AutomationProperties.HelpText="Pick from your GitHub repos, or type a name like RealAmethyst slash DigimonNOAccess"
+                                  Margin="0,4"/>
+                    </Grid>
+
+                    <TextBlock Text="The GitHub repo above is where wrapped ZIPs get uploaded as releases. Saved per game and reused for every release."
+                               Foreground="#666"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,12"/>
+                </StackPanel>
+            </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Filters" AutomationProperties.Name="Filters">
+            <views:FiltersEditorView Margin="8" DataContext="{Binding}"/>
+        </TabItem>
+
+        <TabItem Header="Releases" AutomationProperties.Name="Releases">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <ListBox Grid.Row="0"
+                         ItemsSource="{Binding Releases}"
+                         SelectedItem="{Binding SelectedRelease}"
+                         AutomationProperties.Name="Releases for this game">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name">
+                                <Setter.Value>
+                                    <MultiBinding StringFormat="version {0}, {1} channel">
+                                        <Binding Path="Version"/>
+                                        <Binding Path="Channel"/>
+                                    </MultiBinding>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="v" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding Version}" FontWeight="SemiBold" Margin="0,0,8,0"/>
+                                <TextBlock Text="{Binding Channel}" Foreground="#666"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="Add release"
+                            Command="{Binding DataContext.AddReleaseCommand, RelativeSource={RelativeSource AncestorType=UserControl, AncestorLevel=2}}"
+                            AutomationProperties.Name="Add release"
+                            Margin="0,0,8,0"/>
+                    <Button Content="Edit release"
+                            Command="{Binding DataContext.EditSelectedReleaseCommand, RelativeSource={RelativeSource AncestorType=UserControl, AncestorLevel=2}}"
+                            AutomationProperties.Name="Edit selected release"
+                            Margin="0,0,8,0"/>
+                    <Button Content="Remove release"
+                            Command="{Binding DataContext.RemoveSelectedReleaseCommand, RelativeSource={RelativeSource AncestorType=UserControl, AncestorLevel=2}}"
+                            AutomationProperties.Name="Remove selected release"/>
+                </StackPanel>
+            </Grid>
+        </TabItem>
+
+        <TabItem Header="Scripts" AutomationProperties.Name="Scripts">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                <StackPanel>
+                    <TextBlock Text="Lifecycle scripts run code from the package on the user's machine. The manager warns the user before running them — fill in clear what / why / modifies text so they can decide. Leave a slot disabled if you don't need it."
+                               TextWrapping="Wrap"
+                               Foreground="#666"
+                               Margin="0,0,0,16"/>
+
+                    <ContentPresenter Content="{Binding PreInstallScript}" Margin="0,0,0,8"/>
+                    <ContentPresenter Content="{Binding PostInstallScript}" Margin="0,0,0,8"/>
+                    <ContentPresenter Content="{Binding PostUninstallScript}" Margin="0,0,0,8"/>
+                </StackPanel>
+            </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Dependencies" AutomationProperties.Name="Dependencies">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                    <ComboBox x:Name="PresetCombo"
+                              ItemsSource="{x:Static vm:DependencyPresetsBag.Presets}"
+                              AutomationProperties.Name="Preset dependency"
+                              MinWidth="220"
+                              Margin="0,0,8,0"/>
+                    <Button Content="Add preset"
+                            Click="AddPreset_Click"
+                            AutomationProperties.Name="Add the selected preset dependency"
+                            Margin="0,0,8,0"/>
+                    <Button Content="Add custom"
+                            Click="AddCustom_Click"
+                            AutomationProperties.Name="Add a custom dependency"/>
+                </StackPanel>
+
+                <ListBox Grid.Row="1"
+                         ItemsSource="{Binding Dependencies}"
+                         SelectedItem="{Binding SelectedDependency}"
+                         AutomationProperties.Name="Dependencies for this game"
+                         MinHeight="80"
+                         MaxHeight="160"
+                         Margin="0,0,0,8">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding Id}"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Id}" FontWeight="SemiBold" Margin="0,0,8,0"/>
+                                <TextBlock Text="{Binding Type}" Foreground="#666" Margin="0,0,8,0"/>
+                                <TextBlock Text="required"
+                                           Foreground="#888"
+                                           Visibility="{Binding Required, Converter={StaticResource BoolToVisConverter}}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+                    <ContentPresenter Content="{Binding SelectedDependency}"
+                                      KeyboardNavigation.DirectionalNavigation="Contained"/>
+                </ScrollViewer>
+            </Grid>
+        </TabItem>
+    </TabControl>
+</UserControl>

@@ -113,6 +113,9 @@ public sealed class ReceiptStore : IReceiptStore
         return receipts;
     }
 
+    public string GetReceiptDirectory(string gameId, string pluginId) =>
+        Path.Combine(ReceiptsRoot, pluginId, gameId);
+
     private static string GetReceiptPath(string pluginId, string gameId) =>
         Path.Combine(ReceiptsRoot, pluginId, gameId, "receipt.json");
 

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Detection;
+using AccessibilityModManager.Infrastructure.Patreon;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
@@ -13,11 +14,11 @@ public partial class GamesListViewModel : ObservableObject
 {
     private readonly IPluginRegistryClient _registryClient;
     private readonly IPluginRepoClient _repoClient;
-    private readonly IPluginStateStore _stateStore;
     private readonly IConfigService _configService;
     private readonly IReceiptStore _receiptStore;
     private readonly IGameVerifier _gameVerifier;
     private readonly GameAggregator _gameAggregator;
+    private readonly PatreonService _patreon;
     private readonly ILogger _logger;
     private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>> _navigateToDetails;
     /// <summary>
@@ -37,30 +38,61 @@ public partial class GamesListViewModel : ObservableObject
     [ObservableProperty]
     private string? _statusMessage;
 
+    [ObservableProperty]
+    private string? _matchCountText;
+
     public ObservableCollection<ModItemViewModel> Mods { get; } = [];
+
+    /// <summary>Source-of-truth list. <see cref="Mods"/> is the filtered view bound to UI.</summary>
+    private readonly List<ModItemViewModel> _allMods = [];
+
+    public ObservableCollection<TagFilterItem> TagFilters { get; } = [];
+    public ObservableCollection<LanguageFilterItem> LanguageFilters { get; } = [];
+    public ObservableCollection<AuthorFilterItem> AuthorFilters { get; } = [];
+
+    public bool HasAnyFilterSelected =>
+        TagFilters.Any(f => f.IsSelected) ||
+        LanguageFilters.Any(f => f.IsSelected) ||
+        AuthorFilters.Any(f => f.IsSelected);
 
     public GamesListViewModel(
         IPluginRegistryClient registryClient,
         IPluginRepoClient repoClient,
-        IPluginStateStore stateStore,
         IConfigService configService,
         IReceiptStore receiptStore,
         IGameVerifier gameVerifier,
         GameAggregator gameAggregator,
+        PatreonService patreon,
         ILogger logger,
         Action<GameInstall, Dictionary<string, PluginRepoIndex>> navigateToDetails,
         Func<string?, string?> browseForFolder)
     {
         _registryClient = registryClient;
         _repoClient = repoClient;
-        _stateStore = stateStore;
         _configService = configService;
         _receiptStore = receiptStore;
         _gameVerifier = gameVerifier;
         _gameAggregator = gameAggregator;
+        _patreon = patreon;
         _logger = logger;
         _navigateToDetails = navigateToDetails;
         _browseForFolder = browseForFolder;
+
+        // When Patreon membership data finishes loading at startup (or refreshes after a
+        // sign-in/sign-out), re-render the catalog so newly-visible gated releases show
+        // up without requiring the user to click Refresh manually.
+        _patreon.SignInStateChanged += OnPatreonStateChanged;
+    }
+
+    private void OnPatreonStateChanged()
+    {
+        // RefreshGamesCommand re-fetches the full registry which is overkill for "just
+        // recompute visibility." But the existing aggregation is fast and this only fires
+        // a few times per session, so the simplicity wins.
+        if (RefreshGamesCommand.CanExecute(null))
+        {
+            _ = RefreshGamesCommand.ExecuteAsync(null);
+        }
     }
 
     [RelayCommand]
@@ -73,11 +105,11 @@ public partial class GamesListViewModel : ObservableObject
         {
             var config = await _configService.LoadAsync();
             var registry = await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), ct);
-            var states = await _stateStore.LoadAllAsync();
-            var enabledIds = new HashSet<string>(states.Where(s => s.IsEnabled).Select(s => s.PluginId));
 
+            // Every registry-listed plugin is active. We don't filter by an "enabled" state
+            // anymore — registry membership IS the gate.
             var activeIndexes = new Dictionary<string, PluginRepoIndex>();
-            foreach (var plugin in registry.Plugins.Where(p => p.IsBuiltIn || enabledIds.Contains(p.Id)))
+            foreach (var plugin in registry.Plugins)
             {
                 ct.ThrowIfCancellationRequested();
                 try
@@ -96,6 +128,7 @@ public partial class GamesListViewModel : ObservableObject
             _lastActiveIndexes = activeIndexes;
             _lastInstalls = installs;
             _lastGameMap = GameAggregator.GetGamesByGameId(activeIndexes);
+            _allMods.Clear();
             Mods.Clear();
 
             // One row per mod = one row per (developer, game) pair. Same shape as Developer Details.
@@ -112,6 +145,15 @@ public partial class GamesListViewModel : ObservableObject
                         continue;
                     }
 
+                    // Q3=A: hide the entire row if every release is Patreon-gated and the
+                    // user can't see any of them. Mods with at least one public (or
+                    // entitled-Patreon) release stay visible — only fully-locked mods
+                    // disappear from the catalog.
+                    if (!releases.Any(r => IsReleaseVisibleToUser(r)))
+                    {
+                        continue;
+                    }
+
                     var install = installs.FirstOrDefault(i => i.Game.GameId == game.GameId && i.IsValid);
                     var receipt = await _receiptStore.LoadAsync(game.GameId, pluginId);
 
@@ -123,16 +165,22 @@ public partial class GamesListViewModel : ObservableObject
                     var hasUpdate = receipt != null && latestVersion != null &&
                                     VersionComparer.Instance.Compare(latestVersion, receipt.InstalledVersion) > 0;
 
+                    var modName = !string.IsNullOrWhiteSpace(game.ModName)
+                        ? game.ModName!
+                        : DeriveModName(releases);
+
                     rows.Add(new ModItemViewModel
                     {
                         GameId = game.GameId,
                         GameDisplayName = game.DisplayName,
-                        ModName = DeriveModName(releases),
+                        ModName = modName,
                         PluginId = pluginId,
                         IsDetected = install != null,
                         InstallPath = install?.InstallPath,
                         InstalledVersion = receipt?.InstalledVersion,
-                        HasUpdate = hasUpdate
+                        HasUpdate = hasUpdate,
+                        Tags = game.Tags.ToList(),
+                        Languages = game.Languages.ToList()
                     });
                 }
             }
@@ -142,11 +190,14 @@ public partial class GamesListViewModel : ObservableObject
                 .OrderBy(r => r.GameDisplayName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => r.ModName, StringComparer.OrdinalIgnoreCase))
             {
-                Mods.Add(row);
+                _allMods.Add(row);
             }
 
-            var detected = Mods.Count(m => m.IsDetected);
-            StatusMessage = $"Found {Mods.Count} mod{(Mods.Count == 1 ? "" : "s")} ({detected} detected).";
+            RebuildFilters(config);
+            ApplyFilters();
+
+            var detected = _allMods.Count(m => m.IsDetected);
+            StatusMessage = $"Found {_allMods.Count} mod{(_allMods.Count == 1 ? "" : "s")} ({detected} detected).";
         }
         catch (OperationCanceledException)
         {
@@ -164,6 +215,19 @@ public partial class GamesListViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Q3=A: a release is visible if it isn't Patreon-gated, or if the user is currently
+    /// entitled to one of the gate's tiers. Per Q6=C the gate is purely per-release —
+    /// channel-default schema was dropped. Creators who own the gate's campaign also see
+    /// their own gated releases so they can install via the local-file path.
+    /// </summary>
+    private bool IsReleaseVisibleToUser(ModRelease release)
+    {
+        if (release.Patreon == null) return true;
+        if (_patreon.IsCampaignOwner(release.Patreon.CampaignId)) return true;
+        return _patreon.IsEntitled(release.Patreon);
+    }
+
+    /// <summary>
     /// Best-effort human name for a mod, parsed from its first release's package URL. For
     /// GitHub-hosted releases this is the source repo name (e.g. "DigimonNOAccess"). Falls back
     /// to "mod" when the URL doesn't match a github.com release pattern. Same logic as
@@ -172,8 +236,15 @@ public partial class GamesListViewModel : ObservableObject
     private static string DeriveModName(IReadOnlyList<ModRelease> releases)
     {
         if (releases.Count == 0) return "mod";
-        var url = releases[0].PackageUrl;
-        if (string.Equals(url.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+        // Skip Patreon-gated releases — their PackageUrl is null. Falls back to "mod" if all
+        // releases are gated, which is the desired behavior for a Patron-only mod anyway.
+        var url = releases.Select(r => r.PackageUrl).FirstOrDefault(u => u is not null);
+        return DeriveModNameFromUrl(url);
+    }
+
+    private static string DeriveModNameFromUrl(Uri? url)
+    {
+        if (url is not null && string.Equals(url.Host, "github.com", StringComparison.OrdinalIgnoreCase))
         {
             var segments = url.Segments;
             if (segments.Length >= 4 &&
@@ -264,6 +335,202 @@ public partial class GamesListViewModel : ObservableObject
             StatusMessage = $"Could not save location: {ex.Message}";
         }
     }
+
+    private void RebuildFilters(AppConfig config)
+    {
+        var savedTags = new HashSet<string>(config.SelectedTagFilters, StringComparer.OrdinalIgnoreCase);
+        var savedLangs = new HashSet<string>(config.SelectedLanguageFilters, StringComparer.OrdinalIgnoreCase);
+        var savedAuthors = new HashSet<string>(config.SelectedAuthorFilters, StringComparer.OrdinalIgnoreCase);
+
+        TagFilters.Clear();
+        foreach (var tag in TagCatalog.Core)
+        {
+            TagFilters.Add(new TagFilterItem(
+                tag.Id, tag.Label, tag.Category,
+                isSelected: savedTags.Contains(tag.Id),
+                onToggle: OnFilterToggled));
+        }
+        // Custom tags found across loaded mods get appended after the core list.
+        var customTagIds = _allMods
+            .SelectMany(m => m.Tags)
+            .Where(id => TagCatalog.FindById(id) == null)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase);
+        foreach (var customId in customTagIds)
+        {
+            TagFilters.Add(new TagFilterItem(
+                customId, customId, "Custom",
+                isSelected: savedTags.Contains(customId),
+                onToggle: OnFilterToggled));
+        }
+
+        LanguageFilters.Clear();
+        // Always show the curated language catalog so users can pick filters even when no
+        // loaded mod has declared a language yet. Mirrors the Tags section where the core
+        // tag list is always available regardless of what mods have selected.
+        var seenCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var lang in LanguageCatalog.All)
+        {
+            LanguageFilters.Add(new LanguageFilterItem(
+                lang.Code, lang.Label,
+                isSelected: savedLangs.Contains(lang.Code),
+                onToggle: OnFilterToggled));
+            seenCodes.Add(lang.Code);
+        }
+        // Append any extra codes that some mod declared but the catalog doesn't list, so we
+        // never silently hide a filter the user might be looking for.
+        var extras = _allMods
+            .SelectMany(m => m.Languages)
+            .Where(c => !seenCodes.Contains(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(c => c, StringComparer.OrdinalIgnoreCase);
+        foreach (var code in extras)
+        {
+            LanguageFilters.Add(new LanguageFilterItem(
+                code, LanguageCatalog.LabelFor(code),
+                isSelected: savedLangs.Contains(code),
+                onToggle: OnFilterToggled));
+        }
+
+        AuthorFilters.Clear();
+        var presentAuthors = _allMods
+            .Select(m => m.PluginId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase);
+        foreach (var pluginId in presentAuthors)
+        {
+            AuthorFilters.Add(new AuthorFilterItem(
+                pluginId,
+                isSelected: savedAuthors.Contains(pluginId),
+                onToggle: OnFilterToggled));
+        }
+    }
+
+    private bool _suppressFilterChanges;
+
+    private void OnFilterToggled()
+    {
+        if (_suppressFilterChanges) return;
+        ApplyFilters();
+        _ = PersistFiltersAsync();
+        OnPropertyChanged(nameof(HasAnyFilterSelected));
+    }
+
+    private void ApplyFilters()
+    {
+        var selectedTags = TagFilters.Where(f => f.IsSelected).Select(f => f.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var selectedLangs = LanguageFilters.Where(f => f.IsSelected).Select(f => f.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var selectedAuthors = AuthorFilters.Where(f => f.IsSelected).Select(f => f.PluginId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var filtered = _allMods.Where(m =>
+            (selectedTags.Count == 0 || m.Tags.Any(t => selectedTags.Contains(t))) &&
+            (selectedLangs.Count == 0 || m.Languages.Any(l => selectedLangs.Contains(l))) &&
+            (selectedAuthors.Count == 0 || selectedAuthors.Contains(m.PluginId))
+        ).ToList();
+
+        Mods.Clear();
+        foreach (var m in filtered) Mods.Add(m);
+
+        MatchCountText = filtered.Count == _allMods.Count
+            ? $"{_allMods.Count} mod{(_allMods.Count == 1 ? "" : "s")} shown."
+            : $"{filtered.Count} of {_allMods.Count} mods shown.";
+    }
+
+    private async Task PersistFiltersAsync()
+    {
+        try
+        {
+            var config = await _configService.LoadAsync();
+            config.SelectedTagFilters = TagFilters.Where(f => f.IsSelected).Select(f => f.Id).ToList();
+            config.SelectedLanguageFilters = LanguageFilters.Where(f => f.IsSelected).Select(f => f.Code).ToList();
+            config.SelectedAuthorFilters = AuthorFilters.Where(f => f.IsSelected).Select(f => f.PluginId).ToList();
+            await _configService.SaveAsync(config);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Failed to persist filter selections");
+        }
+    }
+
+    [RelayCommand]
+    private void ClearFilters()
+    {
+        _suppressFilterChanges = true;
+        try
+        {
+            foreach (var f in TagFilters) f.IsSelected = false;
+            foreach (var f in LanguageFilters) f.IsSelected = false;
+            foreach (var f in AuthorFilters) f.IsSelected = false;
+        }
+        finally { _suppressFilterChanges = false; }
+
+        ApplyFilters();
+        _ = PersistFiltersAsync();
+        OnPropertyChanged(nameof(HasAnyFilterSelected));
+    }
+}
+
+public sealed partial class TagFilterItem : ObservableObject
+{
+    private readonly Action _onToggle;
+    public string Id { get; }
+    public string Label { get; }
+    public string Category { get; }
+
+    [ObservableProperty]
+    private bool _isSelected;
+
+    public TagFilterItem(string id, string label, string category, bool isSelected, Action onToggle)
+    {
+        Id = id;
+        Label = label;
+        Category = category;
+        _isSelected = isSelected;
+        _onToggle = onToggle;
+    }
+
+    partial void OnIsSelectedChanged(bool value) => _onToggle();
+    public override string ToString() => Label;
+}
+
+public sealed partial class LanguageFilterItem : ObservableObject
+{
+    private readonly Action _onToggle;
+    public string Code { get; }
+    public string Label { get; }
+
+    [ObservableProperty]
+    private bool _isSelected;
+
+    public LanguageFilterItem(string code, string label, bool isSelected, Action onToggle)
+    {
+        Code = code;
+        Label = label;
+        _isSelected = isSelected;
+        _onToggle = onToggle;
+    }
+
+    partial void OnIsSelectedChanged(bool value) => _onToggle();
+    public override string ToString() => Label;
+}
+
+public sealed partial class AuthorFilterItem : ObservableObject
+{
+    private readonly Action _onToggle;
+    public string PluginId { get; }
+
+    [ObservableProperty]
+    private bool _isSelected;
+
+    public AuthorFilterItem(string pluginId, bool isSelected, Action onToggle)
+    {
+        PluginId = pluginId;
+        _isSelected = isSelected;
+        _onToggle = onToggle;
+    }
+
+    partial void OnIsSelectedChanged(bool value) => _onToggle();
+    public override string ToString() => PluginId;
 }
 
 /// <summary>
@@ -280,6 +547,8 @@ public partial class ModItemViewModel : ObservableObject
     public string? InstallPath { get; init; }
     public string? InstalledVersion { get; init; }
     public bool HasUpdate { get; init; }
+    public IReadOnlyList<string> Tags { get; init; } = [];
+    public IReadOnlyList<string> Languages { get; init; } = [];
 
     public string StatusText => (IsDetected, InstalledVersion, HasUpdate) switch
     {

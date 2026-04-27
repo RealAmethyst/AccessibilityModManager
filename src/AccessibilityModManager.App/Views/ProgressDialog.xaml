@@ -7,14 +7,16 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="{Binding Title}"
-        Height="200" Width="450"
+        Height="320" Width="560"
+        MinHeight="200" MinWidth="450"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip"
         ShowInTaskbar="False"
         AutomationProperties.Name="Progress">
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -41,12 +43,36 @@
                    Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
                    AutomationProperties.LiveSetting="Polite"/>
 
-        <Button Grid.Row="4"
+        <TextBlock Grid.Row="3"
+                   Text="{Binding ScriptStatusHeader}"
+                   FontWeight="SemiBold"
+                   AutomationProperties.HeadingLevel="Level2"
+                   AutomationProperties.LiveSetting="Polite"
+                   Visibility="{Binding IsScriptRunning, Converter={StaticResource BoolToVisConverter}}"
+                   Margin="0,12,0,4"/>
+
+        <TextBox Grid.Row="4"
+                 x:Name="OutputBox"
+                 Text="{Binding ScriptOutput, Mode=OneWay}"
+                 IsReadOnly="True"
+                 AcceptsReturn="True"
+                 TextWrapping="NoWrap"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto"
+                 FontFamily="Consolas"
+                 FontSize="12"
+                 TextChanged="OutputBox_TextChanged"
+                 AutomationProperties.Name="Script output"
+                 AutomationProperties.LiveSetting="Polite"
+                 Visibility="{Binding IsScriptRunning, Converter={StaticResource BoolToVisConverter}}"/>
+
+        <Button Grid.Row="5"
                 Content="Cancel"
                 Command="{Binding CancelCommand}"
                 IsEnabled="{Binding IsCancellable}"
                 AutomationProperties.Name="Cancel"
                 HorizontalAlignment="Right"
-                MinWidth="80"/>
+                MinWidth="80"
+                Margin="0,12,0,0"/>
     </Grid>
 </Window>

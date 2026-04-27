@@ -1,0 +1,208 @@
+<UserControl x:Class="AccessibilityModManager.AuthorTool.Views.DependencyEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance vm:DependencyItemViewModel}">
+    <Border BorderBrush="#CCC" BorderThickness="1" Padding="8" Margin="0,0,0,8">
+        <StackPanel>
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" FontWeight="SemiBold">
+                    <Run Text="Dependency: "/>
+                    <Run Text="{Binding Id, Mode=OneWay}"/>
+                </TextBlock>
+                <Button Grid.Column="1"
+                        Content="Remove"
+                        Click="Remove_Click"
+                        AutomationProperties.Name="Remove this dependency"/>
+            </Grid>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="ID:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Text="{Binding Id, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Dependency ID"
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Type:" VerticalAlignment="Center" Margin="0,2"/>
+                <ComboBox Grid.Row="1" Grid.Column="1"
+                          SelectedItem="{Binding Type}"
+                          AutomationProperties.Name="Dependency type"
+                          Margin="0,2">
+                    <sys:String>framework</sys:String>
+                    <sys:String>system</sys:String>
+                </ComboBox>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Required:" VerticalAlignment="Center" Margin="0,2"/>
+                <CheckBox Grid.Row="2" Grid.Column="1"
+                          IsChecked="{Binding Required}"
+                          AutomationProperties.Name="Required dependency"
+                          VerticalAlignment="Center"
+                          Margin="0,2"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Min version:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="3" Grid.Column="1"
+                         Text="{Binding MinVersion, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Minimum version"
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Check file path:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="4" Grid.Column="1"
+                         Text="{Binding CheckFilePath, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Check file path"
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Check registry key:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="5" Grid.Column="1"
+                         Text="{Binding CheckRegistryKey, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Check registry key"
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Check registry value:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="6" Grid.Column="1"
+                         Text="{Binding CheckRegistryValue, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Check registry value"
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="Fix download URL:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="7" Grid.Column="1"
+                         Text="{Binding FixDownloadUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Fix download URL"
+                         AutomationProperties.HelpText="HTTPS URL to the loader release. The manager will download from here when AutoInstall is on."
+                         Margin="0,2"/>
+            </Grid>
+
+            <!-- AutoInstall sub-editor. The manager will download + apply the dep
+                 automatically as a step in the mod install flow when this is on. -->
+            <Border BorderBrush="#DDD" BorderThickness="1" Padding="8" Margin="0,12,0,0" CornerRadius="3">
+                <StackPanel>
+                    <CheckBox Content="Manager auto-installs this dependency"
+                              IsChecked="{Binding AutoInstallEnabled}"
+                              AutomationProperties.Name="Manager auto-installs this dependency"
+                              AutomationProperties.HelpText="When on, clicking Install on a mod runs this auto-install before the mod itself. SHA256 verification is mandatory."
+                              Margin="0,0,0,8"/>
+
+                    <Grid IsEnabled="{Binding AutoInstallEnabled}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Action kind:" VerticalAlignment="Center" Margin="0,2"/>
+                        <ComboBox Grid.Row="0" Grid.Column="1"
+                                  SelectedItem="{Binding AutoInstallKind}"
+                                  AutomationProperties.Name="AutoInstall action kind"
+                                  Margin="0,2">
+                            <sys:String>extractZip</sys:String>
+                            <sys:String>runInstaller</sys:String>
+                            <sys:String>copyFile</sys:String>
+                        </ComboBox>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="SHA256:" VerticalAlignment="Center" Margin="0,2"/>
+                        <Grid Grid.Row="1" Grid.Column="1" Margin="0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding AutoInstallSha256, UpdateSourceTrigger=PropertyChanged}"
+                                     AutomationProperties.Name="AutoInstall SHA256 (hex, lowercase)"
+                                     FontFamily="Consolas"/>
+                            <Button Grid.Column="1"
+                                    x:Name="FetchShaButton"
+                                    Content="Fetch from URL"
+                                    Click="FetchShaFromUrl_Click"
+                                    AutomationProperties.Name="Fetch SHA256 by downloading the URL above"
+                                    AutomationProperties.HelpText="Downloads the Fix download URL and computes its SHA256. Same artifact the manager will fetch at install time, so the hash is guaranteed to match."
+                                    Margin="8,0,0,0"
+                                    MinWidth="140"/>
+                            <Button Grid.Column="2"
+                                    Content="From file..."
+                                    Click="ComputeSha_Click"
+                                    AutomationProperties.Name="Compute SHA256 from a local file"
+                                    Margin="8,0,0,0"
+                                    MinWidth="120"/>
+                        </Grid>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Target dir:" VerticalAlignment="Center" Margin="0,2"
+                                   Visibility="{Binding IsRunInstallerKind, Converter={StaticResource InvertBoolToVisConverter}}"/>
+                        <TextBox Grid.Row="2" Grid.Column="1"
+                                 Text="{Binding AutoInstallTargetDir, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="AutoInstall target directory inside the game folder"
+                                 AutomationProperties.HelpText="Relative to the game folder. Empty means game root."
+                                 Visibility="{Binding IsRunInstallerKind, Converter={StaticResource InvertBoolToVisConverter}}"
+                                 Margin="0,2"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Blocklist:" VerticalAlignment="Center" Margin="0,2"
+                                   Visibility="{Binding IsExtractZipKind, Converter={StaticResource BoolToVisConverter}}"/>
+                        <TextBox Grid.Row="3" Grid.Column="1"
+                                 Text="{Binding AutoInstallBlocklistText, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="AutoInstall extract blocklist"
+                                 AutomationProperties.HelpText="Comma-separated entry paths to skip when extracting (e.g. README.md, examples/*). Glob style with * and ?."
+                                 Visibility="{Binding IsExtractZipKind, Converter={StaticResource BoolToVisConverter}}"
+                                 Margin="0,2"/>
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Target filename:" VerticalAlignment="Center" Margin="0,2"
+                                   Visibility="{Binding IsCopyFileKind, Converter={StaticResource BoolToVisConverter}}"/>
+                        <TextBox Grid.Row="4" Grid.Column="1"
+                                 Text="{Binding AutoInstallTargetFileName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="AutoInstall target filename"
+                                 AutomationProperties.HelpText="What to name the downloaded file inside the target directory. Empty uses the URL's last segment."
+                                 Visibility="{Binding IsCopyFileKind, Converter={StaticResource BoolToVisConverter}}"
+                                 Margin="0,2"/>
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Installer args:" VerticalAlignment="Center" Margin="0,2"
+                                   Visibility="{Binding IsRunInstallerKind, Converter={StaticResource BoolToVisConverter}}"/>
+                        <Grid Grid.Row="5" Grid.Column="1" Margin="0,2"
+                              Visibility="{Binding IsRunInstallerKind, Converter={StaticResource BoolToVisConverter}}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBox Grid.Row="0"
+                                     Text="{Binding AutoInstallArgsText, UpdateSourceTrigger=PropertyChanged}"
+                                     AutomationProperties.Name="AutoInstall installer arguments"
+                                     AutomationProperties.HelpText="Space-separated. Example: /S /silent."/>
+                            <CheckBox Grid.Row="1"
+                                      Content="Needs administrator (UAC prompt)"
+                                      IsChecked="{Binding AutoInstallNeedsAdmin}"
+                                      AutomationProperties.Name="Installer needs administrator rights"
+                                      Margin="0,4,0,0"/>
+                        </Grid>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </Border>
+</UserControl>

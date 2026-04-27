@@ -39,6 +39,41 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     [ObservableProperty]
     private string? _statusMessage;
 
+    [ObservableProperty]
+    private string? _displayName;
+
+    [ObservableProperty]
+    private string? _bio;
+
+    [ObservableProperty]
+    private string? _websiteUrl;
+
+    [ObservableProperty]
+    private string? _discordUrl;
+
+    [ObservableProperty]
+    private string? _patreonUrl;
+
+    [ObservableProperty]
+    private string? _gitHubUrl;
+
+    [ObservableProperty]
+    private string? _donationUrl;
+
+    public bool HasBio => !string.IsNullOrWhiteSpace(Bio);
+    public bool HasWebsite => !string.IsNullOrWhiteSpace(WebsiteUrl);
+    public bool HasDiscord => !string.IsNullOrWhiteSpace(DiscordUrl);
+    public bool HasPatreon => !string.IsNullOrWhiteSpace(PatreonUrl);
+    public bool HasGitHub => !string.IsNullOrWhiteSpace(GitHubUrl);
+    public bool HasDonation => !string.IsNullOrWhiteSpace(DonationUrl);
+
+    /// <summary>
+    /// True when the author hasn't set a bio or any social/donation links. Lets the view
+    /// show a clear "no info published yet" line instead of empty space.
+    /// </summary>
+    public bool HasNoAuthorInfo =>
+        !HasBio && !HasWebsite && !HasDiscord && !HasPatreon && !HasGitHub && !HasDonation;
+
     public ObservableCollection<DeveloperModItemViewModel> Mods { get; } = [];
 
     public DeveloperDetailsViewModel(
@@ -59,6 +94,10 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         _logger = logger;
         _navigateBack = navigateBack;
         _navigateToGameDetails = navigateToGameDetails;
+
+        // Seed DisplayName from the registry's PluginEntry so the header renders something
+        // sensible before LoadAsync replaces it with the per-plugin index's author info.
+        _displayName = _plugin.Author;
 
         _ = LoadAsync(refetchIndex: true);
     }
@@ -81,6 +120,23 @@ public partial class DeveloperDetailsViewModel : ObservableObject
             if (refetchIndex || _pluginIndex == null)
                 _pluginIndex = await _repoClient.FetchPluginIndexAsync(_plugin);
 
+            // Surface author info from the index (preferred) or fall back to the registry's
+            // PluginEntry. Either way the bio + social links light up the Authors view.
+            DisplayName = _pluginIndex.Author?.DisplayName ?? _plugin.Author;
+            Bio = _pluginIndex.Author?.Bio;
+            WebsiteUrl = _pluginIndex.Author?.WebsiteUrl;
+            DiscordUrl = _pluginIndex.Author?.DiscordUrl;
+            PatreonUrl = _pluginIndex.Author?.PatreonUrl;
+            GitHubUrl = _pluginIndex.Author?.GitHubUrl;
+            DonationUrl = _pluginIndex.Author?.DonationUrl;
+            OnPropertyChanged(nameof(HasBio));
+            OnPropertyChanged(nameof(HasWebsite));
+            OnPropertyChanged(nameof(HasDiscord));
+            OnPropertyChanged(nameof(HasPatreon));
+            OnPropertyChanged(nameof(HasGitHub));
+            OnPropertyChanged(nameof(HasDonation));
+            OnPropertyChanged(nameof(HasNoAuthorInfo));
+
             // Reuse GameAggregator with a single-entry dictionary so we get the same Steam
             // detection + manual-override behavior the Games tab uses, just scoped to this
             // developer's games.
@@ -100,7 +156,9 @@ public partial class DeveloperDetailsViewModel : ObservableObject
                           .FirstOrDefault()?.Version
                     : null;
 
-                var modName = DeriveModName(_pluginIndex, game.GameId);
+                var modName = !string.IsNullOrWhiteSpace(game.ModName)
+                    ? game.ModName!
+                    : DeriveModName(_pluginIndex, game.GameId);
                 var hasUpdate = receipt != null && latestVersion != null &&
                                 VersionComparer.Instance.Compare(latestVersion, receipt.InstalledVersion) > 0;
 
@@ -152,6 +210,24 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     [RelayCommand]
     private void GoBack() => _navigateBack();
 
+    [RelayCommand]
+    private void OpenUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Failed to open URL {Url}", url);
+        }
+    }
+
     /// <summary>
     /// Pull the GitHub repo segment out of the first release's package URL. Same logic as
     /// ModReleaseGroup.ModName so the announcement is consistent across views.
@@ -161,8 +237,10 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         if (!index.ReleasesByGameId.TryGetValue(gameId, out var releases) || releases.Count == 0)
             return "mod";
 
-        var url = releases[0].PackageUrl;
-        if (string.Equals(url.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+        // Skip Patreon-gated releases — their PackageUrl is null and the Patreon post URL
+        // isn't a stable place to derive a mod name from.
+        var url = releases.Select(r => r.PackageUrl).FirstOrDefault(u => u is not null);
+        if (url is not null && string.Equals(url.Host, "github.com", StringComparison.OrdinalIgnoreCase))
         {
             var segments = url.Segments;
             if (segments.Length >= 4 &&

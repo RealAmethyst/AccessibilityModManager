@@ -2,7 +2,9 @@
 ; Requires Inno Setup 6.x (https://jrsoftware.org/isinfo.php)
 
 #define MyAppName "Accessibility Mod Manager"
-#define MyAppVersion "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.9.2"
+#endif
 #define MyAppPublisher "Amethyst"
 #define MyAppExeName "AccessibilityModManager.App.exe"
 #define MyAppURL "https://github.com/RealAmethyst/AccessibilityModManager"
@@ -51,15 +53,32 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+// Check for the .NET WPF runtime by enumerating its standard install directory directly
+// — no Exec, no cmd, no findstr. The earlier shell-out pattern (`cmd /c dotnet
+// --list-runtimes | findstr ...`) tripped Defender's ML classifier, which flags installers
+// that do command-output piping + keyword scanning as credential-stealer-shaped.
 function IsDotNetInstalled(): Boolean;
 var
-  ResultCode: Integer;
+  RuntimeRoot: String;
+  FindRec: TFindRec;
 begin
-  Result := Exec('dotnet', '--list-runtimes', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
-  if Result then
+  Result := False;
+  RuntimeRoot := ExpandConstant('{commonpf64}\dotnet\shared\Microsoft.WindowsDesktop.App');
+  if not DirExists(RuntimeRoot) then exit;
+
+  if FindFirst(RuntimeRoot + '\{#DotNetVersion}.*', FindRec) then
   begin
-    // Check if the specific version is available by looking for Microsoft.WindowsDesktop.App 10.x
-    Result := Exec('cmd', '/c dotnet --list-runtimes | findstr /C:"Microsoft.WindowsDesktop.App {#DotNetVersion}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+    try
+      repeat
+        if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        begin
+          Result := True;
+          exit;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
   end;
 end;
 

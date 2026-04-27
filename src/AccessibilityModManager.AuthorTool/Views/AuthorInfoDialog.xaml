@@ -1,0 +1,118 @@
+<Window x:Class="AccessibilityModManager.AuthorTool.Views.AuthorInfoDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance vm:AuthorInfoDialogViewModel}"
+        Title="Author info"
+        Height="640" Width="600"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        AutomationProperties.Name="Author info">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   FontSize="20" FontWeight="Bold"
+                   AutomationProperties.HeadingLevel="Level1"
+                   Margin="0,0,0,4">
+            <Run Text="Author info for "/>
+            <Run Text="{Binding PluginId, Mode=OneWay}"/>
+        </TextBlock>
+
+        <TextBlock Grid.Row="1"
+                   Text="This info is shown to manager users on the Authors page. All fields are optional. Stored in your index.json so you control it directly."
+                   TextWrapping="Wrap"
+                   Foreground="#666"
+                   Margin="0,0,0,12"/>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Display name:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         x:Name="DisplayNameBox"
+                         Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Author display name"
+                         AutomationProperties.HelpText="The name users see. Example: Amethyst"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Bio:" VerticalAlignment="Top" Margin="0,8"/>
+                <TextBox Grid.Row="1" Grid.Column="1"
+                         Text="{Binding Bio, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto"
+                         MinHeight="100"
+                         AutomationProperties.Name="Author bio"
+                         AutomationProperties.HelpText="A short description of who you are and what you make. Markdown supported."
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Website:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding WebsiteUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Website URL"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Discord:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="3" Grid.Column="1"
+                         Text="{Binding DiscordUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Discord invite URL"
+                         AutomationProperties.HelpText="Invite link to your Discord server, where users can ask for help"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Patreon:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="4" Grid.Column="1"
+                         Text="{Binding PatreonUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Patreon URL"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="GitHub:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="5" Grid.Column="1"
+                         Text="{Binding GitHubUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="GitHub profile URL"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Donations:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="6" Grid.Column="1"
+                         Text="{Binding DonationUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Donation URL"
+                         AutomationProperties.HelpText="Ko-fi, BuyMeACoffee, PayPal, etc."
+                         Margin="0,4"/>
+            </Grid>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Save"
+                    Command="{Binding SaveCommand}"
+                    AutomationProperties.Name="Save author info"
+                    IsDefault="True"
+                    MinWidth="80" Margin="0,0,8,0"/>
+            <Button Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    AutomationProperties.Name="Cancel editing author info"
+                    IsCancel="True"
+                    MinWidth="80"/>
+        </StackPanel>
+    </Grid>
+</Window>

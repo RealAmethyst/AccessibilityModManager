@@ -29,10 +29,12 @@ public sealed class PluginRepoClient : IPluginRepoClient
 
         _logger.Information("Fetching repo index for plugin {PluginId} from {Url}", plugin.Id, plugin.RepoIndexUrl);
 
-        // Cache-Control: no-cache asks caches in the path (notably the GitHub raw-URL CDN) to
-        // revalidate rather than serve a stale snapshot. Without this, a freshly-pushed
-        // index.json can be invisible to the manager for several minutes.
-        var request = new HttpRequestMessage(HttpMethod.Get, plugin.RepoIndexUrl);
+        // Cache-Control: no-cache + unique query param. GitHub's raw-URL CDN (Fastly) ignores
+        // header-only revalidation hints for under-a-minute-old objects, so we make each
+        // request a unique URL too — that forces the CDN to fetch origin and the
+        // freshly-pushed index.json shows up immediately.
+        var bustedUrl = PluginRegistryClient.AppendCacheBuster(plugin.RepoIndexUrl);
+        var request = new HttpRequestMessage(HttpMethod.Get, bustedUrl);
         request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
         request.Headers.Pragma.ParseAdd("no-cache");
         var response = await _httpClient.SendAsync(request, ct);
@@ -42,11 +44,20 @@ public sealed class PluginRepoClient : IPluginRepoClient
         var index = JsonSerializer.Deserialize<PluginRepoIndex>(json, JsonOptions)
             ?? throw new InvalidOperationException($"Repo index for plugin '{plugin.Id}' deserialized to null");
 
-        // Validate all package URLs are HTTPS
+        // Validate all package URLs are HTTPS. Patreon-gated releases (PackageUrl == null,
+        // Patreon != null) skip this — the manager fetches their asset from Patreon's CDN
+        // via authenticated API at install time, not via a public URL listed here.
         foreach (var (gameId, releases) in index.ReleasesByGameId)
         {
             foreach (var release in releases)
             {
+                if (release.PackageUrl is null)
+                {
+                    if (release.Patreon is null)
+                        throw new InvalidOperationException(
+                            $"Release {plugin.Id}/{gameId}/{release.Version} has neither a public packageUrl nor a Patreon gate.");
+                    continue;
+                }
                 UrlValidator.RequireHttps(release.PackageUrl, $"plugin '{plugin.Id}' game '{gameId}' package URL");
             }
         }

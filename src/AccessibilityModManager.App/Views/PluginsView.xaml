@@ -49,16 +49,9 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <TextBlock Grid.Row="0" Grid.Column="0"
+                            <TextBlock Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
                                        Text="{Binding Author, Mode=OneWay}"
                                        FontSize="16" FontWeight="SemiBold"/>
-
-                            <CheckBox Grid.Row="0" Grid.Column="1"
-                                      IsChecked="{Binding IsEnabled}"
-                                      IsEnabled="{Binding IsBuiltIn, Converter={StaticResource InvertBoolConverter}}"
-                                      Content="Enabled"
-                                      AutomationProperties.Name="{Binding Author, StringFormat='{}{0} enabled'}"
-                                      VerticalAlignment="Center"/>
 
                             <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
                                        Text="{Binding Description}"
@@ -95,12 +88,6 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </StackPanel>
-
-                            <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
-                                       Margin="0,4,0,0"
-                                       Visibility="{Binding IsBuiltIn, Converter={StaticResource BoolToVisConverter}}">
-                                <Run Text="Built-in developer" FontStyle="Italic"/>
-                            </TextBlock>
                         </Grid>
                     </Border>
                 </DataTemplate>

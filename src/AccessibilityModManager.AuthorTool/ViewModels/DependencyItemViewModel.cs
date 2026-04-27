@@ -1,0 +1,207 @@
+using AccessibilityModManager.Core.Models;
+using CommunityToolkit.Mvvm.ComponentModel;
+
+namespace AccessibilityModManager.AuthorTool.ViewModels;
+
+public sealed partial class DependencyItemViewModel : ObservableObject
+{
+    private readonly GameItemViewModel _parent;
+
+    [ObservableProperty]
+    private string _id;
+
+    [ObservableProperty]
+    private string _type;
+
+    [ObservableProperty]
+    private bool _required;
+
+    [ObservableProperty]
+    private string? _minVersion;
+
+    [ObservableProperty]
+    private string? _checkRegistryKey;
+
+    [ObservableProperty]
+    private string? _checkRegistryValue;
+
+    [ObservableProperty]
+    private string? _checkFilePath;
+
+    [ObservableProperty]
+    private string? _fixDownloadUrl;
+
+    [ObservableProperty]
+    private string? _fixBundledPath;
+
+    // ----- AutoInstall fields -----
+
+    /// <summary>
+    /// True when the author wants the manager to download + apply the dep automatically.
+    /// Drives the visibility of the AutoInstall sub-editor in the view.
+    /// </summary>
+    [ObservableProperty]
+    private bool _autoInstallEnabled;
+
+    /// <summary>"extractZip", "runInstaller", or "copyFile".</summary>
+    [ObservableProperty]
+    private string _autoInstallKind = "extractZip";
+
+    [ObservableProperty]
+    private string? _autoInstallSha256;
+
+    [ObservableProperty]
+    private string? _autoInstallTargetDir;
+
+    /// <summary>Comma-separated for the editor; serialized as a list. Used by extractZip.</summary>
+    [ObservableProperty]
+    private string? _autoInstallBlocklistText;
+
+    /// <summary>Used by copyFile only.</summary>
+    [ObservableProperty]
+    private string? _autoInstallTargetFileName;
+
+    /// <summary>Space-separated args for the editor; serialized as a list. Used by runInstaller.</summary>
+    [ObservableProperty]
+    private string? _autoInstallArgsText;
+
+    [ObservableProperty]
+    private bool _autoInstallNeedsAdmin;
+
+    public DependencyItemViewModel(Dependency dep, GameItemViewModel parent)
+    {
+        _parent = parent;
+        _id = dep.Id;
+        _type = dep.Type;
+        _required = dep.Required;
+        _minVersion = dep.MinVersion;
+        _checkRegistryKey = dep.Check?.RegistryKey;
+        _checkRegistryValue = dep.Check?.RegistryValue;
+        _checkFilePath = dep.Check?.FilePath;
+        _fixDownloadUrl = dep.Fix?.DownloadUrl;
+        _fixBundledPath = dep.Fix?.BundledPath;
+
+        // Hydrate AutoInstall sub-editor from the existing model, if any.
+        var auto = dep.Fix?.AutoInstall;
+        _autoInstallEnabled = auto != null;
+        _autoInstallSha256 = auto?.Sha256;
+        switch (auto)
+        {
+            case ExtractZipAutoInstall ez:
+                _autoInstallKind = "extractZip";
+                _autoInstallTargetDir = ez.TargetDir;
+                _autoInstallBlocklistText = ez.Blocklist.Count > 0 ? string.Join(", ", ez.Blocklist) : null;
+                break;
+            case RunInstallerAutoInstall ri:
+                _autoInstallKind = "runInstaller";
+                _autoInstallArgsText = ri.Args.Count > 0 ? string.Join(" ", ri.Args) : null;
+                _autoInstallNeedsAdmin = ri.NeedsAdmin;
+                break;
+            case CopyFileAutoInstall cf:
+                _autoInstallKind = "copyFile";
+                _autoInstallTargetDir = cf.TargetDir;
+                _autoInstallTargetFileName = cf.TargetFileName;
+                break;
+        }
+    }
+
+    partial void OnIdChanged(string value) => _parent.MarkParentDirty();
+    partial void OnTypeChanged(string value) => _parent.MarkParentDirty();
+    partial void OnRequiredChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnMinVersionChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnCheckRegistryKeyChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnCheckRegistryValueChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnCheckFilePathChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnFixDownloadUrlChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnFixBundledPathChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallEnabledChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallKindChanged(string value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallSha256Changed(string? value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallTargetDirChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallBlocklistTextChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallTargetFileNameChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallArgsTextChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallNeedsAdminChanged(bool value) => _parent.MarkParentDirty();
+
+    public bool IsExtractZipKind => AutoInstallKind == "extractZip";
+    public bool IsRunInstallerKind => AutoInstallKind == "runInstaller";
+    public bool IsCopyFileKind => AutoInstallKind == "copyFile";
+
+    public Dependency ToModel()
+    {
+        var hasCheck = !string.IsNullOrWhiteSpace(CheckRegistryKey)
+            || !string.IsNullOrWhiteSpace(CheckRegistryValue)
+            || !string.IsNullOrWhiteSpace(CheckFilePath);
+        var auto = BuildAutoInstall();
+        var hasFix = !string.IsNullOrWhiteSpace(FixDownloadUrl)
+            || !string.IsNullOrWhiteSpace(FixBundledPath)
+            || auto != null;
+
+        return new Dependency
+        {
+            Id = Id,
+            Type = Type,
+            Required = Required,
+            MinVersion = string.IsNullOrWhiteSpace(MinVersion) ? null : MinVersion,
+            Check = hasCheck ? new DependencyCheck
+            {
+                RegistryKey = string.IsNullOrWhiteSpace(CheckRegistryKey) ? null : CheckRegistryKey,
+                RegistryValue = string.IsNullOrWhiteSpace(CheckRegistryValue) ? null : CheckRegistryValue,
+                FilePath = string.IsNullOrWhiteSpace(CheckFilePath) ? null : CheckFilePath
+            } : null,
+            Fix = hasFix ? new DependencyFix
+            {
+                DownloadUrl = string.IsNullOrWhiteSpace(FixDownloadUrl) ? null : FixDownloadUrl,
+                BundledPath = string.IsNullOrWhiteSpace(FixBundledPath) ? null : FixBundledPath,
+                AutoInstall = auto
+            } : null
+        };
+    }
+
+    private DependencyAutoInstall? BuildAutoInstall()
+    {
+        if (!AutoInstallEnabled) return null;
+        if (string.IsNullOrWhiteSpace(AutoInstallSha256))
+            throw new InvalidOperationException(
+                $"Dependency '{Id}': SHA256 is required for AutoInstall. Either compute it from a local file or paste the upstream hash.");
+
+        return AutoInstallKind switch
+        {
+            "extractZip" => new ExtractZipAutoInstall
+            {
+                Sha256 = AutoInstallSha256!.Trim(),
+                TargetDir = string.IsNullOrWhiteSpace(AutoInstallTargetDir) ? null : AutoInstallTargetDir,
+                Blocklist = ParseList(AutoInstallBlocklistText, ',')
+            },
+            "runInstaller" => new RunInstallerAutoInstall
+            {
+                Sha256 = AutoInstallSha256!.Trim(),
+                Args = ParseList(AutoInstallArgsText, ' '),
+                NeedsAdmin = AutoInstallNeedsAdmin
+            },
+            "copyFile" => new CopyFileAutoInstall
+            {
+                Sha256 = AutoInstallSha256!.Trim(),
+                TargetDir = string.IsNullOrWhiteSpace(AutoInstallTargetDir) ? null : AutoInstallTargetDir,
+                TargetFileName = string.IsNullOrWhiteSpace(AutoInstallTargetFileName) ? null : AutoInstallTargetFileName
+            },
+            _ => throw new InvalidOperationException($"Unknown AutoInstall kind: {AutoInstallKind}")
+        };
+    }
+
+    private static List<string> ParseList(string? text, char separator)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return [];
+        return text.Split(separator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                   .ToList();
+    }
+
+    public void RemoveSelf()
+    {
+        _parent.RemoveDependency(this);
+    }
+
+    // Without this override the ListBox falls back to the type's full name when
+    // a screen reader's container has no explicit AutomationProperties.Name.
+    public override string ToString() => Id;
+}

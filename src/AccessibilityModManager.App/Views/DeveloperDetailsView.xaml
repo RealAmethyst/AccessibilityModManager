@@ -6,7 +6,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
-             AutomationProperties.Name="Developer details">
+             AutomationProperties.Name="Author details">
 
     <UserControl.InputBindings>
         <!-- Escape navigates back, mirroring GameDetailsView. -->
@@ -15,6 +15,8 @@
 
     <Grid Margin="16">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -25,16 +27,58 @@
             <Button x:Name="BackButton"
                     Content="Back"
                     Command="{Binding GoBackCommand}"
-                    AutomationProperties.Name="Back"
+                    AutomationProperties.Name="{Binding DisplayName, StringFormat='Back. Currently viewing {0}'}"
                     Margin="0,0,12,0"/>
-            <TextBlock Text="{Binding Author}"
+            <TextBlock x:Name="HeadingText"
+                       Text="{Binding DisplayName}"
                        FontSize="24" FontWeight="Bold"
                        AutomationProperties.HeadingLevel="Level1"
                        VerticalAlignment="Center"/>
         </StackPanel>
 
+        <!-- Bio (only when author info is present) -->
+        <TextBlock Grid.Row="1"
+                   Text="{Binding Bio}"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,12"
+                   Visibility="{Binding HasBio, Converter={StaticResource BoolToVisConverter}}"/>
+
+        <!-- Social links (each link button hides when its URL isn't set) -->
+        <WrapPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button Content="Website"
+                    Command="{Binding OpenUrlCommand}"
+                    CommandParameter="{Binding WebsiteUrl}"
+                    AutomationProperties.Name="Open author website"
+                    Margin="0,0,8,8"
+                    Visibility="{Binding HasWebsite, Converter={StaticResource BoolToVisConverter}}"/>
+            <Button Content="Discord"
+                    Command="{Binding OpenUrlCommand}"
+                    CommandParameter="{Binding DiscordUrl}"
+                    AutomationProperties.Name="Open author Discord"
+                    Margin="0,0,8,8"
+                    Visibility="{Binding HasDiscord, Converter={StaticResource BoolToVisConverter}}"/>
+            <Button Content="Patreon"
+                    Command="{Binding OpenUrlCommand}"
+                    CommandParameter="{Binding PatreonUrl}"
+                    AutomationProperties.Name="Open author Patreon"
+                    Margin="0,0,8,8"
+                    Visibility="{Binding HasPatreon, Converter={StaticResource BoolToVisConverter}}"/>
+            <Button Content="GitHub"
+                    Command="{Binding OpenUrlCommand}"
+                    CommandParameter="{Binding GitHubUrl}"
+                    AutomationProperties.Name="Open author GitHub"
+                    Margin="0,0,8,8"
+                    Visibility="{Binding HasGitHub, Converter={StaticResource BoolToVisConverter}}"/>
+            <Button Content="Donate"
+                    Command="{Binding OpenUrlCommand}"
+                    CommandParameter="{Binding DonationUrl}"
+                    AutomationProperties.Name="Open author donation page"
+                    Margin="0,0,8,8"
+                    Visibility="{Binding HasDonation, Converter={StaticResource BoolToVisConverter}}"/>
+        </WrapPanel>
+
         <!-- List of mods this developer makes (one per supported game) -->
-        <ListView Grid.Row="1"
+        <ListView Grid.Row="3"
                   x:Name="ModsList"
                   ItemsSource="{Binding Mods}"
                   AutomationProperties.Name="Mods"
@@ -82,7 +126,7 @@
             </ListView.ItemTemplate>
         </ListView>
 
-        <TextBlock Grid.Row="2"
+        <TextBlock Grid.Row="4"
                    Text="{Binding StatusMessage}"
                    AutomationProperties.LiveSetting="Polite"
                    Margin="0,8,0,0"/>

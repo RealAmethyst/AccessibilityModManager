@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Installer;
@@ -38,10 +39,15 @@ public class InstallerEngineTests : IDisposable
         _receiptStore = new InMemoryReceiptStore();
         // Real DependencyChecker; tests with deps pass a present file path so it reports Installed.
         var dependencyChecker = new DependencyChecker(logger);
+        var scriptRunner = new LifecycleScriptRunner(logger);
+        // No tests currently exercise auto-install, so the in-memory dep receipt store is
+        // unused by the current suite — but the engine constructor requires it.
+        var depReceiptStore = new InMemoryDependencyReceiptStore();
+        var depAutoInstaller = new DependencyAutoInstaller(new System.Net.Http.HttpClient(), depReceiptStore, logger);
 
         _engine = new InstallerEngine(
             backupManager, actionExecutor, verifier, manifestParser, zipExtractor,
-            _receiptStore, dependencyChecker, logger);
+            _receiptStore, dependencyChecker, scriptRunner, depAutoInstaller, logger);
     }
 
     public void Dispose()
@@ -267,6 +273,237 @@ public class InstallerEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task InstallAsync_WithLifecycleScripts_ConfirmsAndRunsThem()
+    {
+        var zip = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@echo pre-install ran\r\n@exit /b 0\r\n", "Initialize", "Ensures order", "writes pre-install marker"),
+            postInstall: ("post.cmd", "@echo post-install ran\r\n@exit /b 0\r\n", "Finalize", "Final touches", "writes post-install marker"),
+            postUninstall: null,
+            files: new[] { ("mod.dll", "x") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        var receipt = await _engine.InstallAsync(
+            MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zip, host);
+
+        Assert.Equal(1, host.InstallConfirmCount);
+        Assert.Equal(2, host.StartingHooks.Count); // pre-install + post-install
+        Assert.Contains("Pre-install", host.StartingHooks);
+        Assert.Contains("Post-install", host.StartingHooks);
+        Assert.NotNull(receipt);
+    }
+
+    [Fact]
+    public async Task InstallAsync_UserDeclinesScripts_AbortsBeforeAnyChange()
+    {
+        var zip = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@echo should-not-run\r\n@exit /b 0\r\n", "noop", "noop", "nothing"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "x") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = false };
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+                MakeRelease("plug-a", "game-1", "1.0.0"), zip, host));
+
+        Assert.Empty(host.StartingHooks); // no script was run
+        Assert.False(File.Exists(Path.Combine(_gameDir, "mod.dll")));
+        Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
+    }
+
+    [Fact]
+    public async Task InstallAsync_FatalPreInstallScriptFailure_AbortsAndRollsBack()
+    {
+        // Pre-install runs first (after backup). When it exits non-zero with FailureFatal=true,
+        // the install must throw and no files should be written.
+        var zip = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("boom.cmd", "@exit /b 9\r\n", "fail", "fail", "nothing"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "x") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+                MakeRelease("plug-a", "game-1", "1.0.0"), zip, host));
+
+        Assert.False(File.Exists(Path.Combine(_gameDir, "mod.dll")));
+        Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
+    }
+
+    [Fact]
+    public async Task UninstallAsync_RunsCachedPostUninstallScript()
+    {
+        // Install a mod with a post-uninstall script, then uninstall and verify the host saw
+        // the cached script run.
+        var zip = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: null,
+            postInstall: null,
+            postUninstall: ("cleanup.cmd", "@echo cleanup\r\n@exit /b 0\r\n", "cleanup", "cleanup", "removes cached files"),
+            files: new[] { ("mod.dll", "x") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var installHost = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zip, installHost);
+
+        var uninstallHost = new RecordingScriptHost { ConfirmUninstallResult = true };
+        await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a", uninstallHost);
+
+        Assert.Equal(1, uninstallHost.UninstallConfirmCount);
+        Assert.Contains("Post-uninstall", uninstallHost.StartingHooks);
+        Assert.False(File.Exists(Path.Combine(_gameDir, "mod.dll")));
+        Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_DoesNotReConfirmScripts()
+    {
+        // Q9=A: scripts on the new version inherit the consent the user gave for the first
+        // install. Update path should NOT call ConfirmInstallScriptsAsync again.
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+        Assert.Equal(1, host.InstallConfirmCount);
+
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+
+        // Still only one install-confirm — the update path skipped re-asking.
+        Assert.Equal(1, host.InstallConfirmCount);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_SkipsPreInstallScript_WhenRunOnUpdateIsFalse()
+    {
+        // Default behavior: pre/post-install scripts are install-only. The update path skips
+        // them so a registry-write style script doesn't re-fire on every version bump.
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+        var hooksAfterInstall = host.StartingHooks.Count(h => h == "Pre-install");
+        Assert.Equal(1, hooksAfterInstall);
+
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+
+        // Still only the original first-install pre-install run — update path didn't fire it.
+        Assert.Equal(1, host.StartingHooks.Count(h => h == "Pre-install"));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_RunsPreInstallScript_WhenRunOnUpdateIsTrue()
+    {
+        // Opt-in: when the script declares runOnUpdate=true the engine fires it on update too.
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+
+        // Both install and update fired the pre-install hook.
+        Assert.Equal(2, host.StartingHooks.Count(h => h == "Pre-install"));
+    }
+
+    [Fact]
+    public async Task InstallAsync_PostInstallRunFromGameFolder_RunsFromGameFolderAndCleansUp()
+    {
+        // RunFromGameFolder=true means the manager copies the script into the game folder
+        // before running so the script's own location is the game folder. Default cleanup
+        // removes the file after — InstallToGameFolder=false on this script.
+        // The script is a .cmd that writes a marker file with the contents of CD (i.e. the
+        // working directory). We assert the marker was written into the game folder, which
+        // proves the script ran from there.
+        var markerName = "ran-from.txt";
+        var script = $"@echo off\r\necho %CD%>{markerName}\r\nexit /b 0\r\n";
+
+        var zip = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: null,
+            postInstall: ("post.cmd", script, "Marker writer", "Verifies run-from-game-folder", "writes ran-from.txt to game folder"),
+            postUninstall: null,
+            files: new[] { ("mod.dll", "data") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            postInstallRunFromGameFolder: true);
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zip, host);
+
+        // Marker must exist in the game folder, proving the script's CWD was the game folder.
+        var markerPath = Path.Combine(_gameDir, markerName);
+        Assert.True(File.Exists(markerPath), $"Expected marker at {markerPath}");
+        var markerContent = (await File.ReadAllTextAsync(markerPath)).Trim();
+        Assert.Equal(_gameDir.TrimEnd('\\'), markerContent.TrimEnd('\\'), ignoreCase: true);
+
+        // Default cleanup: the script copy in the game folder must be removed after the run
+        // since InstallToGameFolder is false.
+        Assert.False(File.Exists(Path.Combine(_gameDir, "post.cmd")),
+            "RunFromGameFolder + InstallToGameFolder=false should clean up the script copy");
+    }
+
+    [Fact]
     public async Task InstallAsync_MissingManifest_Throws()
     {
         var zipPath = Path.Combine(_tempRoot, $"nomanifest_{Guid.NewGuid():N}.zip");
@@ -342,6 +579,127 @@ public class InstallerEngineTests : IDisposable
     }
 
     /// <summary>
+    /// Creates a mod ZIP with manifest.json that includes lifecycle scripts. Each provided
+    /// script tuple is (filename, contents, what, why, modifies). Scripts are placed at the ZIP
+    /// root (not under files/) so the staging-dir validation passes. Always uses .cmd payloads
+    /// so the test can run on any Windows machine without PowerShell policy quirks.
+    /// </summary>
+    private string CreateModWithScripts(
+        string pluginId,
+        string gameId,
+        string modVersion,
+        (string fileName, string contents, string what, string why, string modifies)? preInstall,
+        (string fileName, string contents, string what, string why, string modifies)? postInstall,
+        (string fileName, string contents, string what, string why, string modifies)? postUninstall,
+        (string relPath, string content)[] files,
+        object[] actions,
+        bool preInstallRunOnUpdate = false,
+        bool postInstallRunOnUpdate = false,
+        bool preInstallRunFromGameFolder = false,
+        bool postInstallRunFromGameFolder = false)
+    {
+        var zipPath = Path.Combine(_tempRoot, $"pkg_{Guid.NewGuid():N}.zip");
+        using var stream = File.Create(zipPath);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
+
+        // Manifest as a Dictionary so we can use camelCase keys with the polymorphic JSON
+        // discriminator the parser expects.
+        var manifestObj = new Dictionary<string, object?>
+        {
+            ["gameId"] = gameId,
+            ["pluginId"] = pluginId,
+            ["modVersion"] = modVersion,
+            ["installActions"] = actions,
+            ["verify"] = Array.Empty<object>(),
+        };
+        if (preInstall is { } pre)
+        {
+            manifestObj["preInstall"] = MakeScriptObj(pre.fileName, pre.what, pre.why, pre.modifies,
+                preInstallRunOnUpdate, preInstallRunFromGameFolder);
+            AddZipEntry(archive, pre.fileName, pre.contents);
+        }
+        if (postInstall is { } post)
+        {
+            manifestObj["postInstall"] = MakeScriptObj(post.fileName, post.what, post.why, post.modifies,
+                postInstallRunOnUpdate, postInstallRunFromGameFolder);
+            AddZipEntry(archive, post.fileName, post.contents);
+        }
+        if (postUninstall is { } postUn)
+        {
+            manifestObj["postUninstall"] = MakeScriptObj(postUn.fileName, postUn.what, postUn.why, postUn.modifies);
+            AddZipEntry(archive, postUn.fileName, postUn.contents);
+        }
+
+        var manifestJson = JsonSerializer.Serialize(manifestObj);
+        var manifestEntry = archive.CreateEntry("manifest.json");
+        using (var w = new StreamWriter(manifestEntry.Open(), Encoding.UTF8))
+            w.Write(manifestJson);
+
+        foreach (var (rel, content) in files)
+        {
+            var e = archive.CreateEntry($"files/{rel}");
+            using var w = new StreamWriter(e.Open());
+            w.Write(content);
+        }
+        return zipPath;
+    }
+
+    private static object MakeScriptObj(
+        string executable, string what, string why, string modifies,
+        bool runOnUpdate = false, bool runFromGameFolder = false) =>
+        new
+        {
+            executable,
+            needsAdmin = false,
+            failureFatal = true,
+            what,
+            why,
+            modifies,
+            runOnUpdate,
+            runFromGameFolder
+        };
+
+    private static void AddZipEntry(ZipArchive archive, string path, string contents)
+    {
+        var e = archive.CreateEntry(path);
+        // UTF-8 without BOM — cmd.exe reads scripts byte-for-byte and treats a BOM as part of
+        // the first command name, breaking single-line scripts.
+        using var w = new StreamWriter(e.Open(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        w.Write(contents);
+    }
+
+    /// <summary>
+    /// Test double for IScriptHost: tracks every callback so a test can assert which hooks ran
+    /// and how many times the user was asked to confirm.
+    /// </summary>
+    private sealed class RecordingScriptHost : IScriptHost
+    {
+        public bool ConfirmInstallResult { get; set; } = true;
+        public bool ConfirmUninstallResult { get; set; } = true;
+        public int InstallConfirmCount { get; private set; }
+        public int UninstallConfirmCount { get; private set; }
+        public List<string> StartingHooks { get; } = new();
+        public List<string> OutputLines { get; } = new();
+        public List<(int code, bool succeeded)> Finishes { get; } = new();
+
+        public Task<bool> ConfirmInstallScriptsAsync(LifecycleScriptPrompt prompt, CancellationToken ct)
+        {
+            InstallConfirmCount++;
+            return Task.FromResult(ConfirmInstallResult);
+        }
+
+        public Task<bool> ConfirmUninstallScriptAsync(LifecycleScriptPrompt prompt, CancellationToken ct)
+        {
+            UninstallConfirmCount++;
+            return Task.FromResult(ConfirmUninstallResult);
+        }
+
+        public void OnScriptStarting(string hookLabel, string scriptName) => StartingHooks.Add(hookLabel);
+        public void OnScriptOutputLine(string line) => OutputLines.Add(line);
+        public void OnScriptFinished(int exitCode, bool succeeded) => Finishes.Add((exitCode, succeeded));
+    }
+
+    /// <summary>
     /// In-memory IReceiptStore so tests don't write to LocalAppData.
     /// </summary>
     private sealed class InMemoryReceiptStore : IReceiptStore
@@ -371,5 +729,38 @@ public class InstallerEngineTests : IDisposable
                 .ToList();
             return Task.FromResult(list);
         }
+
+        public string GetReceiptDirectory(string gameId, string pluginId) =>
+            Path.Combine(Path.GetTempPath(), "amm-test-receipts", pluginId, gameId);
+    }
+
+    /// <summary>
+    /// In-memory dep receipt store. The current test suite doesn't exercise auto-install, so
+    /// this is just satisfying the engine constructor.
+    /// </summary>
+    private sealed class InMemoryDependencyReceiptStore : IDependencyReceiptStore
+    {
+        private readonly Dictionary<(string game, string dep), DependencyReceipt> _store = new();
+
+        public Task<DependencyReceipt?> LoadAsync(string gameId, string dependencyId) =>
+            Task.FromResult(_store.TryGetValue((gameId, dependencyId), out var r) ? r : null);
+
+        public Task SaveAsync(DependencyReceipt receipt)
+        {
+            _store[(receipt.GameId, receipt.DependencyId)] = receipt;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteAsync(string gameId, string dependencyId)
+        {
+            _store.Remove((gameId, dependencyId));
+            return Task.CompletedTask;
+        }
+
+        public Task<List<DependencyReceipt>> LoadAllForGameAsync(string gameId) =>
+            Task.FromResult(_store.Where(kv => kv.Key.game == gameId).Select(kv => kv.Value).ToList());
+
+        public string GetBackupDirectory(string gameId, string dependencyId) =>
+            Path.Combine(Path.GetTempPath(), "amm-test-depreceipts", gameId, dependencyId, "backup");
     }
 }

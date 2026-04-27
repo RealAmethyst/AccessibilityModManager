@@ -1,0 +1,84 @@
+<UserControl x:Class="AccessibilityModManager.AuthorTool.Views.FiltersEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:controls="clr-namespace:AccessibilityModManager.AuthorTool.Controls"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+            <TextBlock Text="Tags"
+                       FontSize="16" FontWeight="SemiBold"
+                       AutomationProperties.HeadingLevel="Level2"
+                       Margin="0,0,0,4"/>
+            <TextBlock Text="What does this mod do? Pick the tags that apply. Users see these as filters in the manager."
+                       Foreground="#666"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,8"/>
+
+            <controls:FlatItemsControl x:Name="TagsList"
+                                       ItemsSource="{Binding TagSelections}"
+                                       KeyboardNavigation.DirectionalNavigation="Contained">
+                <controls:FlatItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <CheckBox Grid.Column="0"
+                                      IsChecked="{Binding IsSelected}"
+                                      Content="{Binding Label}"
+                                      AutomationProperties.Name="{Binding Label}"/>
+                            <Button Grid.Column="1"
+                                    Content="Remove"
+                                    Click="RemoveCustomTag_Click"
+                                    AutomationProperties.Name="Remove this custom tag"
+                                    Visibility="{Binding IsCustom, Converter={StaticResource BoolToVisConverter}}"
+                                    Margin="8,0,0,0"/>
+                        </Grid>
+                    </DataTemplate>
+                </controls:FlatItemsControl.ItemTemplate>
+            </controls:FlatItemsControl>
+
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,16">
+                <TextBox x:Name="CustomTagBox"
+                         AutomationProperties.Name="Custom tag name"
+                         AutomationProperties.HelpText="Type a tag id like rebindable-keys, then click Add custom tag"
+                         MinWidth="200"
+                         Margin="0,0,8,0"/>
+                <Button Content="Add custom tag"
+                        Click="AddCustomTag_Click"
+                        AutomationProperties.Name="Add custom tag"/>
+            </StackPanel>
+
+            <TextBlock Text="Languages"
+                       FontSize="16" FontWeight="SemiBold"
+                       AutomationProperties.HeadingLevel="Level2"
+                       Margin="0,0,0,4"/>
+            <TextBlock Text="Languages this mod supports. Users can filter by these in the manager."
+                       Foreground="#666"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,8"/>
+
+            <controls:FlatItemsControl ItemsSource="{Binding LanguageSelections}"
+                                       KeyboardNavigation.DirectionalNavigation="Contained">
+                <controls:FlatItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </controls:FlatItemsControl.ItemsPanel>
+                <controls:FlatItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <CheckBox IsChecked="{Binding IsSelected}"
+                                  Content="{Binding Label}"
+                                  AutomationProperties.Name="{Binding Label}"
+                                  Margin="0,2,16,2"
+                                  MinWidth="120"/>
+                    </DataTemplate>
+                </controls:FlatItemsControl.ItemTemplate>
+            </controls:FlatItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

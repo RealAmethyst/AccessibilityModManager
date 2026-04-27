@@ -28,6 +28,7 @@ x64/
 x86/
 publish/
 dist/
+dist-admin/
 
 ## User-specific
 *.suo
@@ -40,10 +41,17 @@ CLAUDE.md
 .claude/
 
 ## Internal session docs (operational notes, not for the public repo)
+AUTHOR_TOOL_DESIGN.md
 BUILTIN_PLUGIN_QUESTIONS.md
+FILTER_SYSTEM_DESIGN.md
+FILTER_SYSTEM_QUESTIONS.md
+POST_INSTALL_SCRIPT_DESIGN.md
+POST_INSTALL_SCRIPT_QUESTIONS.md
+REGISTRY_WORKFLOW_QUESTIONS.md
 BUNDLE_MELONLOADER.md
 ENCRYPT_KEY_STEPS.md
 FIRST_RELEASE_STEPS.md
+INDEX_EDITOR_QUESTIONS.md
 NEXT_STEPS.md
 PUBLISH_BLINDDUEL_V1.8.0.md
 PUBLISH_BUNDLED_MODS.md
@@ -59,3 +67,28 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 .DS_Store
+
+## Server secrets — never committed to this repo, even the .example.
+**/secrets.env
+
+## The whole download/web-UI server is operator infrastructure and stays out
+## of the public repo. The manager + AuthorTool talk to it over HTTPS/SFTP;
+## nothing in src/ depends on it being checked in.
+server/
+
+## Operator-side deployment + authoring docs — describe Ola's specific VPS
+## setup, OAuth credentials, web UI deploy steps, and SFTP automation.
+APEX_SITE_DEPLOY.md
+AUTOMATED_RELEASE_UPLOAD.md
+PATREON_OAUTH_REGISTRATION.md
+PATREON_VPS_SETUP.md
+WEB_UI_QUICK_DEPLOY.md
+WEB_UI_SETUP.md
+
+## Internal design Q&A — same pattern as the older *_QUESTIONS.md files above.
+DEPENDENCY_AUTO_INSTALL_QUESTIONS.md
+LIFECYCLE_SCRIPT_QUESTIONS.md
+PATREON_API_FINDINGS.md
+PATREON_GATING_QUESTIONS.md
+PATREON_POST_PER_GAME_QUESTIONS.md
+RELEASE_PROCESS.md

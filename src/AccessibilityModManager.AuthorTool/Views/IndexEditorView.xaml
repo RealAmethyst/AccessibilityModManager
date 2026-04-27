@@ -1,0 +1,187 @@
+<UserControl x:Class="AccessibilityModManager.AuthorTool.Views.IndexEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:views="clr-namespace:AccessibilityModManager.AuthorTool.Views"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance vm:IndexEditorViewModel}">
+    <UserControl.Resources>
+        <DataTemplate DataType="{x:Type vm:GameItemViewModel}">
+            <views:GameEditorView/>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,8">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="{Binding PatreonButtonText}"
+                        Command="{Binding SignInOrOutOfPatreonCommand}"
+                        AutomationProperties.Name="{Binding PatreonButtonText}"
+                        AutomationProperties.HelpText="Sign in to Patreon so the release dialog can fetch your tier list and let you mark releases as Patron-only."
+                        Margin="0,0,8,0"/>
+                <Button Content="Author info..."
+                        Command="{Binding EditAuthorInfoCommand}"
+                        AutomationProperties.Name="Edit author info"
+                        Margin="0,0,8,0"/>
+                <Button Content="Server settings..."
+                        Command="{Binding EditServerUploadSettingsCommand}"
+                        AutomationProperties.Name="Edit Patreon download server settings"
+                        AutomationProperties.HelpText="Configure where the AuthorTool uploads Patreon-gated wrapped ZIPs over SFTP."
+                        Margin="0,0,8,0"/>
+                <Button Content="Save"
+                        Command="{Binding SaveCommand}"
+                        AutomationProperties.Name="Save index file"
+                        Margin="0,0,8,0"/>
+                <Button Content="Push to GitHub"
+                        Command="{Binding PushToGitHubCommand}"
+                        AutomationProperties.Name="Push to GitHub"
+                        Margin="0,0,8,0"/>
+                <Button Content="Close project"
+                        Command="{Binding CloseProjectCommand}"
+                        AutomationProperties.Name="Close project"/>
+            </StackPanel>
+            <StackPanel>
+                <TextBlock FontSize="22" FontWeight="Bold"
+                           AutomationProperties.HeadingLevel="Level1">
+                    <Run Text="Plugin: "/>
+                    <Run Text="{Binding PluginId, Mode=OneWay}"/>
+                </TextBlock>
+                <TextBlock Text="{Binding DisplayProjectPath}" Foreground="#888"/>
+                <TextBlock Text="{Binding PatreonStatusText}" Foreground="#666"
+                           AutomationProperties.LiveSetting="Polite"
+                           Margin="0,2,0,0"/>
+            </StackPanel>
+        </DockPanel>
+
+        <Border Grid.Row="1"
+                Background="#E7F1FF"
+                BorderBrush="#B6D4FE"
+                BorderThickness="1"
+                CornerRadius="3"
+                Padding="10,6"
+                Margin="0,0,0,8"
+                Visibility="{Binding RegistryCheckCompleted, Converter={StaticResource BoolToVisConverter}}">
+            <DockPanel LastChildFill="True">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button Content="Request listing"
+                            Command="{Binding RequestRegistryListingCommand}"
+                            AutomationProperties.Name="Open a feature request to add this plugin to the public registry"
+                            Margin="0,0,8,0"
+                            Visibility="{Binding IsListedInRegistry, Converter={StaticResource NullableFalseToVisConverter}}"/>
+                    <Button Content="Recheck"
+                            Command="{Binding RecheckRegistryMembershipCommand}"
+                            AutomationProperties.Name="Re-check registry membership"/>
+                </StackPanel>
+                <TextBlock Text="{Binding RegistryStatusText}"
+                           AutomationProperties.LiveSetting="Polite"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="#084298"/>
+            </DockPanel>
+        </Border>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="280"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <Grid Grid.Column="0" Margin="0,0,8,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Text="Games"
+                           FontSize="16" FontWeight="SemiBold"
+                           AutomationProperties.HeadingLevel="Level2"
+                           Margin="0,0,0,4"/>
+
+                <ListBox Grid.Row="1"
+                         x:Name="GamesList"
+                         ItemsSource="{Binding Games}"
+                         SelectedItem="{Binding SelectedGame}"
+                         AutomationProperties.Name="Games in this index">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding DisplayName}"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel>
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                <TextBlock FontSize="11" Foreground="#888">
+                                    <Run Text="{Binding GameId, Mode=OneWay}"/>
+                                </TextBlock>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="Add game"
+                            Command="{Binding AddGameCommand}"
+                            AutomationProperties.Name="Add a game"
+                            Margin="0,0,8,0"/>
+                    <Button Content="Remove"
+                            Command="{Binding RemoveSelectedGameCommand}"
+                            AutomationProperties.Name="Remove selected game"/>
+                </StackPanel>
+            </Grid>
+
+            <Grid Grid.Column="1">
+                <Border BorderBrush="#DDD" BorderThickness="1" Padding="12">
+                    <ContentPresenter Content="{Binding SelectedGame}"/>
+                </Border>
+                <TextBlock Text="No game selected. Pick one on the left, or click 'Add game'."
+                           Foreground="#888"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding SelectedGame, Converter={StaticResource NullToVisibleConverter}}"/>
+            </Grid>
+        </Grid>
+
+        <Border Grid.Row="3"
+                Background="#FFF3CD"
+                BorderBrush="#FFE69C"
+                BorderThickness="1"
+                CornerRadius="3"
+                Padding="10,6"
+                Margin="0,8,0,0"
+                Visibility="{Binding HasGamesWithoutFilters, Converter={StaticResource BoolToVisConverter}}">
+            <TextBlock Text="{Binding FilterWarningText}"
+                       AutomationProperties.LiveSetting="Polite"
+                       TextWrapping="Wrap"
+                       Foreground="#664D03"/>
+        </Border>
+
+        <Grid Grid.Row="4" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0"
+                       Text="{Binding StatusMessage}"
+                       AutomationProperties.LiveSetting="Polite"
+                       TextWrapping="Wrap"
+                       Visibility="{Binding StatusMessage, Converter={StaticResource NullToCollapsedConverter}}"/>
+            <TextBlock Grid.Column="1"
+                       Text="Unsaved changes"
+                       Foreground="#B00"
+                       FontWeight="SemiBold"
+                       Visibility="{Binding HasUnsavedChanges, Converter={StaticResource BoolToVisConverter}}"/>
+        </Grid>
+    </Grid>
+</UserControl>

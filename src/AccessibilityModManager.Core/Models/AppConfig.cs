@@ -18,4 +18,13 @@ public sealed class AppConfig
     public Dictionary<string, string> KnownGameOverrides { get; set; } = [];
     public string? LastSelectedGameId { get; set; }
     public List<string> EnabledPlugins { get; set; } = [];
+
+    /// <summary>
+    /// Filter selections on the Mods tab. Persisted across sessions so a user who always
+    /// browses with "controller-support" filtered on doesn't have to re-check it every launch.
+    /// "Reset filters" in the sidebar clears these.
+    /// </summary>
+    public List<string> SelectedTagFilters { get; set; } = [];
+    public List<string> SelectedLanguageFilters { get; set; } = [];
+    public List<string> SelectedAuthorFilters { get; set; } = [];
 }

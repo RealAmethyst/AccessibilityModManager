@@ -1,0 +1,153 @@
+<Window x:Class="AccessibilityModManager.AuthorTool.Views.AddGameDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:views="clr-namespace:AccessibilityModManager.AuthorTool.Views"
+        xmlns:controls="clr-namespace:AccessibilityModManager.AuthorTool.Controls"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance vm:AddGameDialogViewModel}"
+        Title="Add game"
+        Height="700" Width="640"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        AutomationProperties.Name="Add game">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="Add a game"
+                   FontSize="20" FontWeight="Bold"
+                   AutomationProperties.HeadingLevel="Level1"
+                   Margin="0,0,0,4"/>
+
+        <TextBlock Grid.Row="1"
+                   Text="Use the tabs below to fill in the basics and the filters. You can edit dependencies and probe rules afterwards on the game form."
+                   TextWrapping="Wrap"
+                   Foreground="#666"
+                   Margin="0,0,0,12"/>
+
+        <TabControl Grid.Row="2">
+            <TabItem Header="General" AutomationProperties.Name="General">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Display name:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 x:Name="DisplayNameBox"
+                                 Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Game display name"
+                                 AutomationProperties.HelpText="The game's title as users see it. Example: Yu-Gi-Oh! Master Duel"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Game ID:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="1" Grid.Column="1"
+                                 Text="{Binding GameId, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Game ID"
+                                 AutomationProperties.HelpText="Lowercase identifier used inside index.json. Auto-fills from display name."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Mod name:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="2" Grid.Column="1"
+                                 Text="{Binding ModName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Mod display name"
+                                 AutomationProperties.HelpText="The mod's name as users see it. Example: BlindDuel, DigimonNOAccess. If left blank, the manager guesses from the GitHub repo."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Description:" VerticalAlignment="Top" Margin="0,8"/>
+                        <TextBox Grid.Row="3" Grid.Column="1"
+                                 Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 MinHeight="80"
+                                 AutomationProperties.Name="Mod description"
+                                 AutomationProperties.HelpText="A short description of what this mod does. Shown to users in the manager."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Steam App ID:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="4" Grid.Column="1"
+                                 Text="{Binding SteamAppId, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Steam App ID"
+                                 AutomationProperties.HelpText="Numeric Steam App ID. Optional but strongly recommended."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2"
+                                   Text="If a Steam App ID is set, the manager finds the install via Steam and launches the game with steam://rungameid/{id}. No exe name needed in that case."
+                                   Foreground="#666"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,8"/>
+
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="Exe name (optional):" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="6" Grid.Column="1"
+                                 Text="{Binding ExeName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Executable filename"
+                                 AutomationProperties.HelpText="Filename like MasterDuel.exe. Not a steam:// URL. Used as a folder verification check and as a launch fallback when no Steam ID is set."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2"
+                                   Text="A literal filename like 'MasterDuel.exe' — not a URL. Leave blank if you don't need non-Steam launch support."
+                                   Foreground="#666"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,8"/>
+
+                        <TextBlock Grid.Row="8" Grid.Column="0" Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
+                        <controls:FlatComboBox Grid.Row="8" Grid.Column="1"
+                                  IsEditable="True"
+                                  ItemsSource="{Binding AvailableGitHubRepos}"
+                                  Text="{Binding GitHubRepo, UpdateSourceTrigger=PropertyChanged}"
+                                  AutomationProperties.Name="GitHub repo for this game"
+                                  AutomationProperties.HelpText="Optional. Pick from your GitHub repos, or type a name. Saved per game in author config."
+                                  Margin="0,4"/>
+
+                        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
+                                   Text="The GitHub repo isn't written to index.json — it's local author-only metadata used by the upload flow."
+                                   Foreground="#666"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,8"/>
+                    </Grid>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Filters" AutomationProperties.Name="Filters">
+                <views:FiltersEditorView Margin="8" DataContext="{Binding}"/>
+            </TabItem>
+        </TabControl>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Add"
+                    Command="{Binding SaveCommand}"
+                    AutomationProperties.Name="Add the game"
+                    IsDefault="True"
+                    MinWidth="80" Margin="0,0,8,0"/>
+            <Button Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    AutomationProperties.Name="Cancel adding a game"
+                    IsCancel="True"
+                    MinWidth="80"/>
+        </StackPanel>
+    </Grid>
+</Window>

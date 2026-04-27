@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Windows;
+using AccessibilityModManager.App.Services;
 using AccessibilityModManager.App.ViewModels;
 using AccessibilityModManager.App.Views;
 using AccessibilityModManager.Core.Interfaces;
@@ -7,6 +8,7 @@ using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Detection;
 using AccessibilityModManager.Infrastructure.Installer;
 using AccessibilityModManager.Infrastructure.Logging;
+using AccessibilityModManager.Infrastructure.Patreon;
 using AccessibilityModManager.Infrastructure.Security;
 using AccessibilityModManager.Infrastructure.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -25,6 +27,10 @@ public partial class App : Application
         var services = new ServiceCollection();
         ConfigureServices(services);
         _serviceProvider = services.BuildServiceProvider();
+
+        // Hydrate any saved Patreon session before the UI mounts so visibility filters
+        // (which depend on entitlement) start with the right state.
+        _ = _serviceProvider.GetRequiredService<PatreonService>().LoadAsync();
 
         var mainWindow = _serviceProvider.GetRequiredService<MainWindow>();
         mainWindow.Show();
@@ -56,10 +62,20 @@ public partial class App : Application
             sp.GetRequiredService<HttpClient>(),
             sp.GetRequiredService<ILogger>(),
             sp.GetService<RegistrySignatureVerifier>()));
+        services.AddSingleton<UpdateChecker>();
         services.AddSingleton<IPluginRepoClient, PluginRepoClient>();
-        services.AddSingleton<IPluginStateStore, PluginStateStore>();
         services.AddSingleton<IReceiptStore, ReceiptStore>();
+        services.AddSingleton<IDependencyReceiptStore, DependencyReceiptStore>();
         services.AddSingleton<IDependencyChecker, DependencyChecker>();
+
+        // Patreon sign-in / entitlement gating.
+        services.AddSingleton<IPatreonAccountStore, DpapiPatreonAccountStore>();
+        services.AddSingleton<IPatreonEntitlementCache, PatreonEntitlementCache>();
+        services.AddSingleton(sp => new PatreonClient(
+            sp.GetRequiredService<HttpClient>(),
+            PatreonAppRegistry.Manager,
+            sp.GetRequiredService<ILogger>()));
+        services.AddSingleton<PatreonService>();
 
         // Infrastructure — detection
         services.AddSingleton<IGameVerifier, GameVerifier>();
@@ -72,6 +88,8 @@ public partial class App : Application
         services.AddSingleton<InstallVerifier>();
         services.AddSingleton<ManifestParser>();
         services.AddSingleton<SafeZipExtractor>();
+        services.AddSingleton<LifecycleScriptRunner>();
+        services.AddSingleton<DependencyAutoInstaller>();
         services.AddSingleton<IInstallerEngine, InstallerEngine>();
 
         // ViewModels
@@ -87,7 +105,6 @@ public partial class App : Application
             // PluginsViewModel needs a callback to open Developer Details for a chosen plugin.
             var pluginsVm = new PluginsViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),
-                sp.GetRequiredService<IPluginStateStore>(),
                 sp.GetRequiredService<IConfigService>(),
                 sp.GetRequiredService<ILogger>(),
                 plugin =>
@@ -114,11 +131,11 @@ public partial class App : Application
             var gamesListVm = new GamesListViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),
                 sp.GetRequiredService<IPluginRepoClient>(),
-                sp.GetRequiredService<IPluginStateStore>(),
                 sp.GetRequiredService<IConfigService>(),
                 sp.GetRequiredService<IReceiptStore>(),
                 sp.GetRequiredService<IGameVerifier>(),
                 sp.GetRequiredService<GameAggregator>(),
+                sp.GetRequiredService<PatreonService>(),
                 sp.GetRequiredService<ILogger>(),
                 (gameInstall, activeIndexes) =>
                 {
@@ -130,7 +147,14 @@ public partial class App : Application
                 },
                 BrowseForFolder);
 
-            mainVm = new MainViewModel(pluginsVm, gamesListVm, settingsVm);
+            mainVm = new MainViewModel(
+                pluginsVm, gamesListVm, settingsVm,
+                sp.GetRequiredService<UpdateChecker>(),
+                sp.GetRequiredService<ILogger>(),
+                ShowInfoDialog,
+                ConfirmDialog,
+                info => RunUpdate(sp, info),
+                (info, current) => ShowUpdateDialog(sp, info, current));
             return mainVm;
         });
 
@@ -146,6 +170,7 @@ public partial class App : Application
             sp.GetRequiredService<IReceiptStore>(),
             sp.GetRequiredService<IDependencyChecker>(),
             sp.GetRequiredService<IConfigService>(),
+            sp.GetRequiredService<PatreonService>(),
             sp.GetRequiredService<ILogger>(),
             () => mainVm.CloseGameDetails(),
             ShowInfoDialog,
@@ -155,9 +180,10 @@ public partial class App : Application
                 var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
                 ProgressDialog? dialog = null;
+                ProgressDialogViewModel? progressVm = null;
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
-                    var progressVm = sp.GetRequiredService<ProgressDialogViewModel>();
+                    progressVm = sp.GetRequiredService<ProgressDialogViewModel>();
                     dialog = new ProgressDialog(progressVm)
                     {
                         Owner = Application.Current.MainWindow
@@ -166,9 +192,17 @@ public partial class App : Application
                     dialog.Show();
                 });
 
+                // Build a single host that satisfies both IScriptHost and IDependencyHost so
+                // dep consents, script confirmations, and live stdout streaming all surface
+                // in the same UI the user is already watching.
+                var host = new DialogScriptHost(
+                    Application.Current.Dispatcher,
+                    () => (Window?)dialog ?? Application.Current.MainWindow,
+                    progressVm!);
+
                 try
                 {
-                    await work(cts.Token);
+                    await work(host, host, cts.Token);
                 }
                 finally
                 {
@@ -177,7 +211,75 @@ public partial class App : Application
                         if (dialog is { IsVisible: true }) dialog.Close();
                     });
                 }
-            });
+            },
+            // Uninstall path doesn't open a ProgressDialog, but the engine still needs an
+            // IScriptHost so cached post-uninstall scripts can be confirmed + streamed. The
+            // ProgressDialogViewModel here is a one-off scratch instance — script output isn't
+            // shown anywhere, but the modal warning still works.
+            () => new DialogScriptHost(
+                Application.Current.Dispatcher,
+                () => Application.Current.MainWindow,
+                sp.GetRequiredService<ProgressDialogViewModel>()),
+            ShowChangelog,
+            PickFile);
+    }
+
+    /// <summary>
+    /// File-picker callback used by the GameDetails install flow when the signed-in user is
+    /// the creator of a Patreon-gated release's campaign — Patreon refuses to hand the
+    /// creator a download URL for their own paid post, so we ask them to point at the
+    /// wrapped ZIP they already have. SHA256 still gates correctness.
+    /// </summary>
+    private static string? PickFile(string title, string filter, string? suggestedFileName)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = title,
+            Filter = filter,
+            FileName = suggestedFileName ?? string.Empty,
+            CheckFileExists = true,
+            CheckPathExists = true,
+            Multiselect = false
+        };
+        var owner = Application.Current.Windows.OfType<Window>().FirstOrDefault(w => w.IsActive)
+                    ?? Application.Current.MainWindow;
+        return dialog.ShowDialog(owner) == true ? dialog.FileName : null;
+    }
+
+    /// <summary>
+    /// Modal in-app changelog viewer. Uses the in-index notes when present, falls back to
+    /// pointing at the external URL. Plain text rendering — markdown stays as-is, which is
+    /// readable and screen-reader friendly. (A proper markdown renderer is a future polish.)
+    /// </summary>
+    /// <summary>
+    /// Pops the modal Update Available dialog and, if the user clicks Install, kicks off the
+    /// download + installer launch. Marshaled onto the UI thread because the update check
+    /// runs on a background task.
+    /// </summary>
+    private static void ShowUpdateDialog(IServiceProvider sp, UpdateInfo info, Version current)
+    {
+        Application.Current?.Dispatcher.InvokeAsync(() =>
+        {
+            var vm = new UpdateAvailableDialogViewModel(info, current);
+            var dialog = new UpdateAvailableDialog(vm)
+            {
+                Owner = Application.Current?.MainWindow
+            };
+            dialog.ShowDialog();
+            if (dialog.UserChoseInstall)
+                RunUpdate(sp, info);
+        });
+    }
+
+    private static void ShowChangelog(string modName, string version, string? notes, string? externalUrl)
+    {
+        var owner = Application.Current?.MainWindow;
+        var dialog = new ChangelogDialog
+        {
+            Owner = owner
+        };
+        dialog.Show(modName, version, notes, externalUrl);
+        dialog.ShowDialog();
     }
 
     /// <summary>
@@ -203,6 +305,73 @@ public partial class App : Application
         OrUeiLZWMTgg4PWc06FFTyECAwEAAQ==
         -----END PUBLIC KEY-----
         """;
+
+    /// <summary>
+    /// Downloads the new manager installer with SHA256 verification, launches it, and exits the
+    /// running app so Inno's upgrade flow can replace files. Surface errors to the user via the
+    /// standard MessageBox path.
+    /// </summary>
+    private static async void RunUpdate(IServiceProvider sp, UpdateInfo info)
+    {
+        var checker = sp.GetRequiredService<UpdateChecker>();
+        var logger = sp.GetRequiredService<ILogger>();
+
+        ProgressDialog? dialog = null;
+        var progressVm = sp.GetRequiredService<ProgressDialogViewModel>();
+        var cts = new CancellationTokenSource();
+        var progress = new Progress<ProgressInfo>(p => progressVm.OnProgress(p));
+
+        try
+        {
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                dialog = new ProgressDialog(progressVm)
+                {
+                    Owner = Application.Current.MainWindow
+                };
+                dialog.Start("Downloading update", $"Downloading version {info.Version}...", cts, progress);
+                dialog.Show();
+            });
+
+            var byteProgress = new Progress<double>(fraction =>
+            {
+                progressVm.OnProgress(new ProgressInfo
+                {
+                    Percentage = fraction * 100,
+                    StatusText = $"Downloading version {info.Version} ({(int)(fraction * 100)}%)",
+                    StepDescription = $"{(int)(fraction * 100)}% complete"
+                });
+            });
+
+            var installerPath = await checker.DownloadAsync(info, byteProgress, cts.Token);
+
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (dialog is { IsVisible: true }) dialog.Close();
+            });
+
+            // Hand off to the OS — Inno detects the existing install via AppId and runs an
+            // upgrade. The current app must exit before file replacement runs.
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = installerPath,
+                UseShellExecute = true
+            });
+
+            logger.Information("Launched update installer; shutting down to allow upgrade");
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (dialog is { IsVisible: true }) dialog.Close();
+            });
+            logger.Error(ex, "Update installation failed");
+            ShowInfoDialog("Update failed",
+                $"Could not install the update:\n\n{ex.Message}\n\nYou can download the installer manually from {info.ReleasePageUrl}.");
+        }
+    }
 
     /// <summary>
     /// Modal info dialog shown after install/update/uninstall completes successfully. WPF's

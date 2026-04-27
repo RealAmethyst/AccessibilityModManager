@@ -43,6 +43,7 @@ dotnet publish $AppProj `
     -c $Configuration `
     -r win-x64 `
     --self-contained false `
+    -p:Version=$Version `
     -p:DebugType=none `
     -p:DebugSymbols=false `
     -o $PublishDir
@@ -91,7 +92,12 @@ if ($Iscc) {
     $InstallerPath = Join-Path $DistDir "AccessibilityModManager-$Version-Setup.exe"
     if (Test-Path $InstallerPath) {
         $InstallerSizeMB = [math]::Round((Get-Item $InstallerPath).Length / 1MB, 1)
+        $InstallerHash = (Get-FileHash $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $HashPath = "$InstallerPath.sha256"
+        Set-Content -Path $HashPath -Value $InstallerHash -Encoding utf8 -NoNewline
         Write-Host "`nInstaller: $InstallerPath ($InstallerSizeMB MB)" -ForegroundColor Green
+        Write-Host "SHA256: $InstallerHash"
+        Write-Host "Hash file: $HashPath" -ForegroundColor Green
     }
 } else {
     Write-Host "`nInno Setup not found - skipping installer build." -ForegroundColor Yellow

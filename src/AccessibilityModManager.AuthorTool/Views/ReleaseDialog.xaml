@@ -1,0 +1,351 @@
+<Window x:Class="AccessibilityModManager.AuthorTool.Views.ReleaseDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
+        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:controls="clr-namespace:AccessibilityModManager.AuthorTool.Controls"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance vm:ReleaseDialogViewModel}"
+        Title="{Binding DialogTitle}"
+        Height="780" Width="640"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        AutomationProperties.Name="{Binding DialogTitle}">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="{Binding DialogTitle}"
+                   FontSize="20" FontWeight="Bold"
+                   AutomationProperties.HeadingLevel="Level1"
+                   Margin="0,0,0,4"/>
+
+        <TextBlock Grid.Row="1"
+                   Text="{Binding SubtitleText}"
+                   TextWrapping="Wrap"
+                   Foreground="#666"
+                   Margin="0,0,0,12"/>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Focusable="False">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Patreon-only toggle. First control in the form because flipping it
+                     changes which fields below it are relevant (no GitHub repo / public URL
+                     etc. when the asset lives on Patreon). Bare CheckBox in a Grid row —
+                     no wrapping containers — so WPF's Space-toggles-CheckBox path works
+                     the same as it does anywhere else in the app. -->
+                <CheckBox Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="3"
+                          Content="Make this release Patreon-only (the wrapped ZIP lives on a tier-locked Patreon post)"
+                          IsChecked="{Binding IsPatreonGated}"
+                          AutomationProperties.Name="Patreon-gate this release"
+                          AutomationProperties.HelpText="When checked, the GitHub upload fields disappear. The manager downloads the asset from Patreon for entitled patrons only."
+                          FontWeight="SemiBold"
+                          Background="#F8F4FF"
+                          Padding="6"
+                          Margin="0,0,0,8"/>
+
+                <!-- Expanded Patreon panel — visible when the toggle is on. Inside is the
+                     sign-in row, tier checkboxes, instructions, and post URL field. -->
+                <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
+                        Background="#F8F4FF" BorderBrush="#D9C9F2" BorderThickness="1"
+                        CornerRadius="3" Padding="10,8" Margin="0,0,0,12"
+                        Visibility="{Binding IsPatreonGated, Converter={StaticResource BoolToVisConverter}}">
+                  <StackPanel>
+                    <StackPanel Orientation="Horizontal"
+                                Visibility="{Binding IsNotSignedInToPatreon, Converter={StaticResource BoolToVisConverter}}"
+                                Margin="0,0,0,8">
+                      <Button Content="Sign in to Patreon..."
+                              Command="{Binding SignInToPatreonInDialogCommand}"
+                              AutomationProperties.Name="Sign in to Patreon to load your tier list"
+                              MinWidth="180"/>
+                      <TextBlock Text="Tier checkboxes will load after sign-in."
+                                 Foreground="#666"
+                                 FontStyle="Italic"
+                                 VerticalAlignment="Center"
+                                 Margin="12,0,0,0"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding PatreonSignedInAsText}"
+                               Foreground="#666"
+                               Visibility="{Binding IsSignedInToPatreon, Converter={StaticResource BoolToVisConverter}}"
+                               Margin="0,0,0,8"/>
+                    <TextBlock Text="{Binding PatreonStatusText}"
+                               TextWrapping="Wrap"
+                               Foreground="#666"
+                               Margin="0,0,0,8"/>
+
+                    <TextBlock Text="Tiers that grant access:" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                    <!-- FlatItemsControl: outer "list" announcement is suppressed and per-item
+                         wrappers are marked IsControlElement=true / IsContentElement=false so
+                         NVDA stays in focus mode (Space toggles) but stops saying
+                         "data item N of M" for each item. No AutomationProperties.Name on the
+                         ItemsControl so Tab doesn't read a phantom "Patreon tiers that grant
+                         access list" before the first CheckBox. -->
+                    <controls:FlatItemsControl ItemsSource="{Binding PatreonTierSelections}"
+                                               Margin="0,0,0,8">
+                        <controls:FlatItemsControl.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:PatreonTierSelection}">
+                                <CheckBox Content="{Binding DisplayLabel}"
+                                          IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                          AutomationProperties.Name="{Binding DisplayLabel}"
+                                          Margin="0,2"/>
+                            </DataTemplate>
+                        </controls:FlatItemsControl.ItemTemplate>
+                    </controls:FlatItemsControl>
+
+                    <!-- Server-upload mode: short note replaces the post-setup steps. -->
+                    <TextBlock TextWrapping="Wrap"
+                               Foreground="#666"
+                               FontStyle="Italic"
+                               Margin="0,8,0,8"
+                               Visibility="{Binding IsServerUploadInfoVisible, Converter={StaticResource BoolToVisConverter}}">
+                        <Run Text="Server upload is configured."/><LineBreak/>
+                        <Run Text="When you click Save, the AuthorTool will upload the wrapped ZIP to your server and write the resulting URL into the index. No Patreon post needed — the manager downloads from your server using the patron's Patreon bearer token."/>
+                    </TextBlock>
+
+                    <!-- Patreon-post-as-CDN mode: full instructions + post URL + attachment picker. -->
+                    <TextBlock TextWrapping="Wrap"
+                               Foreground="#666"
+                               FontStyle="Italic"
+                               Margin="0,8,0,8"
+                               Visibility="{Binding IsPatreonPostUiVisible, Converter={StaticResource BoolToVisConverter}}">
+                        <Run Text="How to set this up:"/><LineBreak/>
+                        <Run Text="1. Build your wrapped ZIP via the 'Build...' button below and copy its SHA256."/><LineBreak/>
+                        <Run Text="2. On patreon.com, create a new post locked to the tiers you ticked above."/><LineBreak/>
+                        <Run Text="3. Attach the wrapped ZIP to that post."/><LineBreak/>
+                        <Run Text="4. Publish the post and copy its URL into the field below."/><LineBreak/>
+                        <Run Text="5. Click Validate to confirm the post is reachable, then save the release."/>
+                    </TextBlock>
+
+                    <TextBlock Text="Patreon post URL:" FontWeight="SemiBold" Margin="0,4,0,4"
+                               Visibility="{Binding IsPatreonPostUiVisible, Converter={StaticResource BoolToVisConverter}}"/>
+                    <Grid Visibility="{Binding IsPatreonPostUiVisible, Converter={StaticResource BoolToVisConverter}}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 Text="{Binding PatreonPostUrl, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Patreon post URL"
+                                 AutomationProperties.HelpText="Paste the URL of the Patreon post you attached the wrapped ZIP to."
+                                 FontFamily="Consolas"/>
+                        <Button Grid.Column="1"
+                                Content="Validate"
+                                Command="{Binding ValidatePatreonPostCommand}"
+                                AutomationProperties.Name="Validate Patreon post URL"
+                                Margin="8,0,0,0"
+                                MinWidth="100"/>
+                    </Grid>
+
+                    <!-- Attachment picker: visible after Validate when the post has at
+                         least one attachment, AND when server upload isn't configured. -->
+                    <TextBlock Text="Pick the attachment for this release:"
+                               FontWeight="SemiBold"
+                               Margin="0,12,0,4">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding IsPatreonPostUiVisible}" Value="True"/>
+                                            <Condition Binding="{Binding IsPatreonAttachmentDropdownVisible}" Value="True"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <ComboBox ItemsSource="{Binding PatreonAttachmentFileNames}"
+                              SelectedItem="{Binding SelectedPatreonAttachmentFileName}"
+                              AutomationProperties.Name="Patreon post attachment for this release"
+                              AutomationProperties.HelpText="Pick which file on the post belongs to this release."
+                              Margin="0,0,0,4">
+                        <ComboBox.Style>
+                            <Style TargetType="ComboBox">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding IsPatreonPostUiVisible}" Value="True"/>
+                                            <Condition Binding="{Binding IsPatreonAttachmentDropdownVisible}" Value="True"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ComboBox.Style>
+                    </ComboBox>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Grid.Row="2" Grid.Column="0"
+                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                           Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
+                <controls:FlatComboBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                          x:Name="SourceRepoBox"
+                          IsEditable="True"
+                          ItemsSource="{Binding AvailableGitHubRepos}"
+                          Text="{Binding SourceRepo, UpdateSourceTrigger=PropertyChanged}"
+                          AutomationProperties.Name="GitHub repo for this game"
+                          AutomationProperties.HelpText="Pick from your GitHub repos, or type a name like RealAmethyst slash DigimonNOAccess"
+                          Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                          Margin="0,4"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Version:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
+                         x:Name="VersionBox"
+                         Text="{Binding Version, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Release version"
+                         AutomationProperties.HelpText="Examples: 1.0.0, 1.8.0, 2.0.0-beta1"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Channel:" VerticalAlignment="Center" Margin="0,4"/>
+                <ComboBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
+                          SelectedItem="{Binding Channel}"
+                          AutomationProperties.Name="Release channel"
+                          Margin="0,4">
+                    <sys:String>stable</sys:String>
+                    <sys:String>beta</sys:String>
+                </ComboBox>
+
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Tag:" VerticalAlignment="Center" Margin="0,4"
+                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
+                <TextBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2"
+                         Text="{Binding TagName, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Tag name"
+                         AutomationProperties.HelpText="Auto-fills from version. Override only if your tags don't follow v X.Y.Z."
+                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Wrapped ZIP:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="6" Grid.Column="1"
+                         Text="{Binding LocalZipPath, Mode=OneWay}"
+                         IsReadOnly="True"
+                         AutomationProperties.Name="Selected wrapped ZIP path"
+                         Margin="0,4"/>
+                <StackPanel Grid.Row="6" Grid.Column="2" Orientation="Horizontal" Margin="8,4,0,4">
+                    <Button Content="Build..."
+                            Command="{Binding BuildPackageCommand}"
+                            AutomationProperties.Name="Build wrapped ZIP from a folder of mod files"
+                            Margin="0,0,4,0"/>
+                    <Button Content="Pick..."
+                            Command="{Binding PickZipCommand}"
+                            AutomationProperties.Name="Pick a pre-built wrapped ZIP file"/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="Asset filename:" VerticalAlignment="Center" Margin="0,4"
+                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
+                <TextBox Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2"
+                         Text="{Binding AssetFileName, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Asset filename"
+                         AutomationProperties.HelpText="The filename used when uploading. Defaults to the picked file's name."
+                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="SHA256:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2"
+                         Text="{Binding Sha256, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="SHA 256 hash"
+                         FontFamily="Consolas"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="9" Grid.Column="0" Text="Public URL:" VerticalAlignment="Center" Margin="0,4"
+                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
+                <TextBox Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2"
+                         Text="{Binding PackageUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Public package URL"
+                         AutomationProperties.HelpText="Pre-filled from the GitHub repo, tag, and asset filename. Override only if you uploaded the asset somewhere else."
+                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                         Margin="0,4"/>
+
+                <!-- Changelog URL is auto-filled from the GitHub release page, so it only
+                     applies to public releases. Patreon-gated releases use the post body
+                     for changelog narrative. -->
+                <TextBlock Grid.Row="10" Grid.Column="0" Text="Changelog URL:" VerticalAlignment="Center" Margin="0,4"
+                           ToolTip="Optional. A web page describing what changed in this version. The manager can show this to users when offering an update."
+                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
+                <TextBox Grid.Row="10" Grid.Column="1" Grid.ColumnSpan="2"
+                         Text="{Binding ChangelogUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Changelog URL"
+                         AutomationProperties.HelpText="Auto-fills to the GitHub release page once the repo and tag are set. The notes you write below appear there."
+                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="3"
+                           Text="Release notes (markdown):"
+                           AutomationProperties.HeadingLevel="Level2"
+                           Margin="0,12,0,4"/>
+                <TextBox Grid.Row="12" Grid.Column="0" Grid.ColumnSpan="3"
+                         Text="{Binding ReleaseNotes, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True"
+                         AcceptsTab="False"
+                         TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto"
+                         MinHeight="160"
+                         AutomationProperties.Name="Release notes"
+                         AutomationProperties.HelpText="Markdown supported. Saved into the plugin index so the manager can show users what changed when offering an update. Also sent to the GitHub release body on Upload-and-save."
+                         FontFamily="Consolas"
+                         Margin="0,4"/>
+
+            </Grid>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="3"
+                   Text="{Binding StatusMessage}"
+                   AutomationProperties.LiveSetting="Polite"
+                   TextWrapping="Wrap"
+                   Margin="0,8,0,8"
+                   Visibility="{Binding StatusMessage, Converter={StaticResource NullToCollapsedConverter}}"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <!-- "Upload and save" only makes sense for public releases — Patreon-gated
+                 releases get their asset onto Patreon via the author's manual post creation,
+                 not via gh CLI. Hidden when the Patreon toggle is on. -->
+            <Button Content="Upload and save"
+                    Command="{Binding UploadAndSaveCommand}"
+                    AutomationProperties.Name="Upload to GitHub and save release"
+                    IsDefault="True"
+                    Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                    Margin="0,0,8,0" MinWidth="120"/>
+            <Button Content="{Binding SaveButtonText}"
+                    Command="{Binding SaveWithoutUploadCommand}"
+                    AutomationProperties.Name="{Binding SaveButtonText}"
+                    Margin="0,0,8,0" MinWidth="140"/>
+            <Button Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    AutomationProperties.Name="Cancel adding a release"
+                    IsCancel="True"
+                    MinWidth="80"/>
+        </StackPanel>
+    </Grid>
+</Window>

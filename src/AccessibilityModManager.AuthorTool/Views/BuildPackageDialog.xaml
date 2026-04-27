@@ -1,0 +1,138 @@
+<Window x:Class="AccessibilityModManager.AuthorTool.Views.BuildPackageDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance vm:BuildPackageDialogViewModel}"
+        Title="Build mod package"
+        Height="640" Width="640"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        AutomationProperties.Name="Build mod package">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   FontSize="20" FontWeight="Bold"
+                   AutomationProperties.HeadingLevel="Level1"
+                   Margin="0,0,0,4">
+            <Run Text="Build a wrapped package for "/>
+            <Run Text="{Binding GameDisplayName, Mode=OneWay}"/>
+        </TextBlock>
+
+        <TextBlock Grid.Row="1"
+                   TextWrapping="Wrap"
+                   Foreground="#666"
+                   Margin="0,0,0,12">
+            Pick the folder that contains your mod's files. The tool generates the manifest
+            automatically: every top-level file in the folder copies to the game folder root,
+            every top-level folder copies as-is. So a layout like
+            "version.dll, MelonLoader/, Mods/MyMod.dll" produces the right install actions
+            with no manual editing.
+        </TextBlock>
+
+        <Grid Grid.Row="2" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="160"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Grid.Column="0" Text="Mod source folder:" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1"
+                     x:Name="SourceFolderBox"
+                     Text="{Binding SourceFolder, UpdateSourceTrigger=PropertyChanged}"
+                     AutomationProperties.Name="Mod source folder path"
+                     Margin="0,0,0,0"/>
+            <Button Grid.Column="2"
+                    Content="Pick..."
+                    Command="{Binding PickSourceCommand}"
+                    AutomationProperties.Name="Pick mod source folder"
+                    Margin="8,0,0,0"/>
+        </Grid>
+
+        <Grid Grid.Row="3" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="160"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Grid.Column="0" Text="Version:" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1"
+                     Text="{Binding Version, UpdateSourceTrigger=PropertyChanged}"
+                     AutomationProperties.Name="Mod version"
+                     AutomationProperties.HelpText="Examples: 1.0.0, 1.8.0, 2.0.0-beta1"/>
+        </Grid>
+
+        <TextBlock Grid.Row="4"
+                   Text="Detected layout:"
+                   FontWeight="SemiBold"
+                   AutomationProperties.HeadingLevel="Level2"
+                   Margin="0,8,0,4"/>
+
+        <TextBlock Grid.Row="5"
+                   Text="No source folder picked yet."
+                   Foreground="#888"
+                   Margin="0,0,0,4"
+                   Visibility="{Binding SourceFolder, Converter={StaticResource NullToVisibleConverter}}"/>
+
+        <ListBox Grid.Row="6"
+                 ItemsSource="{Binding DetectedEntries}"
+                 AutomationProperties.Name="Detected entries that will be packaged"
+                 Visibility="{Binding SourceFolder, Converter={StaticResource NullToCollapsedConverter}}">
+            <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem">
+                    <Setter Property="AutomationProperties.Name">
+                        <Setter.Value>
+                            <MultiBinding StringFormat="{}{0}, {1}">
+                                <Binding Path="Name"/>
+                                <Binding Path="Description"/>
+                            </MultiBinding>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </ListBox.ItemContainerStyle>
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Margin="0,0,8,0"/>
+                        <TextBlock Text="{Binding Description}" Foreground="#666"/>
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <TextBlock Grid.Row="7"
+                   Text="{Binding StatusMessage}"
+                   AutomationProperties.LiveSetting="Polite"
+                   TextWrapping="Wrap"
+                   Margin="0,8,0,8"
+                   Visibility="{Binding StatusMessage, Converter={StaticResource NullToCollapsedConverter}}"/>
+
+        <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Build"
+                    Command="{Binding BuildCommand}"
+                    AutomationProperties.Name="Build the wrapped package"
+                    IsDefault="True"
+                    Margin="0,0,8,0" MinWidth="80"/>
+            <Button Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    AutomationProperties.Name="Cancel building"
+                    IsCancel="True"
+                    MinWidth="80"/>
+        </StackPanel>
+    </Grid>
+</Window>

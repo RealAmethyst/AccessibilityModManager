@@ -75,17 +75,29 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
     }
 
     /// <summary>
-    /// GET <paramref name="url"/> with <c>Cache-Control: no-cache</c> on the request, asking
-    /// caches/CDNs in the path to revalidate with the origin instead of serving a stale copy.
-    /// Without this, GitHub's raw-URL CDN can serve content from minutes ago for the brief
-    /// window after a push, which is exactly long enough for users to see "the registry didn't
-    /// update" right after a release.
+    /// GET <paramref name="url"/> with both <c>Cache-Control: no-cache</c> and a unique
+    /// cache-buster query parameter. The header alone isn't enough — GitHub's raw-URL CDN
+    /// (Fastly) ignores client revalidation hints for under-a-minute-old objects, so users
+    /// see content from minutes ago for the window right after a push. Appending
+    /// <c>?_=&lt;ms&gt;</c> makes every request a different URL from the CDN's perspective,
+    /// forcing it to fetch from origin.
     /// </summary>
     private Task<HttpResponseMessage> SendNoCacheAsync(Uri url, CancellationToken ct)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        var request = new HttpRequestMessage(HttpMethod.Get, AppendCacheBuster(url));
         request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
         request.Headers.Pragma.ParseAdd("no-cache");
         return _httpClient.SendAsync(request, ct);
+    }
+
+    /// <summary>
+    /// Adds a fresh <c>_=&lt;unix-ms&gt;</c> query parameter so each request looks unique to
+    /// CDNs. Preserves any existing query string.
+    /// </summary>
+    internal static Uri AppendCacheBuster(Uri url)
+    {
+        var separator = string.IsNullOrEmpty(url.Query) ? "?" : "&";
+        var ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return new Uri(url.AbsoluteUri + separator + "_=" + ms);
     }
 }

@@ -1,0 +1,14 @@
+<Application x:Class="AccessibilityModManager.AuthorTool.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:converters="clr-namespace:AccessibilityModManager.AuthorTool.Converters">
+    <Application.Resources>
+        <converters:BoolToVisibilityConverter x:Key="BoolToVisConverter"/>
+        <converters:InvertBoolConverter x:Key="InvertBoolConverter"/>
+        <converters:InvertBoolToVisibilityConverter x:Key="InvertBoolToVisConverter"/>
+        <converters:NullToCollapsedConverter x:Key="NullToCollapsedConverter"/>
+        <converters:NullToVisibleConverter x:Key="NullToVisibleConverter"/>
+        <converters:NullToBoolConverter x:Key="NullToBoolConverter"/>
+        <converters:NullableFalseToVisibilityConverter x:Key="NullableFalseToVisConverter"/>
+    </Application.Resources>
+</Application>
