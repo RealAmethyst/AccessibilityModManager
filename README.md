@@ -13,7 +13,7 @@ Grab the latest installer from the [Releases page](https://github.com/RealAmethy
 - **Browse mods** by game, language, or accessibility tag (screen-reader support, controller-only, completable, etc.)
 - **Detect installs** automatically through Steam — or browse to a folder if you installed elsewhere
 - **Install / update / uninstall** with one click. Files removed at uninstall come back from a per-install backup; replaced files are restored to their original bytes.
-- **Dependency checks** before install: the manager warns or blocks when a mod needs MelonLoader, BepInEx, a runtime, etc.
+- **Dependency checks** before install: the manager automatically installs dependencies when a mod needs MelonLoader, BepInEx ETC. Developers must specify this
 
 ---
 
@@ -41,7 +41,7 @@ The manager refuses to do anything that isn't verifiable end-to-end:
 
 ## The AuthorTool
 
-`PluginIndexAuthor-{version}.exe` (next to the manager installer on the [Releases page](https://github.com/RealAmethyst/AccessibilityModManager/releases)) is a small WPF app that handles the entire publishing workflow for you. It uses the `gh` CLI under the hood for all GitHub interaction; install [GitHub CLI](https://cli.github.com/) and run `gh auth login` once before using it.
+`PluginIndexAuthor-{version}.exe` (next to the manager installer on the [Releases page](https://github.com/RealAmethyst/AccessibilityModManager/releases)) is a small WPF app that handles the entire publishing workflow for you. It uses the `gh` CLI under the hood for all GitHub interaction; install [GitHub CLI](https://cli.github.com/) and run `gh auth login` once before using it. This now also supports placing tester builds behind your own Patreon community, meaning people will need to have access to your Patreon tier that you select before the mod release shows up in the manager for them.
 
 What the tool gives you:
 
