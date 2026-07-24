@@ -34,6 +34,8 @@ public partial class DeveloperDetailsViewModel : ObservableObject
 
     // Cached after load so OpenMod can build the navigation payload.
     private PluginRepoIndex? _pluginIndex;
+    private bool _indexFromCache;
+    private DateTimeOffset? _indexCachedAtUtc;
     private List<GameInstall> _installs = [];
 
     public string PluginId => _plugin.Id;
@@ -126,7 +128,12 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         try
         {
             if (refetchIndex || _pluginIndex == null)
-                _pluginIndex = await _repoClient.FetchPluginIndexAsync(_plugin);
+            {
+                var indexFetch = await _repoClient.FetchPluginIndexAsync(_plugin);
+                _pluginIndex = indexFetch.Value;
+                _indexFromCache = indexFetch.FromCache;
+                _indexCachedAtUtc = indexFetch.CachedAtUtc;
+            }
 
             // Surface author info from the index (preferred) or fall back to the registry's
             // PluginEntry. Either way the bio + social links light up the Authors view.
@@ -150,7 +157,26 @@ public partial class DeveloperDetailsViewModel : ObservableObject
             // developer's games.
             var indexes = new Dictionary<string, PluginRepoIndex> { [_plugin.Id] = _pluginIndex };
             var config = await _configService.LoadAsync();
-            _installs = await _gameAggregator.DetectAllGamesAsync(indexes, config.KnownGameOverrides);
+            var detection = await _gameAggregator.DetectAllGamesAsync(
+                indexes, config.KnownGameOverrides, config.InstalledEmulators);
+            _installs = detection.Installs;
+
+            // Same silent auto-heal persistence as the Mods tab (finding 32), with the same
+            // fresh read-modify-write so a whole-document save can't clobber concurrent writes.
+            if (detection.HealedOverrides.Count > 0)
+            {
+                try
+                {
+                    var latest = await _configService.LoadAsync();
+                    foreach (var (gameId, path) in detection.HealedOverrides)
+                        latest.KnownGameOverrides[gameId] = path;
+                    await _configService.SaveAsync(latest);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning(ex, "Couldn't persist healed game overrides");
+                }
+            }
 
             Mods.Clear();
             foreach (var game in _pluginIndex.Games)
@@ -184,7 +210,10 @@ public partial class DeveloperDetailsViewModel : ObservableObject
             }
 
             var detected = Mods.Count(m => m.IsDetected);
-            StatusMessage = $"{Mods.Count} mod{(Mods.Count == 1 ? "" : "s")} ({detected} detected).";
+            var summary = $"{Mods.Count} mod{(Mods.Count == 1 ? "" : "s")} ({detected} detected).";
+            StatusMessage = _indexFromCache
+                ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(_indexCachedAtUtc)}. {summary}"
+                : summary;
         }
         catch (Exception ex)
         {

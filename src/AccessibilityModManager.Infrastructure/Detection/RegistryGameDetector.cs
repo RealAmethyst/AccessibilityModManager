@@ -27,24 +27,23 @@ public sealed class RegistryGameDetector : IRegistryGameDetector
         var probe = game.RegistryProbe;
         if (probe is null) return null;
 
-        string? raw;
-        try
+        // A 32-bit installer's key lands in the WOW6432Node (32-bit) view, invisible from the
+        // default 64-bit view unless the author spells the WOW path out — a Windows quirk authors
+        // shouldn't need to know exists (audit finding 35). Both views are read; each distinct
+        // value gets the full resolve attempt, 64-bit first.
+        foreach (var raw in ReadRegistryValueCandidates(game, probe))
         {
-            raw = ReadRegistryValue(probe);
-        }
-        catch (Exception ex)
-        {
-            _logger.Debug(ex, "Registry probe failed for {Game} ({Hive}\\{Key}\\{Value})",
-                game.DisplayName, probe.Hive, probe.Key, probe.Value);
-            return null;
+            var resolved = TryResolveFrom(game, probe, raw);
+            if (resolved is not null) return resolved;
         }
 
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            _logger.Debug("Registry probe for {Game}: value '{Value}' missing or empty", game.DisplayName, probe.Value);
-            return null;
-        }
+        _logger.Debug("Registry probe for {Game}: no candidate from either registry view verified",
+            game.DisplayName);
+        return null;
+    }
 
+    private string? TryResolveFrom(GameDefinition game, RegistryProbe probe, string raw)
+    {
         // Normalize: strip surrounding quotes and trailing separators so child enumeration and
         // verification behave consistently.
         var basePath = raw.Trim().Trim('"').TrimEnd('\\', '/');
@@ -84,21 +83,49 @@ public sealed class RegistryGameDetector : IRegistryGameDetector
         return null;
     }
 
-    private static string? ReadRegistryValue(RegistryProbe probe)
+    /// <summary>
+    /// Reads the probe's value from the 64-bit view, then the 32-bit (WOW6432Node) view,
+    /// returning each distinct non-empty string once, in that order. A failure in one view only
+    /// skips that view. On 32-bit Windows both views are the same store; dedupe collapses them.
+    /// </summary>
+    private List<string> ReadRegistryValueCandidates(GameDefinition game, RegistryProbe probe)
     {
-        var root = OpenHive(probe.Hive);
-        if (root is null) return null;
+        var candidates = new List<string>();
 
-        // Predefined hive keys (Registry.CurrentUser etc.) are process-wide singletons and must
-        // not be disposed — only dispose the subkey we open.
-        using var key = root.OpenSubKey(probe.Key);
-        return key?.GetValue(probe.Value) as string;
+        var hive = HiveOf(probe.Hive);
+        if (hive is null) return candidates;
+
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            try
+            {
+                using var root = RegistryKey.OpenBaseKey(hive.Value, view);
+                using var key = root.OpenSubKey(probe.Key);
+                if (key?.GetValue(probe.Value) is string value &&
+                    !string.IsNullOrWhiteSpace(value) &&
+                    !candidates.Contains(value, StringComparer.OrdinalIgnoreCase))
+                {
+                    candidates.Add(value);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug(ex, "Registry probe failed for {Game} ({Hive}\\{Key}\\{Value}, {View})",
+                    game.DisplayName, probe.Hive, probe.Key, probe.Value, view);
+            }
+        }
+
+        if (candidates.Count == 0)
+            _logger.Debug("Registry probe for {Game}: value '{Value}' missing or empty in both views",
+                game.DisplayName, probe.Value);
+
+        return candidates;
     }
 
-    private static RegistryKey? OpenHive(string hive) => hive?.Trim().ToUpperInvariant() switch
+    private static RegistryHive? HiveOf(string hive) => hive?.Trim().ToUpperInvariant() switch
     {
-        "HKCU" or "HKEY_CURRENT_USER" => Registry.CurrentUser,
-        "HKLM" or "HKEY_LOCAL_MACHINE" => Registry.LocalMachine,
+        "HKCU" or "HKEY_CURRENT_USER" => RegistryHive.CurrentUser,
+        "HKLM" or "HKEY_LOCAL_MACHINE" => RegistryHive.LocalMachine,
         _ => null
     };
 }

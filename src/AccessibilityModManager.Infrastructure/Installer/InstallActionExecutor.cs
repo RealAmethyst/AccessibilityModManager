@@ -133,11 +133,15 @@ public sealed class InstallActionExecutor
     }
 
     /// <summary>
-    /// Resolves a relative path within a base directory, and validates it doesn't escape.
+    /// Resolves a relative path within a base directory, and validates it doesn't escape —
+    /// textually (containment) and physically (no reparse point between the base and the path;
+    /// a junction inside the game folder would let a text-contained write land elsewhere).
     /// </summary>
     private static string ResolveSafe(string baseDir, string relativePath, string context)
     {
         var fullPath = Path.GetFullPath(Path.Combine(baseDir, relativePath));
-        return PathSafety.EnsureContained(baseDir, fullPath, context);
+        var contained = PathSafety.EnsureContained(baseDir, fullPath, context);
+        PathSafety.EnsureNoReparseTraversal(baseDir, contained, context);
+        return contained;
     }
 }

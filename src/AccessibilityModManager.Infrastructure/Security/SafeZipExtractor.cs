@@ -57,6 +57,11 @@ public sealed class SafeZipExtractor
                     $"Zip entry '{entry.FullName}' would extract outside target directory. Archive may be malicious.");
             }
 
+            // Physical containment: a junction/symlink between the target root and this entry
+            // would redirect the write outside the folder the text says it stays in. The root
+            // itself may be a link (shimmed install roots are); nothing deeper may be.
+            PathSafety.EnsureNoReparseTraversal(fullTargetPath, destinationPath, $"zip entry '{entry.FullName}'");
+
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
 
             using var entryStream = entry.Open();

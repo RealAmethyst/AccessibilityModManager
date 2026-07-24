@@ -12,7 +12,7 @@ public sealed class AppConfig
     /// Read-only computed property so deserializing an old config that includes this field is
     /// silently ignored (System.Text.Json skips read-only properties on deserialization).
     /// </summary>
-    public string PluginRegistryUrl => "https://github.com/RealAmethyst/accessibility-mod-manager-registry/releases/latest/download/plugin-registry.json";
+    public string PluginRegistryUrl => "https://accessibilitymods.com/registry/plugin-registry.json";
 
     public string DefaultChannel { get; set; } = "stable";
     public Dictionary<string, string> KnownGameOverrides { get; set; } = [];

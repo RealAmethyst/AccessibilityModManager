@@ -44,8 +44,9 @@ public class TrustHardeningTests : IDisposable
     public async Task RegistryClient_SignedRegistry_FetchesAndRecordsHighwater()
     {
         var client = MakeRegistryClient(RegistryJson("1.0.0"));
-        var registry = await client.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
-        Assert.Equal("1.0.0", registry.RegistryVersion);
+        var fetch = await client.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
+        Assert.Equal("1.0.0", fetch.Value.RegistryVersion);
+        Assert.False(fetch.FromCache);
         var marker = File.ReadAllLines(Path.Combine(_tempRoot, "registry-highwater.txt"));
         Assert.Equal("1.0.0", marker[0].Trim());
         Assert.Equal(64, marker[1].Trim().Length); // content hash recorded alongside the version
@@ -77,8 +78,8 @@ public class TrustHardeningTests : IDisposable
 
         // A valid v2 must still be acceptable afterwards.
         var v2 = MakeRegistryClient(RegistryJson("2.0.0"));
-        var registry = await v2.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
-        Assert.Equal("2.0.0", registry.RegistryVersion);
+        var fetch = await v2.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
+        Assert.Equal("2.0.0", fetch.Value.RegistryVersion);
     }
 
     [Fact]
@@ -202,6 +203,96 @@ public class TrustHardeningTests : IDisposable
         Assert.Throws<InvalidOperationException>(() => PathSafety.EnsureSafeId(id, "id"));
     }
 
+    [Fact]
+    public async Task Index_UnobtainableRelease_IsDroppedNotFatal()
+    {
+        // The live 2026-07-24 regression: ONE stale gated release with empty gate fields (no
+        // server URL, no post id — authored before the download server existed) made the whole
+        // index throw, emptying the catalog for every user. Authoring mistakes drop the one
+        // release; the rest of the index must survive.
+        var json = """
+        {
+          "pluginId": "plug-a",
+          "repoVersion": "1",
+          "generatedAt": "2026-07-24T00:00:00Z",
+          "games": [ { "gameId": "game-1", "displayName": "Game 1" } ],
+          "releasesByGameId": {
+            "game-1": [
+              {
+                "pluginId": "plug-a",
+                "gameId": "game-1",
+                "version": "1.0-beta1",
+                "channel": "stable",
+                "sha256": "00",
+                "patreon": { "campaignId": "c1", "tierIds": ["t1"], "serverUrl": "", "postId": "" }
+              },
+              {
+                "pluginId": "plug-a",
+                "gameId": "game-1",
+                "version": "1.0-beta2",
+                "channel": "stable",
+                "sha256": "00",
+                "patreon": { "campaignId": "c1", "tierIds": ["t1"], "serverUrl": "https://downloads.example.invalid/x.zip", "postId": "" }
+              },
+              {
+                "pluginId": "plug-a",
+                "gameId": "game-1",
+                "version": "2.0.0",
+                "channel": "stable",
+                "packageUrl": "https://example.invalid/pkg.zip",
+                "sha256": "00"
+              }
+            ]
+          }
+        }
+        """;
+
+        var index = await FetchIndexAsync(json);
+
+        var releases = index.ReleasesByGameId["game-1"];
+        Assert.Equal(2, releases.Count); // beta1 dropped, valid gated beta2 + public 2.0.0 kept
+        Assert.DoesNotContain(releases, r => r.Version == "1.0-beta1");
+        Assert.Contains(releases, r => r.Version == "1.0-beta2");
+        Assert.Contains(releases, r => r.Version == "2.0.0");
+    }
+
+    [Fact]
+    public async Task Index_ReleaseWithNoSourceAtAll_IsDroppedNotFatal()
+    {
+        var json = """
+        {
+          "pluginId": "plug-a",
+          "repoVersion": "1",
+          "generatedAt": "2026-07-24T00:00:00Z",
+          "games": [ { "gameId": "game-1", "displayName": "Game 1" } ],
+          "releasesByGameId": {
+            "game-1": [
+              {
+                "pluginId": "plug-a",
+                "gameId": "game-1",
+                "version": "0.9.0",
+                "channel": "stable",
+                "sha256": "00"
+              },
+              {
+                "pluginId": "plug-a",
+                "gameId": "game-1",
+                "version": "1.0.0",
+                "channel": "stable",
+                "packageUrl": "https://example.invalid/pkg.zip",
+                "sha256": "00"
+              }
+            ]
+          }
+        }
+        """;
+
+        var index = await FetchIndexAsync(json);
+
+        var releases = index.ReleasesByGameId["game-1"];
+        Assert.Equal("1.0.0", Assert.Single(releases).Version);
+    }
+
     // ---------------------------------------------------------------- harness
 
     private PluginRegistryClient MakeRegistryClient(string registryJson, bool tamperAfterSigning = false)
@@ -240,7 +331,9 @@ public class TrustHardeningTests : IDisposable
 
     private async Task<PluginRepoIndex> FetchIndexAsync(string indexJson)
     {
-        var client = new PluginRepoClient(new HttpClient(new RouteHandler(_ => indexJson)), TestLogger.Create());
+        // Cache dir under the test temp root so test fetches never touch the real user cache.
+        var client = new PluginRepoClient(new HttpClient(new RouteHandler(_ => indexJson)), TestLogger.Create(),
+            Path.Combine(_tempRoot, "index-cache"));
         var entry = new PluginEntry
         {
             Id = "plug-a",
@@ -249,7 +342,7 @@ public class TrustHardeningTests : IDisposable
             Description = "desc",
             RepoIndexUrl = new Uri("https://example.invalid/index.json")
         };
-        return await client.FetchPluginIndexAsync(entry);
+        return (await client.FetchPluginIndexAsync(entry)).Value;
     }
 
     private static string IndexJson(

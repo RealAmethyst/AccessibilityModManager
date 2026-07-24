@@ -7,11 +7,23 @@
 
 param(
     [string]$Configuration = "Release",
-    [string]$Version = "1.0.0"
+    # Defaults to the version in the App csproj — running without -Version must never stamp a
+    # release-day build as 1.0.0.
+    [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $csproj = Join-Path $Root "src\AccessibilityModManager.App\AccessibilityModManager.App.csproj"
+    $match = Select-String -Path $csproj -Pattern "<Version>([^<]+)</Version>"
+    if (-not $match) {
+        throw "No -Version given and no <Version> found in $csproj"
+    }
+    $Version = $match.Matches[0].Groups[1].Value.Trim()
+    Write-Host "Version taken from csproj: $Version"
+}
 
 # Ensure dotnet is on PATH
 $DotnetDir = "C:\Program Files\dotnet"

@@ -30,6 +30,11 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     [ObservableProperty]
     private string? _checkRegistryValue;
 
+    /// <summary>"HKLM" (default when empty) or "HKCU". The manager probes both registry views
+    /// (64-bit and WOW6432Node) of the hive automatically.</summary>
+    [ObservableProperty]
+    private string? _checkRegistryHive;
+
     [ObservableProperty]
     private string? _checkFilePath;
 
@@ -83,6 +88,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
         _minVersion = dep.MinVersion;
         _checkRegistryKey = dep.Check?.RegistryKey;
         _checkRegistryValue = dep.Check?.RegistryValue;
+        _checkRegistryHive = dep.Check?.RegistryHive;
         _checkFilePath = dep.Check?.FilePath;
         _fixDownloadUrl = dep.Fix?.DownloadUrl;
         _fixBundledPath = dep.Fix?.BundledPath;
@@ -122,6 +128,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     partial void OnMinVersionChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryKeyChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryValueChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnCheckRegistryHiveChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckFilePathChanged(string? value) => _parent.MarkParentDirty();
     partial void OnFixDownloadUrlChanged(string? value) => _parent.MarkParentDirty();
     partial void OnFixBundledPathChanged(string? value) => _parent.MarkParentDirty();
@@ -177,6 +184,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
             {
                 RegistryKey = string.IsNullOrWhiteSpace(CheckRegistryKey) ? null : CheckRegistryKey,
                 RegistryValue = string.IsNullOrWhiteSpace(CheckRegistryValue) ? null : CheckRegistryValue,
+                RegistryHive = string.IsNullOrWhiteSpace(CheckRegistryHive) ? null : CheckRegistryHive.Trim(),
                 FilePath = string.IsNullOrWhiteSpace(CheckFilePath) ? null : CheckFilePath
             } : null,
             Fix = hasFix ? new DependencyFix

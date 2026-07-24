@@ -149,7 +149,7 @@
                                         Visibility="{Binding IsInstalled, Converter={StaticResource InvertBoolToVisConverter}}"
                                         AutomationProperties.Name="{Binding InstallButtonName}"
                                         Margin="0,0,8,0"/>
-                                <Button Content="Update"
+                                <Button Content="{Binding UpdateButtonLabel}"
                                         Command="{Binding DataContext.UpdateCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                         CommandParameter="{Binding}"
                                         Visibility="{Binding CanUpdate, Converter={StaticResource BoolToVisConverter}}"

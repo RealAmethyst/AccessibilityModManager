@@ -27,6 +27,10 @@ public sealed class BackupManager
         // pluginId/gameId are untrusted — keep the backup folder inside the game install.
         var backupFolder = PathSafety.CombineContained(
             gameInstallPath, "modmanager_backups", pluginId, gameId, folderName);
+        // Guard BEFORE creating: the chain above the fresh leaf could pre-exist, and a junction
+        // planted at, say, modmanager_backups would otherwise get directories created through it
+        // (and would redirect every backup — the only copy of the user's originals).
+        PathSafety.EnsureNoReparseTraversal(gameInstallPath, backupFolder, "backup folder");
         Directory.CreateDirectory(backupFolder);
         _logger.Information("Created backup folder: {BackupFolder}", backupFolder);
         return backupFolder;
@@ -40,6 +44,7 @@ public sealed class BackupManager
     {
         var sourcePath = Path.GetFullPath(Path.Combine(gameInstallPath, relativeFilePath));
         ValidatePathWithinDirectory(sourcePath, gameInstallPath, "source file");
+        PathSafety.EnsureNoReparseTraversal(gameInstallPath, sourcePath, "source file");
 
         if (!File.Exists(sourcePath))
         {
@@ -48,7 +53,14 @@ public sealed class BackupManager
         }
 
         var backupRelativePath = relativeFilePath;
-        var backupFullPath = Path.Combine(backupFolder, backupRelativePath);
+        var backupFullPath = Path.GetFullPath(Path.Combine(backupFolder, backupRelativePath));
+        ValidatePathWithinDirectory(backupFullPath, backupFolder, "backup destination");
+        PathSafety.EnsureNoReparseTraversal(backupFolder, backupFullPath, "backup destination");
+        // Anchor the walk at the GAME root too when the backup folder lives inside it (the mod
+        // flow always does this): the segment between the game root and the backup folder must
+        // also be link-free, or the folder-level exemption above would trust a planted junction.
+        if (PathSafety.IsContained(gameInstallPath, backupFolder))
+            PathSafety.EnsureNoReparseTraversal(gameInstallPath, backupFullPath, "backup destination");
 
         // First backup wins: if two actions in one install touch the same file, the second's
         // "current content" is the first action's output, not the user's original. Overwriting
@@ -73,9 +85,16 @@ public sealed class BackupManager
     /// </summary>
     public bool RestoreFile(string gameInstallPath, string relativeFilePath, string backupFolder, string backupRelativePath)
     {
-        var backupFullPath = Path.Combine(backupFolder, backupRelativePath);
+        // The backup-relative path comes from the receipt. Receipts are tamper-checked, but the
+        // read stays confined to the backup folder anyway — defense in depth, same as the target.
+        var backupFullPath = Path.GetFullPath(Path.Combine(backupFolder, backupRelativePath));
+        ValidatePathWithinDirectory(backupFullPath, backupFolder, "restore source");
+        PathSafety.EnsureNoReparseTraversal(backupFolder, backupFullPath, "restore source");
+        if (PathSafety.IsContained(gameInstallPath, backupFolder))
+            PathSafety.EnsureNoReparseTraversal(gameInstallPath, backupFullPath, "restore source");
         var targetPath = Path.GetFullPath(Path.Combine(gameInstallPath, relativeFilePath));
         ValidatePathWithinDirectory(targetPath, gameInstallPath, "restore target");
+        PathSafety.EnsureNoReparseTraversal(gameInstallPath, targetPath, "restore target");
 
         if (!File.Exists(backupFullPath))
         {
@@ -97,6 +116,7 @@ public sealed class BackupManager
     {
         var fullPath = Path.GetFullPath(Path.Combine(gameInstallPath, relativeFilePath));
         ValidatePathWithinDirectory(fullPath, gameInstallPath, "file to remove");
+        PathSafety.EnsureNoReparseTraversal(gameInstallPath, fullPath, "file to remove");
 
         if (File.Exists(fullPath))
         {

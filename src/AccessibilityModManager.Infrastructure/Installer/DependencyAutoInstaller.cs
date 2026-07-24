@@ -354,7 +354,10 @@ public sealed class DependencyAutoInstaller
         {
             try
             {
-                var target = Path.Combine(gameDir, change.RelativePath);
+                // Receipt-supplied relative paths write into the game folder — confine them the
+                // same way install-time paths are confined, textually and physically (reparse).
+                var target = PathSafety.CombineContained(gameDir, change.RelativePath);
+                PathSafety.EnsureNoReparseTraversal(gameDir, target, "dependency rollback target");
                 if (change.Type == ChangeType.Added)
                 {
                     if (File.Exists(target)) File.Delete(target);
@@ -405,7 +408,8 @@ public sealed class DependencyAutoInstaller
     /// installed?" is answered by detection (the game's RegistryProbe), not a receipt. Throws on
     /// a download / hash / non-zero-exit failure.
     /// </summary>
-    public async Task RunGameInstallerAsync(Dependency dependency, IDependencyHost? host, CancellationToken ct)
+    public async Task RunGameInstallerAsync(Dependency dependency, IDependencyHost? host, CancellationToken ct,
+        IProgress<ProgressInfo>? progress = null)
     {
         if (dependency.Fix?.AutoInstall is not RunInstallerAutoInstall ri)
             throw new InvalidOperationException(
@@ -423,7 +427,7 @@ public sealed class DependencyAutoInstaller
         string? tempFile = null;
         try
         {
-            tempFile = await DownloadAsync(url, dependency.Id, ct);
+            tempFile = await DownloadAsync(url, dependency.Id, ct, progress);
             await VerifySha256Async(tempFile, ri.Sha256, dependency.Id, ct);
             await RunInstallerAsync(tempFile, ri, host, ct, throwOnNonZeroExit: false);
             host?.OnDependencyFinished(dependency.Id, succeeded: true);
@@ -451,7 +455,8 @@ public sealed class DependencyAutoInstaller
     /// failure. See EMULATOR_INSTALL_QUESTIONS.md.
     /// </summary>
     public async Task ExtractPortableAppAsync(
-        Dependency dependency, string destinationFolder, IDependencyHost? host, CancellationToken ct)
+        Dependency dependency, string destinationFolder, IDependencyHost? host, CancellationToken ct,
+        IProgress<ProgressInfo>? progress = null)
     {
         if (dependency.Fix?.AutoInstall is not ExtractAppAutoInstall app)
             throw new InvalidOperationException(
@@ -469,7 +474,7 @@ public sealed class DependencyAutoInstaller
         string? tempFile = null;
         try
         {
-            tempFile = await DownloadAsync(url, dependency.Id, ct);
+            tempFile = await DownloadAsync(url, dependency.Id, ct, progress);
             await VerifySha256Async(tempFile, app.Sha256, dependency.Id, ct);
 
             // Reuse the same zip-slip-safe extractor the main install uses (it only needs the
@@ -494,7 +499,8 @@ public sealed class DependencyAutoInstaller
         }
     }
 
-    private async Task<string> DownloadAsync(string url, string depId, CancellationToken ct)
+    private async Task<string> DownloadAsync(string url, string depId, CancellationToken ct,
+        IProgress<ProgressInfo>? progress = null)
     {
         // Keep the URL's file extension on the temp file. An installer in particular must keep its
         // .msi / .exe so it's launched the right way later — a .msi renamed to .exe makes Windows
@@ -508,8 +514,30 @@ public sealed class DependencyAutoInstaller
         using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
+        var totalBytes = response.Content.Headers.ContentLength;
+        var downloadedBytes = 0L;
+
+        await using var contentStream = await response.Content.ReadAsStreamAsync(ct);
         await using var fs = File.Create(tempFile);
-        await response.Content.CopyToAsync(fs, ct);
+
+        var buffer = new byte[81920];
+        int bytesRead;
+        while ((bytesRead = await contentStream.ReadAsync(buffer, ct)) > 0)
+        {
+            await fs.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+            downloadedBytes += bytesRead;
+
+            if (progress != null && totalBytes is > 0)
+            {
+                progress.Report(new ProgressInfo
+                {
+                    Percentage = (double)downloadedBytes / totalBytes.Value * 100,
+                    StatusText = $"Downloading... {downloadedBytes / 1024:N0} / {totalBytes.Value / 1024:N0} KB",
+                    StepDescription = $"Downloading {depId}"
+                });
+            }
+        }
+
         return tempFile;
     }
 
@@ -547,9 +575,12 @@ public sealed class DependencyAutoInstaller
         List<FileChange> changes)
     {
         var targetDir = ResolveTargetDir(gameDir, action.TargetDir);
+        var fullGameDir = Path.GetFullPath(gameDir);
+        // Guard before creating: an author-written targetDir whose existing prefix contains a
+        // junction must be refused before directories get created through it.
+        PathSafety.EnsureNoReparseTraversal(fullGameDir, targetDir, "dependency targetDir");
         Directory.CreateDirectory(targetDir);
 
-        var fullGameDir = Path.GetFullPath(gameDir);
         var blocklist = action.Blocklist ?? new List<string>();
 
         using var archive = ZipFile.OpenRead(zipPath);
@@ -562,6 +593,9 @@ public sealed class DependencyAutoInstaller
             if (!PathSafety.IsContained(targetDir, destPath))
                 throw new SecurityException(
                     $"Zip slip detected in dependency: '{entry.FullName}' would extract outside '{targetDir}'.");
+            // Physical containment too: a junction between the game root and the target would
+            // redirect this write outside the folder the text says it stays in.
+            PathSafety.EnsureNoReparseTraversal(fullGameDir, destPath, $"dependency zip entry '{entry.FullName}'");
 
             // Backup-on-conflict (F7=A): if the file already exists, stash a copy before overwriting.
             var relativeToGame = Path.GetRelativePath(fullGameDir, destPath);
@@ -618,6 +652,7 @@ public sealed class DependencyAutoInstaller
         var destPath = Path.GetFullPath(Path.Combine(targetDir, fileName));
         var fullGameDir = Path.GetFullPath(gameDir);
         PathSafety.EnsureContained(fullGameDir, destPath, "copyFile target");
+        PathSafety.EnsureNoReparseTraversal(fullGameDir, destPath, "copyFile target");
 
         Directory.CreateDirectory(targetDir);
 

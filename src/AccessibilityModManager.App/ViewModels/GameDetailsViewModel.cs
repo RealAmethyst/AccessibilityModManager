@@ -371,11 +371,14 @@ public partial class GameDetailsViewModel : ObservableObject
 
         try
         {
+            // One shared progress object: the dialog subscribes to it, the download reports into
+            // it — the game-installer download shows a real percentage (finding 43).
+            var progress = new Progress<ProgressInfo>();
             await _runWithProgress(
                 "Install",
                 $"Installing {DisplayName}...",
-                new Progress<ProgressInfo>(),
-                (scriptHost, depHost, innerCt) => _depAutoInstaller.RunGameInstallerAsync(dep, depHost, innerCt),
+                progress,
+                (scriptHost, depHost, innerCt) => _depAutoInstaller.RunGameInstallerAsync(dep, depHost, innerCt, progress),
                 ct);
         }
         catch (OperationCanceledException)
@@ -486,11 +489,14 @@ public partial class GameDetailsViewModel : ObservableObject
 
         try
         {
+            // Shared progress object, same as the run-installer path: the emulator download
+            // reports a real percentage into the dialog (finding 43).
+            var progress = new Progress<ProgressInfo>();
             await _runWithProgress(
                 "Install",
                 $"Installing {DisplayName}...",
-                new Progress<ProgressInfo>(),
-                (_, depHost, innerCt) => _depAutoInstaller.ExtractPortableAppAsync(dep, picked, depHost, innerCt),
+                progress,
+                (_, depHost, innerCt) => _depAutoInstaller.ExtractPortableAppAsync(dep, picked, depHost, innerCt, progress),
                 ct);
         }
         catch (OperationCanceledException)
@@ -747,8 +753,15 @@ public partial class GameDetailsViewModel : ObservableObject
     {
         if (group?.SelectedRelease == null) return;
         var release = group.SelectedRelease;
-        var verb = isUpdate ? "Update" : "Install";
-        var verbing = isUpdate ? "Updating" : "Installing";
+        // A selected release older than the installed one is a DOWNGRADE, and every string in the
+        // flow says so (finding 43) — the button quietly labelled "Update" while rolling backwards
+        // was a long-standing trap, worst over a screen reader. Downgrading stays possible on
+        // purpose: it's the rescue path when a new release breaks.
+        var isDowngrade = isUpdate && group.InstalledVersion != null &&
+            VersionComparer.Instance.Compare(release.Version, group.InstalledVersion) < 0;
+        var verb = isDowngrade ? "Downgrade" : isUpdate ? "Update" : "Install";
+        var verbing = isDowngrade ? "Downgrading" : isUpdate ? "Updating" : "Installing";
+        var verbed = isDowngrade ? "Downgraded" : isUpdate ? "Updated" : "Installed";
 
         // If the game itself isn't installed yet — this page was opened from the not-detected
         // state via a game-installer dependency — install the game first, then detect where it
@@ -922,10 +935,13 @@ public partial class GameDetailsViewModel : ObservableObject
 
             group.InstalledVersion = release.Version;
             OnPropertyChanged(nameof(AnyModInstalled));
+            // The install may have auto-installed dependencies — re-check so the Dependencies
+            // section doesn't keep announcing them as missing (finding 34).
+            await TryRefreshDependencyListAsync(ct);
             StatusMessage = null;
             _showInfoDialog(
                 $"{verb} completed",
-                $"{(isUpdate ? "Updated" : "Installed")} {group.ModName}");
+                $"{verbed} {group.ModName}");
             OperationCompleted?.Invoke();
         }
         catch (OperationCanceledException)
@@ -935,6 +951,9 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (MissingRequiredDependencyException ex)
         {
             _logger.Warning("{Verb} blocked by missing dependencies for {PluginId}/{GameId}", verb, release.PluginId, GameId);
+            // Some dependencies may have installed before the blocker — refresh the list first,
+            // then write the guidance line so it stays the message the user lands on.
+            await TryRefreshDependencyListAsync(ct);
             var names = string.Join(", ", ex.Blockers.Select(b => b.Dependency.Id));
             StatusMessage = $"Cannot {verb.ToLowerInvariant()} — install required dependencies first: {names}. " +
                             "Open the Dependencies section below and use Fix.";
@@ -976,6 +995,9 @@ public partial class GameDetailsViewModel : ObservableObject
             await _installerEngine.UninstallAsync(_gameInstall, group.PluginId, scriptHost, ct);
             group.InstalledVersion = null;
             OnPropertyChanged(nameof(AnyModInstalled));
+            // Uninstall can release dependencies (refcount to zero removes a loader) — re-check
+            // so the list reflects it (finding 34).
+            await TryRefreshDependencyListAsync(ct);
             StatusMessage = null;
             _showInfoDialog("Uninstall completed", $"Uninstalled {group.ModName}");
             OperationCompleted?.Invoke();
@@ -1069,19 +1091,7 @@ public partial class GameDetailsViewModel : ObservableObject
         StatusMessage = "Rechecking dependencies...";
         try
         {
-            Dependencies.Clear();
-            if (_gameInstall.Game.Dependencies.Count > 0)
-            {
-                var depStatuses = await _dependencyChecker.CheckAsync(_gameInstall, ct);
-                foreach (var ds in depStatuses)
-                {
-                    Dependencies.Add(new DependencyItemViewModel(ds, _dependencyChecker, _logger,
-                        msg => StatusMessage = msg));
-                }
-            }
-
-            var missing = Dependencies.Count(d =>
-                d.IsRequired && d.StatusKind != DependencyStatusKind.Installed);
+            var missing = await RefreshDependencyListAsync(ct);
             StatusMessage = missing == 0
                 ? "All required dependencies are installed."
                 : $"{missing} required dependency still missing. Install before retrying.";
@@ -1090,6 +1100,52 @@ public partial class GameDetailsViewModel : ObservableObject
         {
             _logger.Error(ex, "Failed to recheck dependencies for {GameId}", GameId);
             StatusMessage = $"Recheck failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Re-runs the dependency check and rebuilds the list, writing NO status message — used both
+    /// by the explicit Recheck command and after install/update/uninstall (finding 34: the list
+    /// went stale right after the flow that changes it, which reads as wrong over a screen
+    /// reader). Returns how many required dependencies are still not installed.
+    /// </summary>
+    private async Task<int> RefreshDependencyListAsync(CancellationToken ct)
+    {
+        // Build first, swap after: clearing up front would leave an EMPTY list behind if the
+        // check throws mid-way — worse than the stale list this method exists to fix.
+        var items = new List<DependencyItemViewModel>();
+        if (_gameInstall is { Game.Dependencies.Count: > 0 })
+        {
+            var depStatuses = await _dependencyChecker.CheckAsync(_gameInstall, ct);
+            foreach (var ds in depStatuses)
+            {
+                items.Add(new DependencyItemViewModel(ds, _dependencyChecker, _logger,
+                    msg => StatusMessage = msg));
+            }
+        }
+
+        Dependencies.Clear();
+        foreach (var item in items)
+            Dependencies.Add(item);
+
+        return items.Count(d =>
+            d.IsRequired && d.StatusKind != DependencyStatusKind.Installed);
+    }
+
+    /// <summary>
+    /// Best-effort dependency-list refresh for the end of a mutation flow: the mutation already
+    /// succeeded (or already reported its own error), so a hiccup here only logs — it must never
+    /// repaint a completed install as a failure.
+    /// </summary>
+    private async Task TryRefreshDependencyListAsync(CancellationToken ct)
+    {
+        try
+        {
+            await RefreshDependencyListAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't refresh the dependency list after the operation for {GameId}", GameId);
         }
     }
 
@@ -1142,7 +1198,21 @@ public partial class ModReleaseGroup : ObservableObject
     private string? _installedVersion;
 
     public bool IsInstalled => InstalledVersion != null;
-    public bool CanUpdate => IsInstalled && SelectedRelease != null && SelectedRelease.Version != InstalledVersion;
+
+    /// <summary>Semantic comparison, not string inequality: "1.0" and "1.0.0" are the same
+    /// version and must not offer an Update/Downgrade that goes nowhere.</summary>
+    public bool CanUpdate => IsInstalled && SelectedRelease != null &&
+        VersionComparer.Instance.Compare(SelectedRelease.Version, InstalledVersion) != 0;
+
+    /// <summary>
+    /// True when the selected release is OLDER than the installed one. The action button then
+    /// says "Downgrade" — visibly and to the screen reader — instead of quietly rolling back
+    /// under an "Update" label (finding 43). Downgrading itself stays allowed: it's the rescue
+    /// path when a new release breaks.
+    /// </summary>
+    public bool IsDowngrade => IsInstalled && SelectedRelease != null &&
+        VersionComparer.Instance.Compare(SelectedRelease.Version, InstalledVersion) < 0;
+
     public bool HasDescription => !string.IsNullOrWhiteSpace(Description);
     public bool HasChangelog =>
         !string.IsNullOrWhiteSpace(SelectedRelease?.Notes) ||
@@ -1188,19 +1258,28 @@ public partial class ModReleaseGroup : ObservableObject
             : $"{ModName} by {PluginId}, version {InstalledVersion} installed";
 
     public string InstallButtonName => $"Install {ModName}";
-    public string UpdateButtonName => $"Update {ModName}";
+
+    /// <summary>Visible label of the update/downgrade button.</summary>
+    public string UpdateButtonLabel => IsDowngrade ? "Downgrade" : "Update";
+    public string UpdateButtonName => $"{UpdateButtonLabel} {ModName}";
     public string UninstallButtonName => $"Uninstall {ModName}";
 
     partial void OnInstalledVersionChanged(string? value)
     {
         OnPropertyChanged(nameof(IsInstalled));
         OnPropertyChanged(nameof(CanUpdate));
+        OnPropertyChanged(nameof(IsDowngrade));
+        OnPropertyChanged(nameof(UpdateButtonLabel));
+        OnPropertyChanged(nameof(UpdateButtonName));
         OnPropertyChanged(nameof(AnnouncementText));
     }
 
     partial void OnSelectedReleaseChanged(ModRelease? value)
     {
         OnPropertyChanged(nameof(CanUpdate));
+        OnPropertyChanged(nameof(IsDowngrade));
+        OnPropertyChanged(nameof(UpdateButtonLabel));
+        OnPropertyChanged(nameof(UpdateButtonName));
         OnPropertyChanged(nameof(HasChangelog));
     }
 

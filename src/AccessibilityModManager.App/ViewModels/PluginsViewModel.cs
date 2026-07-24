@@ -55,7 +55,8 @@ public partial class PluginsViewModel : ObservableObject
         try
         {
             var config = await _configService.LoadAsync();
-            var registry = await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), ct);
+            var registryFetch = await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), ct);
+            var registry = registryFetch.Value;
 
             // Every registry-listed plugin is active. We don't expose a per-plugin enable/
             // disable because (a) every plugin already had to clear registry-side review and
@@ -66,7 +67,10 @@ public partial class PluginsViewModel : ObservableObject
                 Plugins.Add(new PluginItemViewModel(entry, _logger, msg => StatusMessage = msg));
             }
 
-            StatusMessage = $"Loaded {Plugins.Count} developer{(Plugins.Count == 1 ? "" : "s")}.";
+            var summary = $"Loaded {Plugins.Count} developer{(Plugins.Count == 1 ? "" : "s")}.";
+            StatusMessage = registryFetch.FromCache
+                ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(registryFetch.CachedAtUtc)}. {summary}"
+                : summary;
         }
         catch (OperationCanceledException)
         {

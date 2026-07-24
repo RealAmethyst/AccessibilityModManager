@@ -147,6 +147,15 @@ public sealed class DependencyCheck
 {
     public string? RegistryKey { get; init; }
     public string? RegistryValue { get; init; }
+
+    /// <summary>
+    /// Registry hive for <see cref="RegistryKey"/>: "HKLM" (default) or "HKCU" — same values the
+    /// game <see cref="RegistryProbe"/> accepts. Absent in existing indexes → HKLM, the old
+    /// behavior. Both the 64-bit and 32-bit (WOW6432Node) views of the hive are probed either
+    /// way (audit finding 35).
+    /// </summary>
+    public string? RegistryHive { get; init; }
+
     public string? FilePath { get; init; }
 }
 

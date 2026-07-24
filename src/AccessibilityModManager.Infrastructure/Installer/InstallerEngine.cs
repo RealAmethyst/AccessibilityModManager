@@ -601,7 +601,7 @@ public sealed class InstallerEngine : IInstallerEngine
                         $"Manifest declares lifecycle scripts but no script host was supplied. " +
                         "The caller (manager UI or test harness) must provide an IScriptHost when scripts are present.");
 
-                var prompt = BuildPrompt(release, manifest);
+                var prompt = BuildPrompt(game, release, manifest);
                 var ok = await scriptHost.ConfirmInstallScriptsAsync(prompt, ct);
                 if (!ok)
                     throw new OperationCanceledException("User declined the lifecycle script warning.");
@@ -844,6 +844,9 @@ public sealed class InstallerEngine : IInstallerEngine
                 $"{hookLabel}: script executable path '{script.Executable}' has no filename — can't copy to game folder.");
 
         var targetPath = Path.Combine(gameFolder, basename);
+        // The basename is a plain leaf, but a pre-existing FILE at the target could be a symlink
+        // that redirects the copy — same reparse rule as every other game-folder write.
+        PathSafety.EnsureNoReparseTraversal(gameFolder, targetPath, $"{hookLabel} script target");
         string? backupPath = null;
         if (File.Exists(targetPath))
         {
@@ -872,6 +875,7 @@ public sealed class InstallerEngine : IInstallerEngine
                 $"{hookLabel}: cached script has no filename — can't copy to game folder.");
 
         var targetPath = Path.Combine(gameFolder, basename);
+        PathSafety.EnsureNoReparseTraversal(gameFolder, targetPath, $"{hookLabel} script target");
         string? backupPath = null;
         if (File.Exists(targetPath))
         {
@@ -1010,9 +1014,13 @@ public sealed class InstallerEngine : IInstallerEngine
         }
 
         // Confirm with user (Q9=A semantics: re-confirm because uninstall is a separate action).
+        // The dialog's headline names the MOD; the plugin id is the author, not the mod
+        // (finding 43). The definition's name is used only when the install was detected under
+        // the SAME plugin the receipt belongs to — another plugin's definition of this game may
+        // name a different mod, and a consent prompt must never carry the wrong name.
         var prompt = new LifecycleScriptPrompt
         {
-            ModName = receipt.PluginId,
+            ModName = ModNameFor(game, receipt.PluginId),
             Version = receipt.InstalledVersion,
             Author = receipt.PluginId,
             Hooks = new[]
@@ -1152,6 +1160,12 @@ public sealed class InstallerEngine : IInstallerEngine
                 return;
             }
 
+            // Physical containment before the recursive delete: if modmanager_backups (or any
+            // component) was swapped for a junction, the text-contained path resolves elsewhere
+            // and the delete would eat a folder outside the game. A guard throw lands in the
+            // catch below — the folder is kept, which is the safe outcome.
+            PathSafety.EnsureNoReparseTraversal(game.InstallPath, backupFolder, "backup folder to delete");
+
             Directory.Delete(backupFolder, recursive: true);
 
             // Prune empty parents (plugin/game levels and modmanager_backups itself) so an
@@ -1279,7 +1293,10 @@ public sealed class InstallerEngine : IInstallerEngine
     {
         foreach (var change in receipt.Changes)
         {
-            var src = Path.Combine(gameDir, change.RelativePath);
+            // Receipt paths are tamper-checked, but they still get the same textual + physical
+            // (reparse) confinement as every other game-folder path (finding 15).
+            var src = PathSafety.CombineContained(gameDir, change.RelativePath);
+            PathSafety.EnsureNoReparseTraversal(gameDir, src, "update snapshot source");
             if (!File.Exists(src)) continue;
             var dest = Path.Combine(snapshotDir, change.RelativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
@@ -1289,6 +1306,8 @@ public sealed class InstallerEngine : IInstallerEngine
 
     /// <summary>
     /// Restores files captured by <see cref="SnapshotInstalledFiles"/> back into the game folder.
+    /// A guard failure here aborts the restore loudly — the caller preserves the snapshot and
+    /// reports it; writing through a link that appeared mid-update would be worse.
     /// </summary>
     private static void RestoreSnapshot(string snapshotDir, string gameDir)
     {
@@ -1296,7 +1315,8 @@ public sealed class InstallerEngine : IInstallerEngine
         foreach (var file in Directory.EnumerateFiles(snapshotDir, "*", SearchOption.AllDirectories))
         {
             var rel = Path.GetRelativePath(snapshotDir, file);
-            var dest = Path.Combine(gameDir, rel);
+            var dest = PathSafety.CombineContained(gameDir, rel);
+            PathSafety.EnsureNoReparseTraversal(gameDir, dest, "update restore target");
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             File.Copy(file, dest, overwrite: true);
         }
@@ -1327,7 +1347,7 @@ public sealed class InstallerEngine : IInstallerEngine
         }
     }
 
-    private static LifecycleScriptPrompt BuildPrompt(ModRelease release, Manifest manifest)
+    private static LifecycleScriptPrompt BuildPrompt(GameInstall game, ModRelease release, Manifest manifest)
     {
         var hooks = new List<LifecycleScriptHookInfo>();
         if (manifest.PreInstall is not null)
@@ -1337,14 +1357,27 @@ public sealed class InstallerEngine : IInstallerEngine
         if (manifest.PostUninstall is not null)
             hooks.Add(new LifecycleScriptHookInfo { HookLabel = "Post-uninstall", Script = manifest.PostUninstall });
 
+        // The dialog's headline names the MOD; the plugin id is the author, not the mod (finding 43).
         return new LifecycleScriptPrompt
         {
-            ModName = release.PluginId,
+            ModName = ModNameFor(game, release.PluginId),
             Version = release.Version,
             Author = release.PluginId,
             Hooks = hooks
         };
     }
+
+    /// <summary>
+    /// The mod's human name for consent prompts: the game definition's ModName, but only when
+    /// the install was detected under the same plugin the operation belongs to — several plugins
+    /// can define one game, and a prompt naming ANOTHER plugin's mod would be misleading exactly
+    /// where trust is decided. Falls back to the plugin id (finding 43).
+    /// </summary>
+    private static string ModNameFor(GameInstall game, string operationPluginId) =>
+        string.Equals(game.PluginId, operationPluginId, StringComparison.Ordinal) &&
+        !string.IsNullOrWhiteSpace(game.Game.ModName)
+            ? game.Game.ModName!
+            : operationPluginId;
 
     private static string TruncateForMessage(string output, int maxChars = 2000)
     {
@@ -1459,7 +1492,7 @@ public sealed class InstallerEngine : IInstallerEngine
                 throw new MissingRequiredDependencyException(blockers,
                     "Auto-installable dependencies are present but no dependency host was supplied.");
 
-            var prompt = BuildDependencyPrompt(game, autoBlockers);
+            var prompt = BuildDependencyPrompt(game, requestingPluginId, autoBlockers);
             var ok = await host.ConfirmDependencyInstallAsync(prompt, ct);
             if (!ok)
                 throw new OperationCanceledException("User declined the dependency install.");
@@ -1538,7 +1571,7 @@ public sealed class InstallerEngine : IInstallerEngine
     }
 
     private static DependencyInstallPrompt BuildDependencyPrompt(
-        GameInstall game, List<DependencyStatus> blockers)
+        GameInstall game, string requestingPluginId, List<DependencyStatus> blockers)
     {
         var items = new List<DependencyInstallPromptItem>();
         foreach (var b in blockers)
@@ -1559,9 +1592,16 @@ public sealed class InstallerEngine : IInstallerEngine
                 NeedsAdmin = auto is RunInstallerAutoInstall ri && ri.NeedsAdmin
             });
         }
+        // The headline names what needs the components: the MOD when the author named it (and
+        // the install was detected under the same plugin — see ModNameFor), else the game
+        // (finding 43).
+        var modName = string.Equals(game.PluginId, requestingPluginId, StringComparison.Ordinal) &&
+                      !string.IsNullOrWhiteSpace(game.Game.ModName)
+            ? game.Game.ModName!
+            : game.Game.DisplayName;
         return new DependencyInstallPrompt
         {
-            ModName = game.Game.DisplayName,
+            ModName = modName,
             Version = "",
             Items = items
         };

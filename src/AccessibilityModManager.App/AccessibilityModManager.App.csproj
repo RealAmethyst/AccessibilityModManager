@@ -19,7 +19,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <Version>1.13.0</Version>
+    <Version>1.14.0</Version>
   </PropertyGroup>
 
 </Project>

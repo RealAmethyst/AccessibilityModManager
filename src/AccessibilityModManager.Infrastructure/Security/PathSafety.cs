@@ -159,6 +159,92 @@ public static class PathSafety
     }
 
     /// <summary>
+    /// Rejects a path whose components BELOW <paramref name="root"/> include a reparse point
+    /// (junction, symlink, mount point). Containment checks compare path TEXT, so a link sitting
+    /// inside the game folder — say a <c>Mods</c> folder that is secretly a junction elsewhere —
+    /// would let writes, restores, and deletes walk outside the folder the text says they stay in.
+    ///
+    /// The root itself is deliberately exempt: an install root that IS a junction is a supported
+    /// setup (the ASCII path shim, e.g. <c>C:\PokemonTCGLive</c>). The policy is "the root may be
+    /// a link; nothing deeper may be". Components that don't exist yet are fine — they're about to
+    /// be created as ordinary files/folders by the very write being validated.
+    ///
+    /// Call this at write/restore/delete time on the exact path being touched (not as a whole-tree
+    /// scan): only paths actually mutated matter, and an unrelated cloud-placeholder subtree the
+    /// mod never touches must not block an install.
+    /// </summary>
+    public static void EnsureNoReparseTraversal(string root, string candidateFullPath, string description)
+    {
+        var rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidateFullPath));
+
+        if (string.Equals(candidate, rootFull, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (!IsContained(rootFull, candidate))
+        {
+            throw new InvalidOperationException(
+                $"{description} '{candidateFullPath}' resolves outside '{root}'.");
+        }
+
+        var current = rootFull;
+        var remainder = candidate[rootFull.Length..].TrimStart(Path.DirectorySeparatorChar);
+        foreach (var part in remainder.Split(Path.DirectorySeparatorChar))
+        {
+            current = Path.Combine(current, part);
+
+            FileAttributes attributes;
+            try
+            {
+                attributes = File.GetAttributes(current);
+            }
+            catch (FileNotFoundException)
+            {
+                return; // this component (and everything below it) doesn't exist yet
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return;
+            }
+
+            if ((attributes & FileAttributes.ReparsePoint) != 0 && IsTraversalLink(current, attributes))
+            {
+                throw new InvalidOperationException(
+                    $"{description} '{candidateFullPath}' passes through '{current}', which is a link " +
+                    "(reparse point) inside the game folder. Refusing to touch files through it — a link " +
+                    "here can redirect writes outside the game folder.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// True when a reparse point actually REDIRECTS path traversal. Cloud placeholders (OneDrive
+    /// Files On-Demand, dedup) carry the reparse attribute but stay in place — rejecting them
+    /// would break installs into perfectly ordinary synced folders. <see cref="FileSystemInfo.LinkTarget"/>
+    /// is non-null exactly for the traversal-capable kinds (symbolic links and junctions/mount
+    /// points), which are what can send a write somewhere else. Unreadable link metadata counts
+    /// as a link — fail closed.
+    ///
+    /// Note this is a check-then-act guard: it stops planted links at validation time, not a
+    /// same-user process swapping the path between the check and the write. That adversary
+    /// already owns the user account and is outside this app's protection boundary.
+    /// </summary>
+    private static bool IsTraversalLink(string path, FileAttributes attributes)
+    {
+        try
+        {
+            FileSystemInfo info = (attributes & FileAttributes.Directory) != 0
+                ? new DirectoryInfo(path)
+                : new FileInfo(path);
+            return info.LinkTarget is not null;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Non-throwing <see cref="NormalizeRelativeDir"/>. False (with the original value echoed back)
     /// when the value is absolute or contains traversal — callers that can't surface an exception
     /// keep the raw value and let the manager-side check produce the error.

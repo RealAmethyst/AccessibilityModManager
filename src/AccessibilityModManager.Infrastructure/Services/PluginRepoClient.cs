@@ -16,31 +16,63 @@ public sealed class PluginRepoClient : IPluginRepoClient
 
     private readonly HttpClient _httpClient;
     private readonly ILogger _logger;
+    private readonly string _cacheDirectory;
 
-    public PluginRepoClient(HttpClient httpClient, ILogger logger)
+    public PluginRepoClient(HttpClient httpClient, ILogger logger, string? cacheDirectoryOverride = null)
     {
         _httpClient = httpClient;
         _logger = logger;
+        _cacheDirectory = cacheDirectoryOverride ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AccessibilityModManager", "cache", "indexes");
     }
 
-    public async Task<PluginRepoIndex> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default)
+    public async Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default)
     {
         UrlValidator.RequireHttps(plugin.RepoIndexUrl, $"plugin '{plugin.Id}' repo index");
 
         _logger.Information("Fetching repo index for plugin {PluginId} from {Url}", plugin.Id, plugin.RepoIndexUrl);
 
-        // Cache-Control: no-cache + unique query param. GitHub's raw-URL CDN (Fastly) ignores
-        // header-only revalidation hints for under-a-minute-old objects, so we make each
-        // request a unique URL too — that forces the CDN to fetch origin and the
-        // freshly-pushed index.json shows up immediately.
-        var bustedUrl = PluginRegistryClient.AppendCacheBuster(plugin.RepoIndexUrl);
-        var request = new HttpRequestMessage(HttpMethod.Get, bustedUrl);
-        request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
-        request.Headers.Pragma.ParseAdd("no-cache");
-        var response = await _httpClient.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        string json;
+        try
+        {
+            // Cache-Control: no-cache + unique query param. GitHub's raw-URL CDN (Fastly) ignores
+            // header-only revalidation hints for under-a-minute-old objects, so we make each
+            // request a unique URL too — that forces the CDN to fetch origin and the
+            // freshly-pushed index.json shows up immediately.
+            var bustedUrl = PluginRegistryClient.AppendCacheBuster(plugin.RepoIndexUrl);
+            var request = new HttpRequestMessage(HttpMethod.Get, bustedUrl);
+            request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
+            request.Headers.Pragma.ParseAdd("no-cache");
+            var response = await _httpClient.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+            json = await response.Content.ReadAsStringAsync(ct);
+        }
+        catch (Exception ex) when (PluginRegistryClient.IsNetworkFailure(ex, ct))
+        {
+            // Offline: fall back to the last index this machine accepted for THIS plugin. The
+            // cached copy is re-validated in full against the CURRENT (signed) registry entry —
+            // identity binding included — so the cache can't smuggle anything a live fetch
+            // would refuse.
+            return await LoadCachedIndexAsync(plugin, ex);
+        }
 
-        var json = await response.Content.ReadAsStringAsync(ct);
+        var index = ValidateIndex(plugin, json);
+        await SaveIndexCacheAsync(plugin, json);
+
+        _logger.Information("Fetched index for {PluginId}: {GameCount} games, {ReleaseCount} total releases",
+            plugin.Id, index.Games.Count,
+            index.ReleasesByGameId.Values.Sum(r => r.Count));
+
+        return new Fetched<PluginRepoIndex> { Value = index };
+    }
+
+    /// <summary>
+    /// The single acceptance gate for an index, shared by the network and cache paths: identity
+    /// binding to the signed registry entry, safe-id checks, and per-release validation.
+    /// </summary>
+    private PluginRepoIndex ValidateIndex(PluginEntry plugin, string json)
+    {
         var index = JsonSerializer.Deserialize<PluginRepoIndex>(json, JsonOptions)
             ?? throw new InvalidOperationException($"Repo index for plugin '{plugin.Id}' deserialized to null");
 
@@ -64,9 +96,18 @@ public sealed class PluginRepoClient : IPluginRepoClient
         // Validate releases: HTTPS package URLs (Patreon-gated releases have PackageUrl == null
         // and are fetched via the author's server or a manual pick), and identities that match
         // both the signed plugin id and the game they're filed under.
+        //
+        // Two enforcement levels, deliberately different: TRUST violations (identity spoofing,
+        // non-https URLs) refuse the whole index — nothing in it can be believed. AUTHORING
+        // mistakes that merely make one release unobtainable (a gate with no server and no post,
+        // a release with no package source at all) drop THAT release with a warning: one stale
+        // entry must never blank the entire catalog for every user (it did, live, 2026-07-24 —
+        // an early beta authored before the download server existed emptied the Mods tab).
+        // The AuthorTool blocks publishing these; this is the manager-side safety net.
         foreach (var (gameId, releases) in index.ReleasesByGameId)
         {
             PathSafety.EnsureSafeId(gameId, $"plugin '{plugin.Id}' release game id");
+            var unobtainable = new List<ModRelease>();
             foreach (var release in releases)
             {
                 if (!string.Equals(release.PluginId, plugin.Id, StringComparison.Ordinal))
@@ -79,8 +120,8 @@ public sealed class PluginRepoClient : IPluginRepoClient
                         $"game id '{release.GameId}' (ids must match exactly, including case). Refusing the index.");
 
                 // A Patreon gate is validated whenever it is PRESENT — the install flow treats
-                // any non-null gate as gated, even alongside a packageUrl, so a gate must always
-                // be usable: an https author server, or a numeric post id for the manual browser
+                // any non-null gate as gated, even alongside a packageUrl, so a gate must be
+                // usable: an https author server, or a numeric post id for the manual browser
                 // path. A gate with neither would send users to a picker with nothing to pick.
                 if (release.Patreon is not null)
                 {
@@ -90,27 +131,139 @@ public sealed class PluginRepoClient : IPluginRepoClient
                     var hasPost = !string.IsNullOrWhiteSpace(release.Patreon.PostId) &&
                                   release.Patreon.PostId!.All(char.IsAsciiDigit);
                     if (!hasServer && !hasPost)
-                        throw new InvalidOperationException(
-                            $"Patreon-gated release {plugin.Id}/{gameId}/{release.Version} has neither a server URL " +
-                            "nor a valid (numeric) post id — there would be no way to obtain the file.");
+                    {
+                        _logger.Warning(
+                            "Release {PluginId}/{GameId}/{Version} is Patreon-gated but has neither a server URL " +
+                            "nor a numeric post id — hiding it from the catalog. Fix the release in the AuthorTool " +
+                            "and republish the index.",
+                            plugin.Id, gameId, release.Version);
+                        unobtainable.Add(release);
+                        continue;
+                    }
                 }
 
                 if (release.PackageUrl is null)
                 {
                     if (release.Patreon is null)
-                        throw new InvalidOperationException(
-                            $"Release {plugin.Id}/{gameId}/{release.Version} has neither a public packageUrl nor a Patreon gate.");
+                    {
+                        _logger.Warning(
+                            "Release {PluginId}/{GameId}/{Version} has neither a public packageUrl nor a Patreon " +
+                            "gate — hiding it from the catalog. Fix the release in the AuthorTool and republish the index.",
+                            plugin.Id, gameId, release.Version);
+                        unobtainable.Add(release);
+                    }
                     continue;
                 }
                 UrlValidator.RequireHttps(release.PackageUrl, $"plugin '{plugin.Id}' game '{gameId}' package URL");
             }
+
+            foreach (var release in unobtainable)
+                releases.Remove(release);
         }
 
-        _logger.Information("Fetched index for {PluginId}: {GameCount} games, {ReleaseCount} total releases",
-            plugin.Id, index.Games.Count,
-            index.ReleasesByGameId.Values.Sum(r => r.Count));
-
         return index;
+    }
+
+    // ---- offline cache (audit finding 33) ----
+
+    private sealed class IndexCacheEnvelope
+    {
+        public DateTimeOffset FetchedAtUtc { get; set; }
+
+        /// <summary>The signed registry entry's RepoIndexUrl the copy was fetched from. When the
+        /// registry re-points a plugin's index, the old cache is refused, not served.</summary>
+        public string SourceUrl { get; set; } = "";
+
+        public string IndexJson { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Cache file for one plugin's index. The file name is a hash of the id, not the id itself:
+    /// ids are ordinal-distinct, but Windows file names aren't (case-insensitive, and reserved
+    /// device names like <c>CON</c> exist), so raw ids could collide or misbehave as file names.
+    /// The id is still re-validated as a safe segment — defense in depth, not a path ingredient.
+    /// </summary>
+    private string IndexCachePath(string pluginId)
+    {
+        PathSafety.EnsureSafeId(pluginId, "plugin id");
+        var nameHash = Convert.ToHexStringLower(
+            SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(pluginId)))[..32];
+        return Path.Combine(_cacheDirectory, nameHash + ".json");
+    }
+
+    private async Task SaveIndexCacheAsync(PluginEntry plugin, string json)
+    {
+        try
+        {
+            var envelope = new IndexCacheEnvelope
+            {
+                FetchedAtUtc = DateTimeOffset.UtcNow,
+                SourceUrl = plugin.RepoIndexUrl.AbsoluteUri,
+                IndexJson = json
+            };
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, JsonOptions);
+            await AtomicJson.WriteAtomicAsync(IndexCachePath(plugin.Id), bytes);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort — a cache write problem must never fail a good fetch.
+            _logger.Warning(ex, "Couldn't save the offline cache for plugin index {PluginId}", plugin.Id);
+        }
+    }
+
+    private async Task<Fetched<PluginRepoIndex>> LoadCachedIndexAsync(PluginEntry plugin, Exception networkError)
+    {
+        IndexCacheEnvelope? envelope = null;
+        try
+        {
+            var path = IndexCachePath(plugin.Id);
+            if (File.Exists(path))
+            {
+                envelope = JsonSerializer.Deserialize<IndexCacheEnvelope>(
+                    await File.ReadAllBytesAsync(path), JsonOptions);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Offline cache for plugin index {PluginId} is unreadable", plugin.Id);
+        }
+
+        if (envelope is null || string.IsNullOrEmpty(envelope.IndexJson))
+        {
+            throw new InvalidOperationException(
+                $"Couldn't reach the index for plugin '{plugin.Id}' ({networkError.Message}) and no offline " +
+                "copy is saved yet.", networkError);
+        }
+
+        PluginRepoIndex index;
+        try
+        {
+            // Exact textual identity: URI paths can be case-sensitive, so a re-point that only
+            // changes case must still invalidate the cache.
+            if (!string.Equals(envelope.SourceUrl, plugin.RepoIndexUrl.AbsoluteUri, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "the saved copy came from a different index address than the signed registry now points at");
+            }
+            index = ValidateIndex(plugin, envelope.IndexJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Offline cache for plugin index {PluginId} failed validation; refusing it", plugin.Id);
+            throw new InvalidOperationException(
+                $"Couldn't reach the index for plugin '{plugin.Id}' ({networkError.Message}), and the saved " +
+                $"offline copy was rejected ({ex.Message}).", networkError);
+        }
+
+        _logger.Information("Offline: serving cached index for {PluginId} fetched {At}",
+            plugin.Id, envelope.FetchedAtUtc);
+
+        return new Fetched<PluginRepoIndex>
+        {
+            Value = index,
+            FromCache = true,
+            CachedAtUtc = envelope.FetchedAtUtc
+        };
     }
 
     public async Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default)

@@ -112,7 +112,13 @@ public partial class GamesListViewModel : ObservableObject
         try
         {
             var config = await _configService.LoadAsync();
-            var registry = await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), ct);
+            var registryFetch = await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), ct);
+            var registry = registryFetch.Value;
+
+            // Offline marking (finding 33): if the registry or any index came from the local
+            // cache, the status line says so — cached data must never masquerade as live.
+            var anyFromCache = registryFetch.FromCache;
+            var oldestCachedAt = registryFetch.CachedAtUtc;
 
             // Every registry-listed plugin is active. We don't filter by an "enabled" state
             // anymore — registry membership IS the gate.
@@ -122,8 +128,14 @@ public partial class GamesListViewModel : ObservableObject
                 ct.ThrowIfCancellationRequested();
                 try
                 {
-                    var index = await _repoClient.FetchPluginIndexAsync(plugin, ct);
-                    activeIndexes[plugin.Id] = index;
+                    var indexFetch = await _repoClient.FetchPluginIndexAsync(plugin, ct);
+                    activeIndexes[plugin.Id] = indexFetch.Value;
+                    if (indexFetch.FromCache)
+                    {
+                        anyFromCache = true;
+                        if (oldestCachedAt is null || indexFetch.CachedAtUtc < oldestCachedAt)
+                            oldestCachedAt = indexFetch.CachedAtUtc;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -131,7 +143,31 @@ public partial class GamesListViewModel : ObservableObject
                 }
             }
 
-            var installs = await _gameAggregator.DetectAllGamesAsync(activeIndexes, config.KnownGameOverrides, ct);
+            var detection = await _gameAggregator.DetectAllGamesAsync(
+                activeIndexes, config.KnownGameOverrides, config.InstalledEmulators, ct);
+            var installs = detection.Installs;
+
+            // Persist silently-healed overrides (finding 32) so the recovery survives restarts.
+            // Fresh read-modify-write on purpose: the config loaded before the (slow) network
+            // phase can be stale, and saving it whole would clobber anything written meanwhile —
+            // a junction adoption from an install, emulator records, filter changes.
+            if (detection.HealedOverrides.Count > 0)
+            {
+                try
+                {
+                    var latest = await _configService.LoadAsync();
+                    foreach (var (gameId, path) in detection.HealedOverrides)
+                        latest.KnownGameOverrides[gameId] = path;
+                    await _configService.SaveAsync(latest);
+                    _logger.Information("Persisted {Count} healed game override(s)", detection.HealedOverrides.Count);
+                }
+                catch (Exception ex)
+                {
+                    // Non-fatal: detection already used the healed paths for this pass; the heal
+                    // just won't be remembered until a save succeeds.
+                    _logger.Warning(ex, "Couldn't persist healed game overrides");
+                }
+            }
 
             _lastActiveIndexes = activeIndexes;
             _lastInstalls = installs;
@@ -206,7 +242,10 @@ public partial class GamesListViewModel : ObservableObject
             ApplyFilters();
 
             var detected = _allMods.Count(m => m.IsDetected);
-            StatusMessage = $"Found {_allMods.Count} mod{(_allMods.Count == 1 ? "" : "s")} ({detected} detected).";
+            var summary = $"Found {_allMods.Count} mod{(_allMods.Count == 1 ? "" : "s")} ({detected} detected).";
+            StatusMessage = anyFromCache
+                ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(oldestCachedAt)}. {summary}"
+                : summary;
         }
         catch (OperationCanceledException)
         {
@@ -279,7 +318,13 @@ public partial class GamesListViewModel : ObservableObject
 
         if (mod.IsDetected)
         {
-            var install = _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
+            // Prefer the install detected under THIS row's plugin: several plugins can define
+            // the same game, and the GameInstall carries its plugin's definition (mod name and
+            // more), which flows into consent prompts. Any-plugin detection remains the
+            // fallback — the physical game is the same folder either way.
+            var install = _lastInstalls.FirstOrDefault(i =>
+                              i.Game.GameId == mod.GameId && i.PluginId == mod.PluginId && i.IsValid)
+                          ?? _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
             if (install == null) return;
             _navigateToDetails(install, scoped);
         }

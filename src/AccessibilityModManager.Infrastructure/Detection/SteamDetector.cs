@@ -181,6 +181,17 @@ public sealed class SteamDetector : ISteamDetector
                 var appId = ExtractAcfValue(content, "appid");
                 var installDir = ExtractAcfValue(content, "installdir");
 
+                // StateFlags bit 4 = fully installed. A manifest mid-download or mid-update is
+                // not a usable install even when enough files exist to fool the probe rules.
+                // A missing/unparseable StateFlags keeps the manifest (the verifier still gates).
+                var stateFlags = ExtractAcfValue(content, "StateFlags");
+                if (ulong.TryParse(stateFlags, out var flags) && (flags & 4) == 0)
+                {
+                    _logger.Debug("Skipping {AcfFile}: StateFlags {Flags} says not fully installed",
+                        acfFile, flags);
+                    continue;
+                }
+
                 if (!string.IsNullOrEmpty(appId) && !string.IsNullOrEmpty(installDir))
                     result[appId] = installDir;
             }

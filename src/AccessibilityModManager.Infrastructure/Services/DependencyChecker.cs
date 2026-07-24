@@ -167,11 +167,80 @@ public sealed class DependencyChecker : IDependencyChecker
         };
     }
 
+    /// <summary>
+    /// Registry check across BOTH registry views — 64-bit first, then the 32-bit WOW6432Node view
+    /// a 32-bit installer writes to — and the hive the check names (HKLM default, HKCU supported,
+    /// matching the game probes). Best status wins: present-and-good in either view is Installed;
+    /// a version that's only too old is Incompatible; otherwise Missing (audit finding 35).
+    /// </summary>
     private DependencyStatus CheckRegistry(Dependency dep)
+    {
+        // Authors sometimes write the hive INTO the key ("HKEY_LOCAL_MACHINE\SOFTWARE\...") —
+        // the old code silently opened that whole string relative to HKLM, which can never
+        // exist. Recognize the prefix instead of failing on it.
+        var keyPath = dep.Check!.RegistryKey!;
+        RegistryHive? prefixHive = null;
+        var firstSep = keyPath.IndexOf('\\');
+        if (firstSep > 0)
+        {
+            prefixHive = ParseHive(keyPath[..firstSep]);
+            if (prefixHive is not null)
+                keyPath = keyPath[(firstSep + 1)..];
+        }
+
+        var declaredHive = string.IsNullOrWhiteSpace(dep.Check.RegistryHive)
+            ? (RegistryHive?)null
+            : ParseHive(dep.Check.RegistryHive);
+        if (!string.IsNullOrWhiteSpace(dep.Check.RegistryHive) && declaredHive is null)
+        {
+            return new DependencyStatus
+            {
+                Dependency = dep,
+                Status = DependencyStatusKind.Missing,
+                Details = $"Unknown registry hive '{dep.Check.RegistryHive}' (use HKLM or HKCU)"
+            };
+        }
+        if (declaredHive is not null && prefixHive is not null && declaredHive != prefixHive)
+        {
+            return new DependencyStatus
+            {
+                Dependency = dep,
+                Status = DependencyStatusKind.Missing,
+                Details = $"Registry hive '{dep.Check.RegistryHive}' contradicts the key's own '{dep.Check.RegistryKey}' prefix"
+            };
+        }
+
+        var hive = declaredHive ?? prefixHive ?? RegistryHive.LocalMachine;
+
+        DependencyStatus? best = null;
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            var status = CheckRegistryView(dep, hive, view, keyPath);
+            if (status.Status == DependencyStatusKind.Installed)
+                return status;
+            if (best is null ||
+                (status.Status == DependencyStatusKind.Incompatible &&
+                 best.Status == DependencyStatusKind.Missing))
+            {
+                best = status;
+            }
+        }
+        return best!;
+    }
+
+    private static RegistryHive? ParseHive(string value) => value.Trim().ToUpperInvariant() switch
+    {
+        "HKLM" or "HKEY_LOCAL_MACHINE" => RegistryHive.LocalMachine,
+        "HKCU" or "HKEY_CURRENT_USER" => RegistryHive.CurrentUser,
+        _ => null
+    };
+
+    private DependencyStatus CheckRegistryView(Dependency dep, RegistryHive hive, RegistryView view, string keyPath)
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(dep.Check!.RegistryKey!);
+            using var root = RegistryKey.OpenBaseKey(hive, view);
+            using var key = root.OpenSubKey(keyPath);
             if (key == null)
             {
                 return new DependencyStatus
@@ -224,7 +293,7 @@ public sealed class DependencyChecker : IDependencyChecker
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Failed to check registry for dependency {DepId}", dep.Id);
+            _logger.Warning(ex, "Failed to check registry for dependency {DepId} ({View})", dep.Id, view);
             return new DependencyStatus
             {
                 Dependency = dep,
