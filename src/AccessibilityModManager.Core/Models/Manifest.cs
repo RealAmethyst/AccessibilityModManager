@@ -152,9 +152,18 @@ public sealed class DependencyCheck
     /// Registry hive for <see cref="RegistryKey"/>: "HKLM" (default) or "HKCU" — same values the
     /// game <see cref="RegistryProbe"/> accepts. Absent in existing indexes → HKLM, the old
     /// behavior. Both the 64-bit and 32-bit (WOW6432Node) views of the hive are probed either
-    /// way (audit finding 35).
+    /// way (audit finding 35), unless <see cref="RegistryView"/> narrows it.
     /// </summary>
     public string? RegistryHive { get; init; }
+
+    /// <summary>
+    /// Which registry view(s) to check: "both" (default when absent), "64", or "32". Pinning
+    /// matters when a component installs per-architecture under the same key shape — .NET can
+    /// have the x86 and x64 runtimes side by side, and a mod that needs the 64-bit one must not
+    /// pass because the 32-bit view happens to satisfy the version rule (Amethyst, 2026-07-24,
+    /// questions_wave5_residuals.md answer 2).
+    /// </summary>
+    public string? RegistryView { get; init; }
 
     public string? FilePath { get; init; }
 }

@@ -41,6 +41,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="160"/>
@@ -100,8 +101,15 @@
                          AutomationProperties.HelpText="HKLM or HKCU. Leave empty for HKLM. Both the 64-bit and 32-bit registry views are checked automatically."
                          Margin="0,2"/>
 
-                <TextBlock Grid.Row="8" Grid.Column="0" Text="Fix download URL:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="Check registry view:" VerticalAlignment="Center" Margin="0,2"/>
                 <TextBox Grid.Row="8" Grid.Column="1"
+                         Text="{Binding CheckRegistryView, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Check registry view"
+                         AutomationProperties.HelpText="both, 64, or 32. Leave empty for both. Pin to one when a component installs per architecture — like the .NET runtimes, which can be present in both 32 and 64-bit at different versions."
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="9" Grid.Column="0" Text="Fix download URL:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="9" Grid.Column="1"
                          Text="{Binding FixDownloadUrl, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="Fix download URL"
                          AutomationProperties.HelpText="HTTPS URL to the loader release. The manager will download from here when AutoInstall is on."

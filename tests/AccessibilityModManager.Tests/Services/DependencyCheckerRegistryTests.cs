@@ -49,7 +49,8 @@ public class DependencyCheckerRegistryTests : IDisposable
         return Assert.Single(await checker.CheckAsync(game));
     }
 
-    private Dependency HkcuDep(string? minVersion = null, string? hive = "HKCU", string? valueName = "Version") => new()
+    private Dependency HkcuDep(string? minVersion = null, string? hive = "HKCU", string? valueName = "Version",
+        string? view = null) => new()
     {
         Id = "dep-1",
         Type = "system",
@@ -58,7 +59,8 @@ public class DependencyCheckerRegistryTests : IDisposable
         {
             RegistryKey = _keyName,
             RegistryValue = valueName,
-            RegistryHive = hive
+            RegistryHive = hive,
+            RegistryView = view
         }
     };
 
@@ -106,6 +108,62 @@ public class DependencyCheckerRegistryTests : IDisposable
     {
         var status = await CheckAsync(HkcuDep(valueName: "NoSuchValue"));
         Assert.Equal(DependencyStatusKind.Missing, status.Status);
+    }
+
+    [Theory]
+    [InlineData("64")]
+    [InlineData("32")]
+    [InlineData("both")]
+    [InlineData("BOTH")]
+    public async Task PinnedOrExplicitView_StillFindsTheKey(string view)
+    {
+        // End-to-end wiring smoke only: HKCU is shared between views, so a pinned view still
+        // resolves here. EXCLUSION — the pin's actual point — is proven on ParseViews below,
+        // since a real-hive exclusion test needs HKLM writes (elevation).
+        var status = await CheckAsync(HkcuDep(view: view));
+        Assert.Equal(DependencyStatusKind.Installed, status.Status);
+    }
+
+    [Fact]
+    public void ParseViews_PinsExcludeTheOtherView()
+    {
+        // The masking defect the pin exists to fix: "64" must select ONLY the 64-bit view, so a
+        // 32-bit entry can never satisfy a 64-bit requirement — and the reverse.
+        Assert.Equal(new[] { Microsoft.Win32.RegistryView.Registry64 },
+            DependencyChecker.ParseViews("64"));
+        Assert.Equal(new[] { Microsoft.Win32.RegistryView.Registry64 },
+            DependencyChecker.ParseViews("x64"));
+        Assert.Equal(new[] { Microsoft.Win32.RegistryView.Registry32 },
+            DependencyChecker.ParseViews("32"));
+        Assert.Equal(new[] { Microsoft.Win32.RegistryView.Registry32 },
+            DependencyChecker.ParseViews("X86"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    [InlineData("both")]
+    [InlineData("Both")]
+    public void ParseViews_DefaultAndBoth_Check64Then32(string? view)
+    {
+        Assert.Equal(
+            new[] { Microsoft.Win32.RegistryView.Registry64, Microsoft.Win32.RegistryView.Registry32 },
+            DependencyChecker.ParseViews(view));
+    }
+
+    [Fact]
+    public void ParseViews_UnknownValue_Null()
+    {
+        Assert.Null(DependencyChecker.ParseViews("ARM"));
+    }
+
+    [Fact]
+    public async Task UnknownView_MissingWithClearMessage()
+    {
+        var status = await CheckAsync(HkcuDep(view: "ARM"));
+        Assert.Equal(DependencyStatusKind.Missing, status.Status);
+        Assert.Contains("Unknown registry view", status.Details);
     }
 
     [Fact]

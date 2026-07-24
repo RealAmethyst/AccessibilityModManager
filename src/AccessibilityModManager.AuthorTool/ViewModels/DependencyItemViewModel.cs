@@ -31,9 +31,14 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     private string? _checkRegistryValue;
 
     /// <summary>"HKLM" (default when empty) or "HKCU". The manager probes both registry views
-    /// (64-bit and WOW6432Node) of the hive automatically.</summary>
+    /// (64-bit and WOW6432Node) of the hive automatically unless the view below pins one.</summary>
     [ObservableProperty]
     private string? _checkRegistryHive;
+
+    /// <summary>"both" (default when empty), "64", or "32" — pins the check to one registry
+    /// view for per-architecture components like the .NET runtimes.</summary>
+    [ObservableProperty]
+    private string? _checkRegistryView;
 
     [ObservableProperty]
     private string? _checkFilePath;
@@ -89,6 +94,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
         _checkRegistryKey = dep.Check?.RegistryKey;
         _checkRegistryValue = dep.Check?.RegistryValue;
         _checkRegistryHive = dep.Check?.RegistryHive;
+        _checkRegistryView = dep.Check?.RegistryView;
         _checkFilePath = dep.Check?.FilePath;
         _fixDownloadUrl = dep.Fix?.DownloadUrl;
         _fixBundledPath = dep.Fix?.BundledPath;
@@ -129,6 +135,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     partial void OnCheckRegistryKeyChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryValueChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryHiveChanged(string? value) => _parent.MarkParentDirty();
+    partial void OnCheckRegistryViewChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckFilePathChanged(string? value) => _parent.MarkParentDirty();
     partial void OnFixDownloadUrlChanged(string? value) => _parent.MarkParentDirty();
     partial void OnFixBundledPathChanged(string? value) => _parent.MarkParentDirty();
@@ -185,6 +192,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
                 RegistryKey = string.IsNullOrWhiteSpace(CheckRegistryKey) ? null : CheckRegistryKey,
                 RegistryValue = string.IsNullOrWhiteSpace(CheckRegistryValue) ? null : CheckRegistryValue,
                 RegistryHive = string.IsNullOrWhiteSpace(CheckRegistryHive) ? null : CheckRegistryHive.Trim(),
+                RegistryView = string.IsNullOrWhiteSpace(CheckRegistryView) ? null : CheckRegistryView.Trim(),
                 FilePath = string.IsNullOrWhiteSpace(CheckFilePath) ? null : CheckFilePath
             } : null,
             Fix = hasFix ? new DependencyFix

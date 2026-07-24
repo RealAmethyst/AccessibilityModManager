@@ -212,8 +212,19 @@ public sealed class DependencyChecker : IDependencyChecker
 
         var hive = declaredHive ?? prefixHive ?? RegistryHive.LocalMachine;
 
+        var views = ParseViews(dep.Check.RegistryView);
+        if (views is null)
+        {
+            return new DependencyStatus
+            {
+                Dependency = dep,
+                Status = DependencyStatusKind.Missing,
+                Details = $"Unknown registry view '{dep.Check.RegistryView}' (use both, 64, or 32)"
+            };
+        }
+
         DependencyStatus? best = null;
-        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        foreach (var view in views)
         {
             var status = CheckRegistryView(dep, hive, view, keyPath);
             if (status.Status == DependencyStatusKind.Installed)
@@ -234,6 +245,24 @@ public sealed class DependencyChecker : IDependencyChecker
         "HKCU" or "HKEY_CURRENT_USER" => RegistryHive.CurrentUser,
         _ => null
     };
+
+    /// <summary>
+    /// The registry view(s) a check's optional architecture pin selects, in probe order. "both"
+    /// (or absent) checks 64-bit then 32-bit; "64"/"x64" and "32"/"x86" check exactly that view —
+    /// needed when a component installs per-architecture (with .NET, x86 and x64 runtimes
+    /// coexist, and a mod needing the 64-bit one must not pass because the 32-bit view satisfied
+    /// the version rule). Null for an unrecognized value — callers fail closed with a message.
+    /// Public because the pin's whole point is EXCLUSION, and tests can't prove exclusion
+    /// against a real hive without elevation (HKCU is shared between views) — they prove it here.
+    /// </summary>
+    public static RegistryView[]? ParseViews(string? registryView) =>
+        registryView?.Trim().ToUpperInvariant() switch
+        {
+            null or "" or "BOTH" => new[] { RegistryView.Registry64, RegistryView.Registry32 },
+            "64" or "X64" => new[] { RegistryView.Registry64 },
+            "32" or "X86" => new[] { RegistryView.Registry32 },
+            _ => null
+        };
 
     private DependencyStatus CheckRegistryView(Dependency dep, RegistryHive hive, RegistryView view, string keyPath)
     {
