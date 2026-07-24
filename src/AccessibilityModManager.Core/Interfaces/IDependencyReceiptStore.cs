@@ -23,4 +23,11 @@ public interface IDependencyReceiptStore
     /// overwrites during install. Same restore semantics as the mod-install backup folder.
     /// </summary>
     string GetBackupDirectory(string gameId, string dependencyId);
+
+    /// <summary>
+    /// True when any dependency receipt file for this game exists on disk but cannot be trusted
+    /// (corrupt, tampered, or missing its integrity data). Uninstall fails closed on this —
+    /// releasing refcounts against a partial view would remove loaders other mods still need.
+    /// </summary>
+    Task<bool> AnyUnreadableForGameAsync(string gameId);
 }

@@ -34,6 +34,22 @@ public partial class App : Application
 
         var mainWindow = _serviceProvider.GetRequiredService<MainWindow>();
         mainWindow.Show();
+
+        // Surface a recovered-from-corruption settings load once at startup. A silent reset hides
+        // real data loss (manually located games, emulator records, filters) — the user deserves
+        // to know it happened and what was restored.
+        _ = Task.Run(async () =>
+        {
+            var configService = _serviceProvider.GetRequiredService<IConfigService>();
+            await configService.LoadAsync();
+            if (configService.LastLoadProblem is { } problem)
+            {
+                configService.AcknowledgeLoadProblem();
+                await Current.Dispatcher.InvokeAsync(() =>
+                    MessageBox.Show(Current.MainWindow, problem, "Settings problem detected",
+                        MessageBoxButton.OK, MessageBoxImage.Warning));
+            }
+        });
     }
 
     private static void ConfigureServices(IServiceCollection services)

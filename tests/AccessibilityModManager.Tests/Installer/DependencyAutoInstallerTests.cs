@@ -34,7 +34,13 @@ public class DependencyAutoInstallerTests : IDisposable
     [Fact]
     public async Task InstallAsync_AlreadyInstalledByOtherPlugin_BumpsRefcount_NoDownload()
     {
-        // Pre-seed a receipt so the installer should short-circuit and just append to refcount.
+        // Pre-seed a receipt whose added file is really on disk, so the installer should
+        // short-circuit and just append to the refcount. (A receipt with no added-file evidence
+        // triggers a reinstall since audit finding 25 — the checker only routes here when it
+        // already said the dep was missing.)
+        var presentFile = Path.Combine(_gameDir, "MelonLoader", "dep.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(presentFile)!);
+        File.WriteAllText(presentFile, "present");
         await _store.SaveAsync(new DependencyReceipt
         {
             GameId = "game-1",
@@ -42,7 +48,10 @@ public class DependencyAutoInstallerTests : IDisposable
             Kind = "extractZip",
             InstalledAt = DateTime.UtcNow,
             Sha256 = "deadbeef",
-            Changes = new List<FileChange>(),
+            Changes = new List<FileChange>
+            {
+                new() { Type = ChangeType.Added, RelativePath = Path.Combine("MelonLoader", "dep.dll") }
+            },
             BackupFolder = _store.GetBackupDirectory("game-1", "melonloader"),
             DependentPluginIds = new List<string> { "plug-a" }
         });
@@ -70,6 +79,9 @@ public class DependencyAutoInstallerTests : IDisposable
     [Fact]
     public async Task InstallAsync_AlreadyInstalledBySamePlugin_DoesNotDuplicateRefcount()
     {
+        var presentFile = Path.Combine(_gameDir, "MelonLoader", "dep.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(presentFile)!);
+        File.WriteAllText(presentFile, "present");
         await _store.SaveAsync(new DependencyReceipt
         {
             GameId = "game-1",
@@ -77,7 +89,10 @@ public class DependencyAutoInstallerTests : IDisposable
             Kind = "extractZip",
             InstalledAt = DateTime.UtcNow,
             Sha256 = "deadbeef",
-            Changes = new List<FileChange>(),
+            Changes = new List<FileChange>
+            {
+                new() { Type = ChangeType.Added, RelativePath = Path.Combine("MelonLoader", "dep.dll") }
+            },
             BackupFolder = _store.GetBackupDirectory("game-1", "melonloader"),
             DependentPluginIds = new List<string> { "plug-a" }
         });
@@ -553,6 +568,8 @@ public class DependencyAutoInstallerTests : IDisposable
 
         public Task<List<DependencyReceipt>> LoadAllForGameAsync(string gameId) =>
             Task.FromResult(_store.Where(kv => kv.Key.game == gameId).Select(kv => kv.Value).ToList());
+
+        public Task<bool> AnyUnreadableForGameAsync(string gameId) => Task.FromResult(false);
 
         public string GetBackupDirectory(string gameId, string dependencyId) =>
             Path.Combine(_backupRoot, gameId, dependencyId);

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Detection;
 using AccessibilityModManager.Infrastructure.Installer;
 using AccessibilityModManager.Infrastructure.Security;
 using AccessibilityModManager.Infrastructure.Services;
@@ -47,7 +48,8 @@ public class InstallerEngineTests : IDisposable
 
         _engine = new InstallerEngine(
             backupManager, actionExecutor, verifier, manifestParser, zipExtractor,
-            _receiptStore, dependencyChecker, scriptRunner, depAutoInstaller, logger);
+            _receiptStore, dependencyChecker, scriptRunner, depAutoInstaller,
+            new GameVerifier(logger), logger);
     }
 
     public void Dispose()
@@ -981,6 +983,9 @@ public class InstallerEngineTests : IDisposable
             return Task.FromResult(list);
         }
 
+        public Task<List<string>> UnreadablePluginIdsForGameAsync(string gameId) =>
+            Task.FromResult(new List<string>());
+
         public string GetReceiptDirectory(string gameId, string pluginId) =>
             Path.Combine(Path.GetTempPath(), "amm-test-receipts", pluginId, gameId);
     }
@@ -1010,6 +1015,8 @@ public class InstallerEngineTests : IDisposable
 
         public Task<List<DependencyReceipt>> LoadAllForGameAsync(string gameId) =>
             Task.FromResult(_store.Where(kv => kv.Key.game == gameId).Select(kv => kv.Value).ToList());
+
+        public Task<bool> AnyUnreadableForGameAsync(string gameId) => Task.FromResult(false);
 
         public string GetBackupDirectory(string gameId, string dependencyId) =>
             Path.Combine(Path.GetTempPath(), "amm-test-depreceipts", gameId, dependencyId, "backup");

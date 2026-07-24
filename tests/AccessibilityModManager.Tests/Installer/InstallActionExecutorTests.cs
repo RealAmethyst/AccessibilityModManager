@@ -40,7 +40,8 @@ public class InstallActionExecutorTests : IDisposable
         File.WriteAllText(Path.Combine(_packageDir, "mod.dll"), "mod content");
 
         var action = new CopyFileAction { Source = "mod.dll", Target = "mods/mod.dll" };
-        var changes = _executor.Execute(action, _packageDir, _gameDir, _backupDir);
+        var changes = new List<FileChange>();
+        _executor.Execute(action, _packageDir, _gameDir, _backupDir, changes);
 
         Assert.Single(changes);
         Assert.Equal(ChangeType.Added, changes[0].Type);
@@ -58,7 +59,8 @@ public class InstallActionExecutorTests : IDisposable
         File.WriteAllText(Path.Combine(_packageDir, "mod.dll"), "updated");
 
         var action = new CopyFileAction { Source = "mod.dll", Target = "mods/mod.dll" };
-        var changes = _executor.Execute(action, _packageDir, _gameDir, _backupDir);
+        var changes = new List<FileChange>();
+        _executor.Execute(action, _packageDir, _gameDir, _backupDir, changes);
 
         Assert.Single(changes);
         Assert.Equal(ChangeType.Replaced, changes[0].Type);
@@ -75,7 +77,8 @@ public class InstallActionExecutorTests : IDisposable
         File.WriteAllText(Path.Combine(_packageDir, "settings.cfg"), "new");
 
         var action = new ReplaceFileAction { Source = "settings.cfg", Target = "config/settings.cfg", Backup = true };
-        var changes = _executor.Execute(action, _packageDir, _gameDir, _backupDir);
+        var changes = new List<FileChange>();
+        _executor.Execute(action, _packageDir, _gameDir, _backupDir, changes);
 
         Assert.Single(changes);
         Assert.Equal(ChangeType.Replaced, changes[0].Type);
@@ -90,7 +93,8 @@ public class InstallActionExecutorTests : IDisposable
         File.WriteAllText(Path.Combine(_packageDir, "data", "sub", "b.txt"), "bbb");
 
         var action = new CopyFolderAction { SourceDir = "data", TargetDir = "gamedata" };
-        var changes = _executor.Execute(action, _packageDir, _gameDir, _backupDir);
+        var changes = new List<FileChange>();
+        _executor.Execute(action, _packageDir, _gameDir, _backupDir, changes);
 
         Assert.Equal(2, changes.Count);
         Assert.True(File.Exists(Path.Combine(_gameDir, "gamedata", "a.txt")));
@@ -104,7 +108,7 @@ public class InstallActionExecutorTests : IDisposable
 
         var action = new CopyFileAction { Source = "mod.dll", Target = "../../escape.dll" };
         Assert.Throws<InvalidOperationException>(() =>
-            _executor.Execute(action, _packageDir, _gameDir, _backupDir));
+            _executor.Execute(action, _packageDir, _gameDir, _backupDir, new List<FileChange>()));
     }
 
     [Fact]
@@ -112,6 +116,6 @@ public class InstallActionExecutorTests : IDisposable
     {
         var action = new CopyFileAction { Source = "nonexistent.dll", Target = "mod.dll" };
         Assert.Throws<FileNotFoundException>(() =>
-            _executor.Execute(action, _packageDir, _gameDir, _backupDir));
+            _executor.Execute(action, _packageDir, _gameDir, _backupDir, new List<FileChange>()));
     }
 }

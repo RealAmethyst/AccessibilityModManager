@@ -14,7 +14,16 @@ namespace AccessibilityModManager.Infrastructure.Installer;
 public sealed record DependencyInstallResult(
     bool Succeeded,
     DependencyReceipt? Receipt,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    bool WasAlreadyInstalled = false,
+    DepAcquisition? Acquisition = null);
+
+/// <summary>
+/// One dependency refcount change made during a single install attempt: either this plugin was
+/// added to an existing receipt's refcount, or the dependency was freshly installed for it. The
+/// engine records these so a failed mod install can release exactly what the attempt acquired.
+/// </summary>
+public sealed record DepAcquisition(string DependencyId, bool InstalledFresh);
 
 /// <summary>
 /// Downloads and applies a single <see cref="DependencyAutoInstall"/>. Same security model as
@@ -58,27 +67,39 @@ public sealed class DependencyAutoInstaller
         UrlValidator.RequireHttps(new Uri(url), $"dependency '{dependency.Id}' download");
 
         var existing = await _receiptStore.LoadAsync(game.Game.GameId, dependency.Id);
-        if (existing != null && DependencyFilesPresent(existing, game.InstallPath))
+        if (existing != null &&
+            string.Equals(existing.Sha256, auto.Sha256, StringComparison.OrdinalIgnoreCase) &&
+            existing.Kind == KindLabel(auto) &&
+            DependencyFilesPresent(existing, game.InstallPath))
         {
-            // Genuinely installed and its files are still on disk (e.g. another plugin already put
-            // this loader there). Bump the refcount and short-circuit — no work to do.
+            // Genuinely installed — same artifact, same kind, and its added files are still on
+            // disk (e.g. another plugin already put this loader there). Bump the refcount and
+            // short-circuit. A receipt for a DIFFERENT artifact/kind is not proof of anything:
+            // reinstall the requested one instead of trusting it (audit finding 25).
+            // The Acquisition token reflects EXACTLY what changed: null when the plugin was
+            // already listed, so a later failure-cleanup can never strip a pre-existing refcount.
+            var refcountAdded = false;
             if (!existing.DependentPluginIds.Contains(requestingPluginId))
             {
                 existing.DependentPluginIds.Add(requestingPluginId);
                 await _receiptStore.SaveAsync(existing);
+                refcountAdded = true;
                 _logger.Information("Dep {DepId} already installed; added {Plugin} to refcount",
                     dependency.Id, requestingPluginId);
             }
-            return new DependencyInstallResult(true, existing, null);
+            return new DependencyInstallResult(true, existing, null, WasAlreadyInstalled: true,
+                Acquisition: refcountAdded ? new DepAcquisition(dependency.Id, InstalledFresh: false) : null);
         }
 
-        // Either no receipt, or a stale receipt whose files are gone (a game update/repair wiped
-        // them, or they were removed by hand). We only reach InstallAsync when the dependency
-        // checker already reported the dep missing, so (re)install rather than trust the stale
-        // receipt — that was the cause of "mod installs but MelonLoader isn't actually applied".
-        // Keep any prior dependents so the refcount survives the reinstall.
+        // Either no receipt, or a receipt we can't trust as-is (files gone after a game
+        // update/repair, or a different artifact/kind than requested). We only reach InstallAsync
+        // when the dependency checker already reported the dep missing, so (re)install rather
+        // than trust the stale receipt. Keep any prior dependents so the refcount survives.
+        // The old copy is removed INSIDE the try below, only after the replacement downloaded and
+        // hash-verified — removing it up front left a stale, unretryable receipt whenever the
+        // download then failed.
         if (existing != null)
-            _logger.Warning("Dep {DepId} has a receipt but its files are missing — reinstalling.", dependency.Id);
+            _logger.Warning("Dep {DepId} has a receipt but needs reinstalling.", dependency.Id);
         var priorDependents = existing?.DependentPluginIds ?? new List<string>();
 
         host?.OnDependencyStarting(dependency.Id, KindLabel(auto), dependency.Id);
@@ -91,6 +112,36 @@ public sealed class DependencyAutoInstaller
         {
             tempFile = await DownloadAsync(url, dependency.Id, ct);
             await VerifySha256Async(tempFile, auto.Sha256, dependency.Id, ct);
+
+            // Only now — with a verified replacement in hand — remove the old copy: restore the
+            // pre-dependency originals, clear the old backups, and drop the old receipt. Without
+            // the restore-first step, the fresh install's backup-on-conflict would capture the OLD
+            // dependency's files over the only copy of the user's originals; final removal would
+            // then "restore" the old loader instead of the original game file.
+            if (existing != null)
+            {
+                var undoFailures = RollBackDependencyChanges(existing.Changes, game.InstallPath, existing.BackupFolder);
+                if (undoFailures.Count > 0)
+                {
+                    SafeNotifyFinished(host, dependency.Id, succeeded: false);
+                    return new DependencyInstallResult(false, existing,
+                        $"couldn't cleanly remove the old copy of '{dependency.Id}' before reinstalling " +
+                        $"(first stuck file: {undoFailures[0]}). Close anything using the game folder and try again.");
+                }
+                try
+                {
+                    if (Directory.Exists(existing.BackupFolder))
+                        Directory.Delete(existing.BackupFolder, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning(ex, "Couldn't clear old dep backup folder {Folder}", existing.BackupFolder);
+                }
+                // The originals are back and the old backups are gone — the old receipt describes
+                // nothing real any more. Dropping it keeps a mid-extract failure retryable (the
+                // catch below restores this attempt's own changes from its own fresh backups).
+                await _receiptStore.DeleteAsync(game.Game.GameId, dependency.Id);
+            }
 
             backupFolder = _receiptStore.GetBackupDirectory(game.Game.GameId, dependency.Id);
             Directory.CreateDirectory(backupFolder);
@@ -129,8 +180,12 @@ public sealed class DependencyAutoInstaller
             };
             await _receiptStore.SaveAsync(receipt);
 
-            host?.OnDependencyFinished(dependency.Id, succeeded: true);
-            return new DependencyInstallResult(true, receipt, null);
+            // Progress callbacks marshal into the UI and must never affect transactional truth —
+            // the receipt above IS saved, so the acquisition must reach the caller even if the
+            // notification throws.
+            SafeNotifyFinished(host, dependency.Id, succeeded: true);
+            return new DependencyInstallResult(true, receipt, null,
+                Acquisition: new DepAcquisition(dependency.Id, InstalledFresh: true));
         }
         catch (Exception ex)
         {
@@ -139,7 +194,7 @@ public sealed class DependencyAutoInstaller
             // leave a half-installed loader behind (no receipt is written on failure).
             if (backupFolder != null && changes.Count > 0)
                 RollBackDependencyChanges(changes, game.InstallPath, backupFolder);
-            host?.OnDependencyFinished(dependency.Id, succeeded: false);
+            SafeNotifyFinished(host, dependency.Id, succeeded: false);
             return new DependencyInstallResult(false, null, ex.Message);
         }
         finally
@@ -154,39 +209,147 @@ public sealed class DependencyAutoInstaller
     /// <summary>
     /// Drops <paramref name="pluginId"/> from the refcount of every auto-installed dependency for
     /// this game. When a dependency's refcount reaches zero — no installed mod needs it any more —
-    /// its files are removed and its receipt deleted. Called when a mod is uninstalled. Best-effort:
-    /// a failure to clean one dependency is logged and the rest still proceed.
+    /// its files are removed and its receipt deleted. Called when a mod is uninstalled. Returns the
+    /// changes that could NOT be undone; on any failure the dependency's receipt is kept (with the
+    /// plugin already removed from its refcount) so the evidence survives for a retry.
     /// </summary>
-    public async Task ReleaseDependenciesForPluginAsync(GameInstall game, string pluginId, CancellationToken ct)
+    public async Task<List<string>> ReleaseDependenciesForPluginAsync(GameInstall game, string pluginId, CancellationToken ct)
     {
+        var failures = new List<string>();
         var receipts = await _receiptStore.LoadAllForGameAsync(game.Game.GameId);
         foreach (var receipt in receipts)
         {
             ct.ThrowIfCancellationRequested();
-            if (!receipt.DependentPluginIds.Remove(pluginId))
-                continue; // this plugin wasn't a dependent — nothing to release
+            failures.AddRange(await ReleasePluginFromReceiptAsync(game, receipt, pluginId));
+        }
+        return failures;
+    }
 
-            if (receipt.DependentPluginIds.Count == 0)
+    /// <summary>
+    /// Drops one plugin from one dependency receipt. When the plugin is the SOLE dependent, the
+    /// dependency's files are rolled back FIRST and the refcount removal commits only on success —
+    /// a failure leaves the receipt untouched (plugin still listed) so a retry re-enters this exact
+    /// path instead of skipping a zero-refcount orphan forever.
+    /// </summary>
+    private async Task<List<string>> ReleasePluginFromReceiptAsync(
+        GameInstall game, DependencyReceipt receipt, string pluginId)
+    {
+        if (!receipt.DependentPluginIds.Contains(pluginId))
+            return new List<string>();
+
+        if (receipt.DependentPluginIds.Count > 1)
+        {
+            receipt.DependentPluginIds.Remove(pluginId);
+            await _receiptStore.SaveAsync(receipt);
+            _logger.Information("Dependency {DepId} still needed by {Count} mod(s) after {Plugin} released it",
+                receipt.DependencyId, receipt.DependentPluginIds.Count, pluginId);
+            return new List<string>();
+        }
+
+        _logger.Information("Dependency {DepId} no longer needed by any mod; removing it", receipt.DependencyId);
+        var failed = RollBackDependencyChanges(receipt.Changes, game.InstallPath, receipt.BackupFolder);
+        if (failed.Count == 0)
+        {
+            await _receiptStore.DeleteAsync(game.Game.GameId, receipt.DependencyId);
+            return new List<string>();
+        }
+
+        _logger.Error("Dependency {DepId} removal could not restore {Count} file(s); receipt kept unchanged for retry",
+            receipt.DependencyId, failed.Count);
+        return failed.Select(f => $"{receipt.DependencyId}: {f}").ToList();
+    }
+
+    /// <summary>
+    /// Releases the refcount bumps and fresh installs a single failed mod-install attempt made
+    /// (audit finding 2: a mod that never got installed must not stay refcounted forever — its
+    /// receipt-less uninstall could never release it). Best-effort per entry; a freshly-installed
+    /// dependency whose refcount drops to zero is removed again, with the same keep-evidence rule
+    /// on rollback failure.
+    /// </summary>
+    public async Task ReleaseAcquisitionsAsync(GameInstall game, string pluginId, IReadOnlyList<DepAcquisition> acquisitions)
+    {
+        for (var i = acquisitions.Count - 1; i >= 0; i--)
+        {
+            var acq = acquisitions[i];
+            try
             {
-                _logger.Information("Dependency {DepId} no longer needed by any mod; removing it", receipt.DependencyId);
-                RollBackDependencyChanges(receipt.Changes, game.InstallPath, receipt.BackupFolder);
-                await _receiptStore.DeleteAsync(game.Game.GameId, receipt.DependencyId);
+                var receipt = await _receiptStore.LoadAsync(game.Game.GameId, acq.DependencyId);
+                if (receipt == null) continue;
+                var failed = await ReleasePluginFromReceiptAsync(game, receipt, pluginId);
+                if (failed.Count > 0)
+                {
+                    _logger.Error("Releasing dep {DepId} after a failed install left {Count} file(s) unrestored; " +
+                                  "its receipt was kept for retry", acq.DependencyId, failed.Count);
+                }
+                else
+                {
+                    _logger.Information("Released dep acquisition {DepId} for {Plugin} after failed install",
+                        acq.DependencyId, pluginId);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                await _receiptStore.SaveAsync(receipt);
-                _logger.Information("Dependency {DepId} still needed by {Count} mod(s) after {Plugin} uninstalled",
-                    receipt.DependencyId, receipt.DependentPluginIds.Count, pluginId);
+                _logger.Warning(ex, "Couldn't release dep acquisition {DepId} for {Plugin}", acq.DependencyId, pluginId);
             }
         }
     }
 
     /// <summary>
-    /// Undoes the file changes from a dependency install: removes added files, restores replaced
-    /// files from the dependency's backup folder. Mirrors the mod-install rollback. Best-effort.
+    /// Drops <paramref name="pluginId"/> from dependencies the game definition no longer declares
+    /// (audit finding 24: updates never reconciled removed dependencies). Called after a
+    /// successful update. Zero-refcount removal follows the same keep-evidence-on-failure rule.
     /// </summary>
-    private void RollBackDependencyChanges(List<FileChange> changes, string gameDir, string backupFolder)
+    public async Task ReconcileDeclaredDependenciesAsync(GameInstall game, string pluginId, CancellationToken ct)
     {
+        var declared = game.Game.Dependencies
+            .Where(d => !d.IsGameInstaller)
+            .Select(d => d.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var receipts = await _receiptStore.LoadAllForGameAsync(game.Game.GameId);
+        foreach (var receipt in receipts)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (declared.Contains(receipt.DependencyId)) continue;
+            if (!receipt.DependentPluginIds.Contains(pluginId)) continue;
+
+            _logger.Information("Dep {DepId} is no longer declared by the game definition; dropping {Plugin} from it",
+                receipt.DependencyId, pluginId);
+            var failed = await ReleasePluginFromReceiptAsync(game, receipt, pluginId);
+            if (failed.Count > 0)
+            {
+                _logger.Error("Dropping undeclared dep {DepId} left {Count} file(s) unrestored; receipt kept for retry",
+                    receipt.DependencyId, failed.Count);
+            }
+        }
+    }
+
+    /// <summary>Progress notifications must never affect transactional outcomes — a UI-marshaled
+    /// callback that throws after the receipt is saved would otherwise lose the acquisition.</summary>
+    private void SafeNotifyFinished(IDependencyHost? host, string dependencyId, bool succeeded)
+    {
+        try { host?.OnDependencyFinished(dependencyId, succeeded); }
+        catch (Exception ex) { _logger.Warning(ex, "Dependency progress callback threw for {DepId}", dependencyId); }
+    }
+
+    /// <summary>Engine-facing passthroughs so refcount reconciliation reads/writes receipts
+    /// through the same store without the engine taking its own store dependency.</summary>
+    public Task<DependencyReceipt?> LoadReceiptAsync(string gameId, string dependencyId) =>
+        _receiptStore.LoadAsync(gameId, dependencyId);
+
+    public Task SaveReceiptAsync(DependencyReceipt receipt) => _receiptStore.SaveAsync(receipt);
+
+    public Task<bool> HasUnreadableDependencyReceiptsAsync(string gameId) =>
+        _receiptStore.AnyUnreadableForGameAsync(gameId);
+
+    /// <summary>
+    /// Undoes the file changes from a dependency install: removes added files, restores replaced
+    /// files from the dependency's backup folder. Mirrors the mod-install rollback. Returns the
+    /// relative paths that could NOT be undone (a missing backup for a replaced file counts).
+    /// </summary>
+    private List<string> RollBackDependencyChanges(List<FileChange> changes, string gameDir, string backupFolder)
+    {
+        var failed = new List<string>();
         foreach (var change in Enumerable.Reverse(changes))
         {
             try
@@ -196,29 +359,38 @@ public sealed class DependencyAutoInstaller
                 {
                     if (File.Exists(target)) File.Delete(target);
                 }
-                else if (!string.IsNullOrEmpty(change.BackupRelativePath))
+                else
                 {
-                    var backup = Path.Combine(backupFolder, change.BackupRelativePath);
-                    if (File.Exists(backup)) File.Copy(backup, target, overwrite: true);
+                    var backup = string.IsNullOrEmpty(change.BackupRelativePath)
+                        ? null
+                        : Path.Combine(backupFolder, change.BackupRelativePath);
+                    if (backup != null && File.Exists(backup))
+                        File.Copy(backup, target, overwrite: true);
+                    else
+                        failed.Add(change.RelativePath);
                 }
             }
             catch (Exception ex)
             {
                 _logger.Warning(ex, "Failed to roll back dependency file {Path}", change.RelativePath);
+                failed.Add(change.RelativePath);
             }
         }
+        return failed;
     }
 
     /// <summary>
     /// Is the dependency actually on disk? A receipt alone isn't proof — a game update/repair (or
     /// manual cleanup) can wipe a loader's files while the receipt lingers. We check the files the
-    /// dep <em>added</em> (replaced/patched entries were originals, not the dep's own). Deps that
-    /// track no file changes (e.g. runInstaller) can't be checked this way, so we trust the receipt.
+    /// dep <em>added</em> (replaced/patched entries were originals, not the dep's own). A receipt
+    /// with NO added files gives no evidence either way — and this method is only consulted when
+    /// the dependency checker just said the dep is missing, so "no evidence" means reinstall
+    /// (audit finding 25; this includes runInstaller receipts — rerunning the installer is the fix).
     /// </summary>
     private static bool DependencyFilesPresent(DependencyReceipt receipt, string gameDir)
     {
         var added = receipt.Changes.Where(c => c.Type == ChangeType.Added).ToList();
-        if (added.Count == 0) return true;
+        if (added.Count == 0) return false;
         return added.All(c =>
         {
             var p = Path.Combine(gameDir, c.RelativePath);

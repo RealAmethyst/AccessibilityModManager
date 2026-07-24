@@ -60,6 +60,26 @@ public sealed class InstallReceipt
     /// user last agreed. Null on receipts written before this field existed (they just re-warn once).
     /// </summary>
     public string? ScriptsFingerprint { get; init; }
+
+    /// <summary>
+    /// True once the cached post-uninstall script was handled (run, or consent declined) during an
+    /// uninstall of this receipt. Persisted so a retry after a downstream failure — a locked file
+    /// blocking rollback, a dependency-release problem — doesn't run the author's cleanup script
+    /// and its side effects a second time.
+    /// </summary>
+    public bool PostUninstallScriptRan { get; set; }
+}
+
+/// <summary>
+/// Outcome of a rollback: which changes could NOT be undone. An empty list means every change was
+/// verified restored or removed. Callers must not delete receipts or backups unless
+/// <see cref="AllRestored"/> is true — a swallowed restore failure followed by receipt deletion
+/// leaves the game modified with the repair evidence gone.
+/// </summary>
+public sealed record RollbackReport(List<string> FailedPaths)
+{
+    public bool AllRestored => FailedPaths.Count == 0;
+    public static RollbackReport Clean { get; } = new(new List<string>());
 }
 
 /// <summary>

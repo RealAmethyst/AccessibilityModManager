@@ -16,5 +16,10 @@ public interface IInstallerEngine
 
     Task UninstallAsync(GameInstall game, string pluginId, IScriptHost? scriptHost = null, CancellationToken ct = default);
 
-    Task RollbackAsync(GameInstall game, InstallReceipt receipt, CancellationToken ct = default);
+    /// <summary>
+    /// Undoes a receipt's changes in reverse order. The report lists every change that could NOT
+    /// be restored — callers must not delete the receipt or its backups unless
+    /// <see cref="RollbackReport.AllRestored"/> is true.
+    /// </summary>
+    Task<RollbackReport> RollbackAsync(GameInstall game, InstallReceipt receipt, CancellationToken ct = default);
 }

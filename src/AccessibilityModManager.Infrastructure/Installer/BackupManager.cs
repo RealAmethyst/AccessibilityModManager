@@ -21,10 +21,12 @@ public sealed class BackupManager
     /// </summary>
     public string CreateBackupFolder(string gameInstallPath, string pluginId, string gameId)
     {
-        var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+        // Timestamp for human readability + a GUID chunk for uniqueness: two backup folders in
+        // the same second must never collide and overwrite each other's originals.
+        var folderName = $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}"[..24];
         // pluginId/gameId are untrusted — keep the backup folder inside the game install.
         var backupFolder = PathSafety.CombineContained(
-            gameInstallPath, "modmanager_backups", pluginId, gameId, timestamp);
+            gameInstallPath, "modmanager_backups", pluginId, gameId, folderName);
         Directory.CreateDirectory(backupFolder);
         _logger.Information("Created backup folder: {BackupFolder}", backupFolder);
         return backupFolder;
@@ -48,17 +50,28 @@ public sealed class BackupManager
         var backupRelativePath = relativeFilePath;
         var backupFullPath = Path.Combine(backupFolder, backupRelativePath);
 
+        // First backup wins: if two actions in one install touch the same file, the second's
+        // "current content" is the first action's output, not the user's original. Overwriting
+        // here would make uninstall restore a half-modded file instead of the true original.
+        if (File.Exists(backupFullPath))
+        {
+            _logger.Debug("Backup already captured for {Path}; keeping the original", relativeFilePath);
+            return backupRelativePath;
+        }
+
         Directory.CreateDirectory(Path.GetDirectoryName(backupFullPath)!);
-        File.Copy(sourcePath, backupFullPath, overwrite: true);
+        File.Copy(sourcePath, backupFullPath, overwrite: false);
 
         _logger.Debug("Backed up: {Source} -> {Backup}", relativeFilePath, backupFullPath);
         return backupRelativePath;
     }
 
     /// <summary>
-    /// Restores a single file from the backup folder back to the game directory.
+    /// Restores a single file from the backup folder back to the game directory. Returns false
+    /// when the backup file is missing — the caller must treat that as a failed restore, not
+    /// silently carry on (a receipt that then gets deleted would erase the only evidence).
     /// </summary>
-    public void RestoreFile(string gameInstallPath, string relativeFilePath, string backupFolder, string backupRelativePath)
+    public bool RestoreFile(string gameInstallPath, string relativeFilePath, string backupFolder, string backupRelativePath)
     {
         var backupFullPath = Path.Combine(backupFolder, backupRelativePath);
         var targetPath = Path.GetFullPath(Path.Combine(gameInstallPath, relativeFilePath));
@@ -67,13 +80,14 @@ public sealed class BackupManager
         if (!File.Exists(backupFullPath))
         {
             _logger.Warning("Backup file not found during restore: {Path}", backupFullPath);
-            return;
+            return false;
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
         File.Copy(backupFullPath, targetPath, overwrite: true);
 
         _logger.Debug("Restored: {Backup} -> {Target}", backupRelativePath, relativeFilePath);
+        return true;
     }
 
     /// <summary>

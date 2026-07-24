@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,7 +15,10 @@ namespace AccessibilityModManager.Infrastructure.Installer;
 /// 1) Extract → 2) Parse manifest → 3) Pre-check → 4) Confirm scripts (if any) → 5) Backup
 ///    → 6) Pre-install script → 7) Apply file actions → 8) Post-install script
 ///    → 9) Verify → 10) Cache post-uninstall script → 11) Write receipt.
-/// On any fatal failure: automatic rollback.
+/// On any fatal failure: automatic rollback, and dependency refcounts acquired for the attempt
+/// are released again.
+/// Every public mutation (install / update / uninstall) holds a per-game lock — in-process and
+/// cross-process — so two operations can never interleave their collision checks and writes.
 /// </summary>
 public sealed class InstallerEngine : IInstallerEngine
 {
@@ -27,6 +31,7 @@ public sealed class InstallerEngine : IInstallerEngine
     private readonly IDependencyChecker _dependencyChecker;
     private readonly LifecycleScriptRunner _scriptRunner;
     private readonly DependencyAutoInstaller _depAutoInstaller;
+    private readonly IGameVerifier _gameVerifier;
     private readonly ILogger _logger;
 
     public InstallerEngine(
@@ -39,6 +44,7 @@ public sealed class InstallerEngine : IInstallerEngine
         IDependencyChecker dependencyChecker,
         LifecycleScriptRunner scriptRunner,
         DependencyAutoInstaller depAutoInstaller,
+        IGameVerifier gameVerifier,
         ILogger logger)
     {
         _backupManager = backupManager;
@@ -50,20 +56,156 @@ public sealed class InstallerEngine : IInstallerEngine
         _dependencyChecker = dependencyChecker;
         _scriptRunner = scriptRunner;
         _depAutoInstaller = depAutoInstaller;
+        _gameVerifier = gameVerifier;
         _logger = logger;
     }
+
+    // ---------------------------------------------------------------- per-game mutation lock
+
+    private const string GameBusyMessage =
+        "Another install, update, or uninstall for this game is already running. Let it finish, then try again.";
+
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InProcessGameLocks =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly string LocksRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "AccessibilityModManager", "locks");
+
+    private sealed class GameMutationLock : IDisposable
+    {
+        private readonly SemaphoreSlim _semaphore;
+        private readonly FileStream _lockFile;
+        public GameMutationLock(SemaphoreSlim semaphore, FileStream lockFile)
+        {
+            _semaphore = semaphore;
+            _lockFile = lockFile;
+        }
+        public void Dispose()
+        {
+            try { _lockFile.Dispose(); } catch { /* DeleteOnClose best effort */ }
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Serializes mutations per game folder. The in-process semaphore stops a second command in
+    /// this app (Install on one mod, Uninstall on another — the progress dialog is not modal);
+    /// the exclusively-opened lock file stops a second copy of the manager. Contention fails
+    /// fast with a clear message instead of queueing — an invisible queue behind a modal-less
+    /// dialog would be confusing to wait on.
+    /// </summary>
+    private static GameMutationLock AcquireGameLock(GameInstall game)
+    {
+        // Resolve the final path so aliases of the same physical folder (the ASCII junction vs
+        // the real install, mapped drives) converge on one lock key. Lexical normalization alone
+        // would hand two manager instances two different "exclusive" locks for the same game.
+        var lockTarget = game.InstallPath;
+        try
+        {
+            lockTarget = Directory.ResolveLinkTarget(game.InstallPath, returnFinalTarget: true)?.FullName
+                         ?? game.InstallPath;
+        }
+        catch
+        {
+            // Not resolvable (missing, access denied) — the preflight will produce the real error.
+        }
+        // Resolved reparse targets can carry the NT namespace prefix (\??\ or \\?\) — the same
+        // normalization AsciiPathShimService does. Without stripping it, the junction-resolved
+        // key and the direct real-path key would STILL differ and the alias fix would be moot.
+        if (lockTarget.StartsWith(@"\??\", StringComparison.Ordinal) ||
+            lockTarget.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            lockTarget = lockTarget[4..];
+        }
+        var key = Path.TrimEndingDirectorySeparator(Path.GetFullPath(lockTarget)).ToLowerInvariant();
+        var semaphore = InProcessGameLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        if (!semaphore.Wait(0))
+            throw new InvalidOperationException(GameBusyMessage);
+
+        try
+        {
+            Directory.CreateDirectory(LocksRoot);
+            var lockName = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..16] + ".lock";
+            var lockFile = new FileStream(
+                Path.Combine(LocksRoot, lockName),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
+                bufferSize: 1, FileOptions.DeleteOnClose);
+            return new GameMutationLock(semaphore, lockFile);
+        }
+        catch (IOException)
+        {
+            semaphore.Release();
+            throw new InvalidOperationException(
+                GameBusyMessage + " It may be running in another copy of the manager.");
+        }
+        catch
+        {
+            semaphore.Release();
+            throw;
+        }
+    }
+
+    // ---------------------------------------------------------------- preflight guards
+
+    /// <summary>
+    /// The game folder must still be there — and for install/update, still verify as the game —
+    /// right before we mutate. Detection ran earlier; the folder can have moved or been gutted
+    /// since, and blindly recreating the stale path would install into a ghost folder.
+    /// </summary>
+    private void EnsureGamePresentForMutation(GameInstall game, bool fullVerify)
+    {
+        if (!Directory.Exists(game.InstallPath))
+            throw new InvalidOperationException(
+                $"The game folder '{game.InstallPath}' no longer exists. Refresh the games list and try again.");
+
+        if (fullVerify && !_gameVerifier.VerifyInstallPath(game.Game, game.InstallPath))
+            throw new InvalidOperationException(
+                $"The folder '{game.InstallPath}' no longer looks like a valid {game.Game.DisplayName} install. " +
+                "Refresh the games list and try again.");
+    }
+
+    /// <summary>
+    /// Fail closed when any receipt for this game exists on disk but can't be trusted. Treating
+    /// an unreadable receipt as "no mod installed" would drop its files out of collision
+    /// ownership and let this install overwrite them.
+    /// </summary>
+    private async Task EnsureNoUnreadableReceiptsAsync(GameInstall game)
+    {
+        var unreadable = await _receiptStore.UnreadablePluginIdsForGameAsync(game.Game.GameId);
+        if (unreadable.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"An install record for this game could not be read (plugin: {string.Join(", ", unreadable)}). " +
+                "Continuing could overwrite files owned by another mod, so nothing was changed. " +
+                "The unreadable record was preserved with a '.corrupt' copy next to it.");
+        }
+
+        // Same rule for shared-dependency records: resolving deps against a partial view could
+        // drop existing dependents or overwrite the corrupt receipt's rollback evidence.
+        if (await _depAutoInstaller.HasUnreadableDependencyReceiptsAsync(game.Game.GameId))
+        {
+            throw new InvalidOperationException(
+                "A shared-dependency record for this game could not be read, so nothing was changed. " +
+                "The unreadable record was preserved with a '.corrupt' copy next to it.");
+        }
+    }
+
+    // ---------------------------------------------------------------- public API
 
     public async Task<InstallReceipt> InstallAsync(
         GameInstall game, ModRelease release, string packageZipPath,
         IScriptHost? scriptHost = null, IDependencyHost? dependencyHost = null,
         CancellationToken ct = default)
     {
+        using var gameLock = AcquireGameLock(game);
         _logger.Information("Starting install: {PluginId}/{GameId} v{Version}", release.PluginId, release.GameId, release.Version);
 
-        // Q8 redesign: install missing required deps as a step in this flow rather than
-        // throwing. Auto-installable deps run themselves; manual-only deps prompt the user.
-        await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+        EnsureGamePresentForMutation(game, fullVerify: true);
+        await EnsureNoUnreadableReceiptsAsync(game);
 
+        // Cheap preflight BEFORE any dependency is installed or refcounted — a duplicate install
+        // must not leave a dependency acquired for a mod that never got installed.
         var existingReceipts = await _receiptStore.LoadAllForGameAsync(game.Game.GameId);
         var ownReceipt = existingReceipts.FirstOrDefault(r => r.PluginId == release.PluginId);
         var otherReceipts = existingReceipts.Where(r => r.PluginId != release.PluginId).ToList();
@@ -76,10 +218,28 @@ public sealed class InstallerEngine : IInstallerEngine
                 $"A mod from plugin '{release.PluginId}' is already installed for this game. Use update or uninstall first.");
         }
 
-        // Q9=A: warn the user about lifecycle scripts on first install (no existing receipt).
-        return await ExecuteTransactionalInstall(
-            game, release, packageZipPath, otherReceipts,
-            scriptHost, scriptsAlreadyConfirmed: false, previousScriptsFingerprint: null, ct);
+        // Q8 redesign: install missing required deps as a step in this flow. Every refcount bump
+        // and fresh install is recorded so a downstream failure can release it again.
+        var acquisitions = await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+
+        try
+        {
+            // Q9=A: warn the user about lifecycle scripts on first install (no existing receipt).
+            return await ExecuteTransactionalInstall(
+                game, release, packageZipPath, otherReceipts,
+                scriptHost, scriptsAlreadyConfirmed: false, previousScriptsFingerprint: null, ct);
+        }
+        catch
+        {
+            // The mod did not install — undo this attempt's dependency acquisitions so refcounts
+            // only ever reflect mods that are actually installed. EXCEPT when a partial rollback
+            // forced a recovery receipt to be saved: then the mod's files ARE partly present and
+            // owned, and its eventual uninstall must still release the deps. Uses no cancellation
+            // token: cleanup must run even when the failure IS a cancellation.
+            if (await _receiptStore.LoadAsync(game.Game.GameId, release.PluginId) == null)
+                await _depAutoInstaller.ReleaseAcquisitionsAsync(game, release.PluginId, acquisitions);
+            throw;
+        }
     }
 
     public async Task<InstallReceipt> UpdateAsync(
@@ -87,67 +247,140 @@ public sealed class InstallerEngine : IInstallerEngine
         IScriptHost? scriptHost = null, IDependencyHost? dependencyHost = null,
         CancellationToken ct = default)
     {
+        using var gameLock = AcquireGameLock(game);
         _logger.Information("Starting update: {PluginId}/{GameId} to v{Version}", release.PluginId, release.GameId, release.Version);
 
-        await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+        EnsureGamePresentForMutation(game, fullVerify: true);
+        await EnsureNoUnreadableReceiptsAsync(game);
 
         var oldReceipt = await _receiptStore.LoadAsync(game.Game.GameId, release.PluginId);
         if (oldReceipt == null)
         {
             // Nothing installed for this plugin yet — treat as a first install (warns about scripts).
-            var freshOthers = (await _receiptStore.LoadAllForGameAsync(game.Game.GameId))
-                .Where(r => r.PluginId != release.PluginId).ToList();
-            return await ExecuteTransactionalInstall(
-                game, release, packageZipPath, freshOthers,
-                scriptHost, scriptsAlreadyConfirmed: false, previousScriptsFingerprint: null, ct);
+            var acquisitionsFresh = await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+            try
+            {
+                var freshOthers = (await _receiptStore.LoadAllForGameAsync(game.Game.GameId))
+                    .Where(r => r.PluginId != release.PluginId).ToList();
+                return await ExecuteTransactionalInstall(
+                    game, release, packageZipPath, freshOthers,
+                    scriptHost, scriptsAlreadyConfirmed: false, previousScriptsFingerprint: null, ct);
+            }
+            catch
+            {
+                if (await _receiptStore.LoadAsync(game.Game.GameId, release.PluginId) == null)
+                    await _depAutoInstaller.ReleaseAcquisitionsAsync(game, release.PluginId, acquisitionsFresh);
+                throw;
+            }
         }
 
-        // Atomic update: snapshot the old version's installed files first, so if the new install
-        // fails we can put the old version back instead of leaving the user with nothing. Uninstall
-        // the old version WITHOUT releasing its shared dependencies (the new version needs the same
-        // ones), install the new version, and restore the old on any failure.
+        // The plugin's mod stays installed whether this update succeeds or is rolled back, so
+        // dependency refcounts acquired here are deliberately NOT released on failure — the
+        // restored old version needs the same (per-game) dependencies.
+        await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+
+        // Atomic update: snapshot the old version's installed files AND its cached scripts, so if
+        // the new install fails we can put everything back instead of leaving the user with
+        // nothing (or with a mod whose uninstall script silently vanished).
         var snapshotDir = Path.Combine(Path.GetTempPath(), "AccessibilityModManager", $"updatebak_{Guid.NewGuid():N}");
+        var scriptSnapshotDir = snapshotDir + "_scripts";
+        var preserveSnapshots = false;
         try
         {
             SnapshotInstalledFiles(oldReceipt, game.InstallPath, snapshotDir);
+            SnapshotDirectory(GetScriptCacheDir(game.Game.GameId, release.PluginId), scriptSnapshotDir);
 
+            // Internal uninstall: keep shared dependencies (the new version needs them), skip the
+            // removal-cleanup script (the mod is being replaced, not removed), and keep the old
+            // backup folder — if the new install fails, the restored old receipt still needs it.
             await UninstallCoreAsync(game, release.PluginId, scriptHost,
-                releaseDependencies: false, runPostUninstall: false, ct);
+                releaseDependencies: false, runPostUninstall: false, deleteBackups: false, ct);
 
             var otherReceipts = (await _receiptStore.LoadAllForGameAsync(game.Game.GameId))
                 .Where(r => r.PluginId != release.PluginId).ToList();
 
             // Re-warn about scripts only if they changed since the user last agreed (see the consent
             // logic in ExecuteTransactionalInstall) — a new or modified script needs a fresh notice.
-            return await ExecuteTransactionalInstall(
+            var receipt = await ExecuteTransactionalInstall(
                 game, release, packageZipPath, otherReceipts,
                 scriptHost, scriptsAlreadyConfirmed: true,
                 previousScriptsFingerprint: oldReceipt.ScriptsFingerprint, ct);
+
+            // The update committed. The old backup folder is now redundant (the new receipt's
+            // backups captured the same originals the internal uninstall restored), and shared
+            // dependencies the game definition no longer declares can drop this plugin. Both are
+            // best-effort — the update itself already succeeded.
+            TryDeleteBackupFolder(game, oldReceipt.BackupFolder);
+            try
+            {
+                await _depAutoInstaller.ReconcileDeclaredDependenciesAsync(game, release.PluginId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "Post-update dependency reconciliation failed for {PluginId}/{GameId}",
+                    release.PluginId, game.Game.GameId);
+            }
+
+            return receipt;
         }
         catch (Exception)
         {
+            var restored = false;
             try
             {
                 RestoreSnapshot(snapshotDir, game.InstallPath);
+                RestoreDirectory(scriptSnapshotDir, GetScriptCacheDir(game.Game.GameId, release.PluginId));
+
+                // If the failed transaction saved a recovery receipt (its own rollback couldn't
+                // remove some new-version files), fold those changes into the restored old receipt
+                // instead of overwriting them — leftover new-version files must stay owned and
+                // uninstallable, not become invisible debris.
+                var recovery = await _receiptStore.LoadAsync(game.Game.GameId, release.PluginId);
+                if (recovery != null && !ReferenceEquals(recovery.Changes, oldReceipt.Changes))
+                {
+                    var known = oldReceipt.Changes
+                        .Select(c => c.RelativePath)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    foreach (var change in recovery.Changes.Where(c => !known.Contains(c.RelativePath)))
+                        oldReceipt.Changes.Add(change);
+                }
+
                 await _receiptStore.SaveAsync(oldReceipt);
+                restored = true;
                 _logger.Warning("Update of {PluginId}/{GameId} failed; restored the previous version",
                     release.PluginId, game.Game.GameId);
             }
             catch (Exception restoreEx)
             {
+                // The snapshots are now the ONLY copy of the old version — they must survive this
+                // failure, and the user must hear about the recovery problem, not just the
+                // original update error.
                 _logger.Error(restoreEx,
-                    "Update failed AND restoring the previous version failed — manual repair may be needed");
+                    "Update failed AND restoring the previous version failed. The old version's files are " +
+                    "preserved at {Snapshot} (scripts at {ScriptSnapshot}) for manual repair.",
+                    snapshotDir, scriptSnapshotDir);
             }
+
+            preserveSnapshots = !restored;
             throw;
         }
         finally
         {
-            try { if (Directory.Exists(snapshotDir)) Directory.Delete(snapshotDir, recursive: true); } catch { }
+            if (!preserveSnapshots)
+            {
+                try { if (Directory.Exists(snapshotDir)) Directory.Delete(snapshotDir, recursive: true); } catch { }
+                try { if (Directory.Exists(scriptSnapshotDir)) Directory.Delete(scriptSnapshotDir, recursive: true); } catch { }
+            }
         }
     }
 
-    public Task UninstallAsync(GameInstall game, string pluginId, IScriptHost? scriptHost = null, CancellationToken ct = default)
-        => UninstallCoreAsync(game, pluginId, scriptHost, releaseDependencies: true, runPostUninstall: true, ct);
+    public async Task UninstallAsync(GameInstall game, string pluginId, IScriptHost? scriptHost = null, CancellationToken ct = default)
+    {
+        using var gameLock = AcquireGameLock(game);
+        EnsureGamePresentForMutation(game, fullVerify: false);
+        await UninstallCoreAsync(game, pluginId, scriptHost,
+            releaseDependencies: true, runPostUninstall: true, deleteBackups: true, ct);
+    }
 
     /// <param name="releaseDependencies">
     /// When true (a real uninstall), drop this plugin from each shared dependency's refcount and
@@ -160,55 +393,100 @@ public sealed class InstallerEngine : IInstallerEngine
     /// shouldn't run — and its side effects wouldn't be undone if the new version then failed to
     /// install and we restored the old one.
     /// </param>
+    /// <param name="deleteBackups">
+    /// When true (a real uninstall whose rollback fully verified), delete the receipt's backup
+    /// folder — the originals are back in place, so it has nothing left to protect. The update
+    /// path passes false: if the new install fails, the restored old receipt still points at it.
+    /// </param>
     private async Task UninstallCoreAsync(GameInstall game, string pluginId, IScriptHost? scriptHost,
-        bool releaseDependencies, bool runPostUninstall, CancellationToken ct)
+        bool releaseDependencies, bool runPostUninstall, bool deleteBackups, CancellationToken ct)
     {
         _logger.Information("Starting uninstall: {PluginId}/{GameId}", pluginId, game.Game.GameId);
 
         var receipt = await _receiptStore.LoadAsync(game.Game.GameId, pluginId);
         if (receipt == null)
         {
+            // Fail closed if a receipt file exists but couldn't be trusted — "nothing to
+            // uninstall" would be a lie and would strand the mod's files forever.
+            var unreadable = await _receiptStore.UnreadablePluginIdsForGameAsync(game.Game.GameId);
+            if (unreadable.Contains(pluginId, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The install record for this mod exists but could not be read, so the manager can't " +
+                    "safely undo the install. The unreadable record was preserved with a '.corrupt' copy next to it.");
+            }
+
             _logger.Warning("No receipt found for {PluginId}/{GameId}, nothing to uninstall", pluginId, game.Game.GameId);
             return;
         }
 
         // Run post-uninstall script first (best-effort: failures don't block the uninstall).
-        if (runPostUninstall &&
+        // The ran-flag is persisted immediately so a retry after a downstream failure (rollback,
+        // dependency release) never runs the author's cleanup script — and its side effects —
+        // a second time.
+        if (runPostUninstall && !receipt.PostUninstallScriptRan &&
             receipt.PostUninstall is not null && !string.IsNullOrEmpty(receipt.CachedPostUninstallExecutable))
         {
             await TryRunPostUninstall(game, receipt, scriptHost, ct);
+            receipt.PostUninstallScriptRan = true;
+            try { await _receiptStore.SaveAsync(receipt); }
+            catch (Exception ex) { _logger.Warning(ex, "Couldn't persist the post-uninstall ran-flag"); }
         }
 
-        await RollbackAsync(game, receipt, ct);
+        // The consent prompt and script above can take a while — make sure the game folder is
+        // still there right before files start moving.
+        EnsureGamePresentForMutation(game, fullVerify: false);
+
+        var report = await RollbackAsync(game, receipt, ct);
+        if (!report.AllRestored)
+        {
+            throw new InvalidOperationException(
+                $"Uninstall could not restore {report.FailedPaths.Count} file(s) — first: '{report.FailedPaths[0]}'. " +
+                "The mod's records and backups were kept so you can retry. Close the game (or anything else " +
+                "using its folder) and try again.");
+        }
+
+        if (releaseDependencies)
+        {
+            // Same fail-closed rule for dependency receipts: releasing refcounts against a partial
+            // view could remove a loader another mod still needs.
+            if (await _depAutoInstaller.HasUnreadableDependencyReceiptsAsync(game.Game.GameId))
+            {
+                throw new InvalidOperationException(
+                    "A shared-dependency record for this game could not be read, so the uninstall stopped before " +
+                    "touching shared loaders. The mod's own files were restored; its record was kept so you can retry. " +
+                    "The unreadable record was preserved with a '.corrupt' copy next to it.");
+            }
+
+            var failures = await _depAutoInstaller.ReleaseDependenciesForPluginAsync(game, pluginId, ct);
+            if (failures.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"The mod's files were removed, but {failures.Count} shared dependency change(s) could not be " +
+                    $"released (first: {failures[0]}). The mod's record was kept so you can retry the uninstall.");
+            }
+        }
+
         await _receiptStore.DeleteAsync(game.Game.GameId, pluginId);
 
         // F4 addendum: delete the cached executable after the script ran (or after we
         // attempted to). The receipt itself is gone; the script binary should follow.
         TryDeleteCachedScripts(game.Game.GameId, pluginId);
 
-        if (releaseDependencies)
-        {
-            // Release this mod's hold on any shared auto-installed dependencies. When a dependency's
-            // refcount hits zero (no mod needs it any more) it is removed too.
-            try
-            {
-                await _depAutoInstaller.ReleaseDependenciesForPluginAsync(game, pluginId, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning(ex, "Failed to release dependencies for {PluginId}/{GameId} — the mod is still uninstalled",
-                    pluginId, game.Game.GameId);
-            }
-        }
+        // Every restore verified clean, so the backup folder has nothing left to protect
+        // (decision on audit finding 30). Kept on any failure above — we never get here then.
+        if (deleteBackups)
+            TryDeleteBackupFolder(game, receipt.BackupFolder);
 
         _logger.Information("Uninstall complete: {PluginId}/{GameId}", pluginId, game.Game.GameId);
     }
 
-    public async Task RollbackAsync(GameInstall game, InstallReceipt receipt, CancellationToken ct = default)
+    public async Task<RollbackReport> RollbackAsync(GameInstall game, InstallReceipt receipt, CancellationToken ct = default)
     {
         _logger.Information("Rolling back: {PluginId}/{GameId} v{Version}",
             receipt.PluginId, receipt.GameId, receipt.InstalledVersion);
 
+        var failed = new List<string>();
         foreach (var change in Enumerable.Reverse(receipt.Changes))
         {
             ct.ThrowIfCancellationRequested();
@@ -223,10 +501,13 @@ public sealed class InstallerEngine : IInstallerEngine
 
                     case ChangeType.Replaced:
                     case ChangeType.Patched:
-                        if (!string.IsNullOrEmpty(change.BackupRelativePath))
+                        // A replaced file with no recorded backup, or whose backup is gone, cannot
+                        // be restored — that is a failure the caller must see, not a shrug.
+                        if (string.IsNullOrEmpty(change.BackupRelativePath) ||
+                            !_backupManager.RestoreFile(game.InstallPath, change.RelativePath,
+                                receipt.BackupFolder, change.BackupRelativePath))
                         {
-                            _backupManager.RestoreFile(game.InstallPath, change.RelativePath,
-                                receipt.BackupFolder, change.BackupRelativePath);
+                            failed.Add(change.RelativePath);
                         }
                         break;
                 }
@@ -234,12 +515,17 @@ public sealed class InstallerEngine : IInstallerEngine
             catch (Exception ex)
             {
                 _logger.Error(ex, "Failed to rollback change: {Type} {Path}", change.Type, change.RelativePath);
+                failed.Add(change.RelativePath);
             }
         }
 
-        _logger.Information("Rollback complete for {PluginId}/{GameId}", receipt.PluginId, receipt.GameId);
+        if (failed.Count == 0)
+            _logger.Information("Rollback complete for {PluginId}/{GameId}", receipt.PluginId, receipt.GameId);
+        else
+            _logger.Error("Rollback for {PluginId}/{GameId} could not restore {Count} file(s): {Files}",
+                receipt.PluginId, receipt.GameId, failed.Count, string.Join(", ", failed));
 
-        await Task.CompletedTask;
+        return new RollbackReport(failed);
     }
 
     private async Task<InstallReceipt> ExecuteTransactionalInstall(
@@ -255,7 +541,8 @@ public sealed class InstallerEngine : IInstallerEngine
         var tempDir = Path.Combine(Path.GetTempPath(), "AccessibilityModManager", $"install_{Guid.NewGuid():N}");
         InstallReceipt? receipt = null;
         // Tracked outside the try so a failure BEFORE the receipt is finalized still rolls back the
-        // files already applied (previously a mid-install throw left partial changes with no receipt).
+        // files already applied. The executor journals every file into this list BEFORE writing it,
+        // so even a failure halfway through one copyFolder leaves nothing unjournaled.
         string? backupFolder = null;
         var allChanges = new List<FileChange>();
 
@@ -276,6 +563,13 @@ public sealed class InstallerEngine : IInstallerEngine
             if (manifest.PluginId != release.PluginId)
                 throw new InvalidOperationException(
                     $"Manifest pluginId '{manifest.PluginId}' does not match release pluginId '{release.PluginId}'");
+
+            // The package must actually BE the version the user picked — a wrongly-uploaded old
+            // ZIP must not install and get recorded under the new version's number.
+            if (!string.Equals(manifest.ModVersion.Trim(), release.Version.Trim(), StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"Package version mismatch: the package's manifest says '{manifest.ModVersion}' but the selected " +
+                    $"release is '{release.Version}'. The wrong file may have been uploaded for this release.");
 
             var packageFilesDir = Path.Combine(tempDir, "files");
             CheckForCollisions(manifest, packageFilesDir, otherReceipts);
@@ -304,6 +598,11 @@ public sealed class InstallerEngine : IInstallerEngine
                     throw new OperationCanceledException("User declined the lifecycle script warning.");
             }
 
+            // The consent prompts and dependency work above can take minutes — re-check that the
+            // game folder is still there right before the first mutation, so a game moved or
+            // removed in the meantime doesn't get its dead path silently recreated.
+            EnsureGamePresentForMutation(game, fullVerify: false);
+
             // F5=B: backup → pre-install → file copy → post-install.
             backupFolder = _backupManager.CreateBackupFolder(game.InstallPath, release.PluginId, game.Game.GameId);
 
@@ -319,13 +618,11 @@ public sealed class InstallerEngine : IInstallerEngine
                 await RunHookOrThrow("Pre-install", manifest.PreInstall, tempDir, game, scriptHost, ct);
             }
 
-            // Run install actions
+            // Run install actions — every file change is journaled into allChanges before writing.
             foreach (var action in manifest.InstallActions)
             {
                 ct.ThrowIfCancellationRequested();
-
-                var changes = _actionExecutor.Execute(action, packageFilesDir, game.InstallPath, backupFolder);
-                allChanges.AddRange(changes);
+                _actionExecutor.Execute(action, packageFilesDir, game.InstallPath, backupFolder, allChanges);
             }
 
             if (manifest.PostInstall is not null && (!isUpdate || manifest.PostInstall.RunOnUpdate))
@@ -366,7 +663,7 @@ public sealed class InstallerEngine : IInstallerEngine
                 // Single rollback path: throw and let the catch below undo the changes (it handles
                 // this and any earlier mid-install failure uniformly).
                 _logger.Error("Post-install verification failed, rolling back");
-                throw new InvalidOperationException("Install verification failed. Changes have been rolled back.");
+                throw new InvalidOperationException("Install verification failed; the changes are being rolled back.");
             }
 
             await _receiptStore.SaveAsync(receipt);
@@ -399,8 +696,29 @@ public sealed class InstallerEngine : IInstallerEngine
                 _logger.Error("Install failed after partial changes, attempting rollback");
                 try
                 {
-                    await RollbackAsync(game, toRollBack, CancellationToken.None);
-                    TryDeleteCachedScripts(game.Game.GameId, release.PluginId);
+                    var report = await RollbackAsync(game, toRollBack, CancellationToken.None);
+                    if (!report.AllRestored)
+                    {
+                        // Files this attempt wrote are still in the game folder. Persist the
+                        // attempt's journal as a recovery receipt so those files stay OWNED —
+                        // visible to collision checks and removable through a normal uninstall —
+                        // instead of becoming untracked debris the manager has forgotten about.
+                        _logger.Error(
+                            "Rollback after the failed install could not restore {Count} file(s): {Files}. " +
+                            "Saving a recovery receipt; the backup folder was kept at {Backup}.",
+                            report.FailedPaths.Count, string.Join(", ", report.FailedPaths), backupFolder);
+                        await _receiptStore.SaveAsync(toRollBack);
+                    }
+                    else
+                    {
+                        if (backupFolder != null)
+                        {
+                            // Everything this attempt wrote was verified undone — the backup folder
+                            // created for the attempt has nothing left to protect.
+                            TryDeleteBackupFolder(game, backupFolder);
+                        }
+                        TryDeleteCachedScripts(game.Game.GameId, release.PluginId);
+                    }
                 }
                 catch (Exception rollbackEx)
                 {
@@ -686,10 +1004,13 @@ public sealed class InstallerEngine : IInstallerEngine
         }
     }
 
+    private string GetScriptCacheDir(string gameId, string pluginId) =>
+        Path.Combine(_receiptStore.GetReceiptDirectory(gameId, pluginId), "scripts");
+
     private (string Path, string Sha256) CachePostUninstallScript(
         LifecycleScript script, string stagingDir, string pluginId, string gameId)
     {
-        var cacheDir = Path.Combine(_receiptStore.GetReceiptDirectory(gameId, pluginId), "scripts");
+        var cacheDir = GetScriptCacheDir(gameId, pluginId);
         Directory.CreateDirectory(cacheDir);
 
         // Use the original filename so its extension survives — runner picks a runner by ext.
@@ -710,7 +1031,7 @@ public sealed class InstallerEngine : IInstallerEngine
     {
         try
         {
-            var cacheDir = Path.Combine(_receiptStore.GetReceiptDirectory(gameId, pluginId), "scripts");
+            var cacheDir = GetScriptCacheDir(gameId, pluginId);
             if (Directory.Exists(cacheDir))
             {
                 Directory.Delete(cacheDir, recursive: true);
@@ -720,6 +1041,50 @@ public sealed class InstallerEngine : IInstallerEngine
         catch (Exception ex)
         {
             _logger.Warning(ex, "Failed to delete cached scripts for {PluginId}/{GameId}", pluginId, gameId);
+        }
+    }
+
+    /// <summary>
+    /// Deletes a receipt's backup folder and prunes now-empty parents up to (and including)
+    /// <c>modmanager_backups</c>. Only ever fires after every restore verified clean. The
+    /// recursive delete is containment-checked to the manager-created backups subtree — the
+    /// install root itself can be a junction and must never be recursively deleted.
+    /// </summary>
+    private void TryDeleteBackupFolder(GameInstall game, string backupFolder)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(backupFolder) || !Directory.Exists(backupFolder))
+                return;
+
+            var backupsRoot = Path.Combine(game.InstallPath, "modmanager_backups");
+            if (!PathSafety.IsContained(backupsRoot, backupFolder) ||
+                PathSafety.IsContained(backupFolder, backupsRoot))
+            {
+                _logger.Warning("Backup folder {Folder} is not strictly under {Root}; leaving it alone",
+                    backupFolder, backupsRoot);
+                return;
+            }
+
+            Directory.Delete(backupFolder, recursive: true);
+
+            // Prune empty parents (plugin/game levels and modmanager_backups itself) so an
+            // uninstalled game folder doesn't keep an empty leftover tree.
+            var current = Path.GetDirectoryName(backupFolder);
+            while (current != null &&
+                   PathSafety.IsContained(backupsRoot, current) &&
+                   Directory.Exists(current) &&
+                   !Directory.EnumerateFileSystemEntries(current).Any())
+            {
+                Directory.Delete(current, recursive: false);
+                current = Path.GetDirectoryName(current);
+            }
+
+            _logger.Information("Removed backup folder after verified uninstall: {Folder}", backupFolder);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't remove backup folder {Folder}", backupFolder);
         }
     }
 
@@ -803,6 +1168,31 @@ public sealed class InstallerEngine : IInstallerEngine
         }
     }
 
+    /// <summary>Copies a directory tree (used to snapshot/restore the cached-scripts folder).</summary>
+    private static void SnapshotDirectory(string sourceDir, string destDir)
+    {
+        if (!Directory.Exists(sourceDir)) return;
+        foreach (var file in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(sourceDir, file);
+            var dest = Path.Combine(destDir, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            File.Copy(file, dest, overwrite: true);
+        }
+    }
+
+    private static void RestoreDirectory(string snapshotDir, string destDir)
+    {
+        if (!Directory.Exists(snapshotDir)) return;
+        foreach (var file in Directory.EnumerateFiles(snapshotDir, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(snapshotDir, file);
+            var dest = Path.Combine(destDir, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            File.Copy(file, dest, overwrite: true);
+        }
+    }
+
     private static LifecycleScriptPrompt BuildPrompt(ModRelease release, Manifest manifest)
     {
         var hooks = new List<LifecycleScriptHookInfo>();
@@ -829,25 +1219,53 @@ public sealed class InstallerEngine : IInstallerEngine
     }
 
     /// <summary>
-    /// Q8 redesign: dep installation is now a step in the install flow. For each missing
-    /// required dependency, in manifest order (F14=A):
+    /// Q8 redesign: dep installation is a step in the install flow. For each missing required
+    /// dependency, in manifest order (F14=A):
     ///   - If the dep has an AutoInstall block, prompt the user once with the combined deps
     ///     consent dialog (F16=C step 1) then run all auto-installs in sequence.
     ///   - If the dep has only a download URL (no AutoInstall), open it in a browser and
     ///     pause for the user to install manually + click Continue (F8=C).
-    /// After every dep, recheck via <see cref="IDependencyChecker"/>; if a recheck still says
-    /// missing we log a warning and continue (F5=B) — the actual mod install will catch a
-    /// truly broken setup.
+    /// Dependencies that are already present get this plugin added to their refcount too — a mod
+    /// must be counted against every loader it needs, not only the ones it happened to install
+    /// first (audit finding 2: uninstalling mod A used to remove MelonLoader from under mod B).
+    /// After every dep, recheck via <see cref="IDependencyChecker"/>; a required dep still
+    /// missing ABORTS the install (Amethyst reversed the old F5=B warn-and-continue in the
+    /// round-2 audit, finding 26) so a mod is never recorded installed without its loader.
+    /// Returns every refcount bump / fresh install this run performed so a downstream failure
+    /// can release them again.
     /// </summary>
-    private async Task ResolveDependenciesAsync(
+    private async Task<List<DepAcquisition>> ResolveDependenciesAsync(
         GameInstall game, string requestingPluginId, IDependencyHost? host, CancellationToken ct)
     {
+        var acquisitions = new List<DepAcquisition>();
+
         if (game.Game.Dependencies.Count == 0)
         {
             _logger.Information("Dep resolution for {GameId}/{PluginId}: game definition declares no dependencies — skipping",
                 game.Game.GameId, requestingPluginId);
-            return;
+            return acquisitions;
         }
+
+        // The resolution step is atomic over its own acquisitions: if anything below throws
+        // (declined consent, a failed dep install, the still-missing abort), everything THIS
+        // call already acquired is released before the exception continues — the caller's
+        // release only has to cover failures after resolution returned successfully.
+        try
+        {
+            await ResolveDependenciesCoreAsync(game, requestingPluginId, host, acquisitions, ct);
+            return acquisitions;
+        }
+        catch
+        {
+            await _depAutoInstaller.ReleaseAcquisitionsAsync(game, requestingPluginId, acquisitions);
+            throw;
+        }
+    }
+
+    private async Task ResolveDependenciesCoreAsync(
+        GameInstall game, string requestingPluginId, IDependencyHost? host,
+        List<DepAcquisition> acquisitions, CancellationToken ct)
+    {
 
         // Game-installer deps (IsGameInstaller) are handled by the manager's pre-install step
         // before detection — by the time we get here the game is already installed. Drop them so
@@ -855,14 +1273,32 @@ public sealed class InstallerEngine : IInstallerEngine
         var statuses = (await _dependencyChecker.CheckAsync(game, ct))
             .Where(s => !s.Dependency.IsGameInstaller)
             .ToList();
+
+        // Refcount reconciliation (finding 2): a dependency that is already installed — whether
+        // by another mod through the manager or by hand with a manager receipt — must still
+        // count this plugin as a dependent.
+        foreach (var s in statuses)
+        {
+            if (s.Status != DependencyStatusKind.Installed) continue;
+            if (s.Dependency.Fix?.AutoInstall is null) continue;
+
+            var receipt = await _depReceiptSafeLoadAsync(game.Game.GameId, s.Dependency.Id);
+            if (receipt == null || receipt.DependentPluginIds.Contains(requestingPluginId)) continue;
+
+            receipt.DependentPluginIds.Add(requestingPluginId);
+            await _depAutoInstaller.SaveReceiptAsync(receipt);
+            acquisitions.Add(new DepAcquisition(s.Dependency.Id, InstalledFresh: false));
+            _logger.Information("Dep {DepId} already installed; added {Plugin} to its refcount",
+                s.Dependency.Id, requestingPluginId);
+        }
+
         var blockers = statuses
             .Where(s => s.Dependency.Required && s.Status != DependencyStatusKind.Installed)
             .ToList();
         if (blockers.Count == 0)
         {
             _logger.Information(
-                "Dep resolution for {GameId}/{PluginId}: all {Count} declared dependencies report Installed — skipping auto-install. " +
-                "If a dep is actually missing, the check rule (file/folder path or registry key) is matching something stale; tighten the check.",
+                "Dep resolution for {GameId}/{PluginId}: all {Count} declared dependencies report Installed.",
                 game.Game.GameId, requestingPluginId, statuses.Count);
             return;
         }
@@ -906,6 +1342,10 @@ public sealed class InstallerEngine : IInstallerEngine
                 if (!result.Succeeded)
                     throw new InvalidOperationException(
                         $"Dependency '{dep.Id}' auto-install failed: {result.ErrorMessage}");
+                // The installer reports exactly what it changed — nothing to release when the
+                // plugin was already refcounted before this run.
+                if (result.Acquisition != null)
+                    acquisitions.Add(result.Acquisition);
             }
             else if (!string.IsNullOrWhiteSpace(dep.Fix?.DownloadUrl))
             {
@@ -934,17 +1374,33 @@ public sealed class InstallerEngine : IInstallerEngine
                     $"Dependency '{dep.Id}' is missing and has no Fix configured.");
             }
 
-            // F5=B: recheck this single dep. If still missing, warn and continue — the actual
-            // mod install will surface anything truly broken.
+            // Recheck this single dep. Finding 26 (F5=B reversed): a required dep still missing
+            // after its install aborts the flow — the caller releases this run's acquisitions.
             var recheck = await _dependencyChecker.CheckAsync(game, ct);
             var still = recheck.FirstOrDefault(s => s.Dependency.Id == dep.Id);
             if (still is { Status: not DependencyStatusKind.Installed })
             {
-                _logger.Warning(
-                    "Dep {DepId} still reports {Status} after install — continuing per F5=B; mod install may fail.",
-                    dep.Id, still.Status);
+                throw new InvalidOperationException(
+                    $"Dependency '{dep.Id}' still reports {still.Status} after installing it — aborting so the mod " +
+                    $"isn't installed without its loader. Check rule: {DescribeCheck(dep)}. If the dependency's files " +
+                    "are actually in place, the check rule in the plugin index is wrong and needs fixing.");
             }
         }
+    }
+
+    // Small indirection so the reconcile loop reads receipts through the auto-installer's store
+    // without the engine taking its own IDependencyReceiptStore dependency.
+    private Task<DependencyReceipt?> _depReceiptSafeLoadAsync(string gameId, string depId) =>
+        _depAutoInstaller.LoadReceiptAsync(gameId, depId);
+
+    private static string DescribeCheck(Dependency dep)
+    {
+        if (dep.Check == null) return "(no check rule)";
+        if (!string.IsNullOrEmpty(dep.Check.FilePath)) return $"file '{dep.Check.FilePath}'";
+        if (!string.IsNullOrEmpty(dep.Check.RegistryKey))
+            return $"registry key '{dep.Check.RegistryKey}'" +
+                   (string.IsNullOrEmpty(dep.Check.RegistryValue) ? "" : $" value '{dep.Check.RegistryValue}'");
+        return "(empty check rule)";
     }
 
     private static DependencyInstallPrompt BuildDependencyPrompt(
