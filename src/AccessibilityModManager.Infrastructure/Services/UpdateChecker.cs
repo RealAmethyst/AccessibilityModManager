@@ -110,6 +110,11 @@ public sealed class UpdateChecker
                 return null;
             }
 
+            // These come from the GitHub API JSON; enforce https before we ever fetch/execute them,
+            // so the invariant is local and testable rather than relying on GitHub always returning https.
+            UrlValidator.RequireHttps(exeUrl, "manager installer asset");
+            UrlValidator.RequireHttps(sha256Url, "manager installer sha256 asset");
+
             // Fetch the SHA256 hash text up front — small, lets us bail early if it's malformed.
             using var hashReq = new HttpRequestMessage(HttpMethod.Get, sha256Url);
             hashReq.Headers.UserAgent.ParseAdd("AccessibilityModManager-UpdateChecker");

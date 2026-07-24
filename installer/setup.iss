@@ -3,7 +3,7 @@
 
 #define MyAppName "Accessibility Mod Manager"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.9.2"
+  #define MyAppVersion "1.13.0"
 #endif
 #define MyAppPublisher "Amethyst"
 #define MyAppExeName "AccessibilityModManager.App.exe"
@@ -50,7 +50,10 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; No 'skipifsilent': the in-app updater runs this installer with /SILENT and relies on this entry
+; to relaunch the app after the upgrade. postinstall still shows the "Launch" checkbox on the
+; Finished page for a normal interactive install.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [Code]
 // Check for the .NET WPF runtime by enumerating its standard install directory directly

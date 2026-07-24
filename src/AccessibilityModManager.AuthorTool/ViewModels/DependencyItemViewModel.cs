@@ -16,6 +16,10 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     [ObservableProperty]
     private bool _required;
 
+    /// <summary>True when this dependency is the game itself (run its installer pre-detection).</summary>
+    [ObservableProperty]
+    private bool _isGameInstaller;
+
     [ObservableProperty]
     private string? _minVersion;
 
@@ -43,7 +47,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     [ObservableProperty]
     private bool _autoInstallEnabled;
 
-    /// <summary>"extractZip", "runInstaller", or "copyFile".</summary>
+    /// <summary>"extractZip", "runInstaller", "copyFile", or "extractApp".</summary>
     [ObservableProperty]
     private string _autoInstallKind = "extractZip";
 
@@ -74,6 +78,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
         _id = dep.Id;
         _type = dep.Type;
         _required = dep.Required;
+        _isGameInstaller = dep.IsGameInstaller;
         _minVersion = dep.MinVersion;
         _checkRegistryKey = dep.Check?.RegistryKey;
         _checkRegistryValue = dep.Check?.RegistryValue;
@@ -102,12 +107,17 @@ public sealed partial class DependencyItemViewModel : ObservableObject
                 _autoInstallTargetDir = cf.TargetDir;
                 _autoInstallTargetFileName = cf.TargetFileName;
                 break;
+            case ExtractAppAutoInstall:
+                // Portable app (emulator): URL + SHA256 only; no target dir/args.
+                _autoInstallKind = "extractApp";
+                break;
         }
     }
 
     partial void OnIdChanged(string value) => _parent.MarkParentDirty();
     partial void OnTypeChanged(string value) => _parent.MarkParentDirty();
     partial void OnRequiredChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnIsGameInstallerChanged(bool value) => _parent.MarkParentDirty();
     partial void OnMinVersionChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryKeyChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryValueChanged(string? value) => _parent.MarkParentDirty();
@@ -115,7 +125,17 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     partial void OnFixDownloadUrlChanged(string? value) => _parent.MarkParentDirty();
     partial void OnFixBundledPathChanged(string? value) => _parent.MarkParentDirty();
     partial void OnAutoInstallEnabledChanged(bool value) => _parent.MarkParentDirty();
-    partial void OnAutoInstallKindChanged(string value) => _parent.MarkParentDirty();
+    partial void OnAutoInstallKindChanged(string value)
+    {
+        _parent.MarkParentDirty();
+        // The conditional field rows bind to these — refresh them when the kind changes so the
+        // editor shows/hides the right fields live.
+        OnPropertyChanged(nameof(IsExtractZipKind));
+        OnPropertyChanged(nameof(IsRunInstallerKind));
+        OnPropertyChanged(nameof(IsCopyFileKind));
+        OnPropertyChanged(nameof(IsExtractAppKind));
+        OnPropertyChanged(nameof(ShowTargetDir));
+    }
     partial void OnAutoInstallSha256Changed(string? value) => _parent.MarkParentDirty();
     partial void OnAutoInstallTargetDirChanged(string? value) => _parent.MarkParentDirty();
     partial void OnAutoInstallBlocklistTextChanged(string? value) => _parent.MarkParentDirty();
@@ -126,6 +146,10 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     public bool IsExtractZipKind => AutoInstallKind == "extractZip";
     public bool IsRunInstallerKind => AutoInstallKind == "runInstaller";
     public bool IsCopyFileKind => AutoInstallKind == "copyFile";
+    public bool IsExtractAppKind => AutoInstallKind == "extractApp";
+
+    /// <summary>Target dir applies to extractZip + copyFile only (not runInstaller / extractApp).</summary>
+    public bool ShowTargetDir => IsExtractZipKind || IsCopyFileKind;
 
     public Dependency ToModel()
     {
@@ -142,6 +166,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
             Id = Id,
             Type = Type,
             Required = Required,
+            IsGameInstaller = IsGameInstaller,
             MinVersion = string.IsNullOrWhiteSpace(MinVersion) ? null : MinVersion,
             Check = hasCheck ? new DependencyCheck
             {
@@ -184,6 +209,10 @@ public sealed partial class DependencyItemViewModel : ObservableObject
                 Sha256 = AutoInstallSha256!.Trim(),
                 TargetDir = string.IsNullOrWhiteSpace(AutoInstallTargetDir) ? null : AutoInstallTargetDir,
                 TargetFileName = string.IsNullOrWhiteSpace(AutoInstallTargetFileName) ? null : AutoInstallTargetFileName
+            },
+            "extractApp" => new ExtractAppAutoInstall
+            {
+                Sha256 = AutoInstallSha256!.Trim()
             },
             _ => throw new InvalidOperationException($"Unknown AutoInstall kind: {AutoInstallKind}")
         };

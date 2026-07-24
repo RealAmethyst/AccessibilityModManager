@@ -29,6 +29,26 @@ public sealed partial class GameItemViewModel : ObservableObject
     [ObservableProperty]
     private string? _perGameSourceRepo;
 
+    // Registry detection (non-Steam). All three must be filled for the probe to be emitted.
+    [ObservableProperty]
+    private string? _registryHive;
+
+    [ObservableProperty]
+    private string? _registryKey;
+
+    [ObservableProperty]
+    private string? _registryValue;
+
+    [ObservableProperty]
+    private bool _registryProbeSubfolders = true;
+
+    // ASCII path shim (junction). Both fields must be filled for the shim to be emitted.
+    [ObservableProperty]
+    private string? _junctionName;
+
+    [ObservableProperty]
+    private string? _junctionReason;
+
     [ObservableProperty]
     private ModRelease? _selectedRelease;
 
@@ -53,6 +73,12 @@ public sealed partial class GameItemViewModel : ObservableObject
         _description = def.Description;
         _steamAppId = def.SteamAppId;
         _exeName = def.ExeName;
+        _registryHive = def.RegistryProbe?.Hive;
+        _registryKey = def.RegistryProbe?.Key;
+        _registryValue = def.RegistryProbe?.Value;
+        _registryProbeSubfolders = def.RegistryProbe?.ProbeSubfolders ?? true;
+        _junctionName = def.AsciiPathShim?.JunctionName;
+        _junctionReason = def.AsciiPathShim?.Reason;
 
         foreach (var r in releases) Releases.Add(r);
         foreach (var d in def.Dependencies)
@@ -139,6 +165,12 @@ public sealed partial class GameItemViewModel : ObservableObject
     partial void OnSteamAppIdChanged(string? value) => _parent.MarkDirty();
     partial void OnExeNameChanged(string? value) => _parent.MarkDirty();
     partial void OnPerGameSourceRepoChanged(string? value) => _parent.MarkDirty();
+    partial void OnRegistryHiveChanged(string? value) => _parent.MarkDirty();
+    partial void OnRegistryKeyChanged(string? value) => _parent.MarkDirty();
+    partial void OnRegistryValueChanged(string? value) => _parent.MarkDirty();
+    partial void OnRegistryProbeSubfoldersChanged(bool value) => _parent.MarkDirty();
+    partial void OnJunctionNameChanged(string? value) => _parent.MarkDirty();
+    partial void OnJunctionReasonChanged(string? value) => _parent.MarkDirty();
 
     public void RefreshReleases(IList<ModRelease> latest)
     {
@@ -165,6 +197,8 @@ public sealed partial class GameItemViewModel : ObservableObject
             SteamAppId = string.IsNullOrWhiteSpace(SteamAppId) ? null : SteamAppId,
             ExeName = string.IsNullOrWhiteSpace(ExeName) ? null : ExeName,
             ProbeRules = def.ProbeRules,
+            RegistryProbe = BuildRegistryProbe(),
+            AsciiPathShim = BuildAsciiPathShim(),
             Dependencies = Dependencies.Select(d => d.ToModel()).ToList(),
             Tags = TagSelections.Where(t => t.IsSelected).Select(t => t.Id).ToList(),
             Languages = LanguageSelections.Where(l => l.IsSelected).Select(l => l.Code).ToList(),
@@ -174,6 +208,39 @@ public sealed partial class GameItemViewModel : ObservableObject
         };
         var idx = index.Games.IndexOf(def);
         if (idx >= 0) index.Games[idx] = newDef;
+    }
+
+    /// <summary>
+    /// Builds the registry probe, or null when not fully configured. All three of hive/key/value
+    /// are required by the model, so a partially-filled form emits nothing rather than a broken probe.
+    /// </summary>
+    private RegistryProbe? BuildRegistryProbe()
+    {
+        if (string.IsNullOrWhiteSpace(RegistryHive) ||
+            string.IsNullOrWhiteSpace(RegistryKey) ||
+            string.IsNullOrWhiteSpace(RegistryValue))
+            return null;
+
+        return new RegistryProbe
+        {
+            Hive = RegistryHive!.Trim(),
+            Key = RegistryKey!.Trim(),
+            Value = RegistryValue!.Trim(),
+            ProbeSubfolders = RegistryProbeSubfolders
+        };
+    }
+
+    /// <summary>Builds the ASCII path shim, or null when name/reason aren't both filled in.</summary>
+    private AsciiPathShim? BuildAsciiPathShim()
+    {
+        if (string.IsNullOrWhiteSpace(JunctionName) || string.IsNullOrWhiteSpace(JunctionReason))
+            return null;
+
+        return new AsciiPathShim
+        {
+            JunctionName = JunctionName!.Trim(),
+            Reason = JunctionReason!.Trim()
+        };
     }
 
     public void AddDependencyFromPreset(DependencyPreset preset)

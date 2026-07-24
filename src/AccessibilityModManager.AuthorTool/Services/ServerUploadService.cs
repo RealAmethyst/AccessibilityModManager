@@ -70,16 +70,19 @@ public sealed class ServerUploadService
     }
 
     /// <summary>
-    /// Upload a wrapped ZIP plus a <c>gate.json</c> derived from the release's Patreon block.
-    /// Lays them out at <c>{RemoteBasePath}/{gameId}/{version}/</c>. Throws on failure with
-    /// a clear message — caller surfaces it via the existing <c>_showInfoDialog</c> path.
+    /// Upload a wrapped ZIP to <c>{RemoteBasePath}/{gameId}/{version}/</c>. When
+    /// <paramref name="gate"/> is non-null, also writes a <c>gate.json</c> alongside it so
+    /// the download server can enforce Patreon tier checks; when null (public release that
+    /// just wants the author's server as a CDN instead of GitHub), only the ZIP is uploaded.
+    /// Throws on failure with a clear message — caller surfaces it via the existing
+    /// <c>_showInfoDialog</c> path.
     /// </summary>
     public async Task UploadReleaseAsync(
         ServerUploadConfig cfg,
         string gameId,
         string version,
         string localZipPath,
-        PatreonGate gate,
+        PatreonGate? gate,
         CancellationToken ct)
     {
         var validationError = ValidateForUpload(cfg);
@@ -90,6 +93,13 @@ public sealed class ServerUploadService
             throw new FileNotFoundException("Wrapped ZIP not found.", localZipPath);
 
         var fileName = Path.GetFileName(localZipPath);
+
+        // gameId / version / fileName become remote path segments — reject anything that could walk
+        // outside the releases folder (path separators, "..") before building the SFTP path.
+        RequireSafeRemoteSegment(gameId, "game id");
+        RequireSafeRemoteSegment(version, "version");
+        RequireSafeRemoteSegment(fileName, "file name");
+
         var remoteFolder = JoinPosix(cfg.RemoteBasePath, gameId, version);
         var remoteZip = JoinPosix(remoteFolder, fileName);
         var remoteGate = JoinPosix(remoteFolder, "gate.json");
@@ -110,12 +120,15 @@ public sealed class ServerUploadService
                 sftp.UploadFile(src, remoteZip, canOverride: true);
             }
 
-            // Build gate.json from the release's Patreon block. Camel-cased to match the
-            // schema the .NET download server reads.
-            var gateJson = BuildGateJson(gate);
-            using (var src = new MemoryStream(Encoding.UTF8.GetBytes(gateJson)))
+            if (gate != null)
             {
-                sftp.UploadFile(src, remoteGate, canOverride: true);
+                // Build gate.json from the release's Patreon block. Camel-cased to match the
+                // schema the .NET download server reads.
+                var gateJson = BuildGateJson(gate);
+                using (var src = new MemoryStream(Encoding.UTF8.GetBytes(gateJson)))
+                {
+                    sftp.UploadFile(src, remoteGate, canOverride: true);
+                }
             }
 
             _logger.Information("Upload complete: {Folder}", remoteFolder);
@@ -158,6 +171,19 @@ public sealed class ServerUploadService
             {
                 sftp.CreateDirectory(current);
             }
+        }
+    }
+
+    private static void RequireSafeRemoteSegment(string value, string what)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            value.Contains('/') || value.Contains('\\') ||
+            value == "." || value.Contains("..", StringComparison.Ordinal) ||
+            value.Any(char.IsControl))
+        {
+            throw new InvalidOperationException(
+                $"Unsafe {what} for server upload: '{value}'. It must be a simple name with no path " +
+                "separators or '..'.");
         }
     }
 

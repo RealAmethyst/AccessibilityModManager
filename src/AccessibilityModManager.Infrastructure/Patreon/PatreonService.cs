@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Patreon;
@@ -234,6 +235,11 @@ public sealed class PatreonService
         if (_currentAccount == null)
             throw new InvalidOperationException(
                 "Not signed in to Patreon — can't download gated release from author's server.");
+
+        // Never send the patron's Patreon bearer token to a non-https endpoint. The server URL
+        // comes from the (unsigned) plugin index, so an http:// value would leak the token.
+        UrlValidator.RequireHttps(serverUrl, "Patreon author download server");
+
         await EnsureFreshTokenAsync(ct);
 
         using var req = new HttpRequestMessage(HttpMethod.Get, serverUrl);

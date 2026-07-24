@@ -25,6 +25,16 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     private string? _previousAutoChangelog;
     private string? _previousAutoPackageUrl;
 
+    /// <summary>
+    /// ServerUrl carried over from the release being edited. The download-server link lives
+    /// only on the existing <see cref="PatreonGate.ServerUrl"/> — it isn't surfaced as an
+    /// editable field — so we stash it here at construction and re-stamp it onto the rebuilt
+    /// gate in <see cref="BuildResult"/>. That keeps the link intact when the author edits
+    /// metadata (e.g. just the changelog) without re-uploading. A fresh upload in
+    /// <see cref="SaveWithoutUploadAsync"/> recomputes and overwrites it. Null for new releases.
+    /// </summary>
+    private string? _existingServerUrl;
+
     public string GameDisplayName { get; }
     public bool IsEditingExistingRelease { get; }
     public string DialogTitle => IsEditingExistingRelease
@@ -82,6 +92,11 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(SubtitleText))]
     [NotifyPropertyChangedFor(nameof(IsPatreonPostUiVisible))]
     [NotifyPropertyChangedFor(nameof(IsServerUploadInfoVisible))]
+    [NotifyPropertyChangedFor(nameof(IsHostingSelectorVisible))]
+    [NotifyPropertyChangedFor(nameof(IsHostingOnGitHub))]
+    [NotifyPropertyChangedFor(nameof(IsHostingOnServer))]
+    [NotifyPropertyChangedFor(nameof(IsPublicServerInfoVisible))]
+    [NotifyPropertyChangedFor(nameof(UploadButtonAutomationName))]
     private bool _isPatreonGated;
 
     /// <summary>
@@ -90,6 +105,54 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// and reopening the dialog re-reads).
     /// </summary>
     public bool IsServerUploadConfigured { get; }
+
+    // ----- Public-release hosting destination -----
+
+    /// <summary>
+    /// Selected hosting destination for public (non-Patreon) releases. Bound to a ComboBox
+    /// with the two known labels; persisted only for the lifetime of the dialog. Defaults
+    /// to "GitHub" so existing authors see the same form they always have when they open
+    /// the dialog. Only meaningful when <see cref="IsPublicRelease"/> AND
+    /// <see cref="IsServerUploadConfigured"/> — otherwise the selector is hidden and GitHub
+    /// is the implicit destination.
+    /// </summary>
+    public const string HostingGitHub = "GitHub";
+    public const string HostingMyServer = "My server";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsHostingOnGitHub))]
+    [NotifyPropertyChangedFor(nameof(IsHostingOnServer))]
+    [NotifyPropertyChangedFor(nameof(IsPublicServerInfoVisible))]
+    [NotifyPropertyChangedFor(nameof(SubtitleText))]
+    [NotifyPropertyChangedFor(nameof(UploadButtonAutomationName))]
+    private string _hostingDestination = HostingGitHub;
+
+    /// <summary>
+    /// The "Host on:" ComboBox only appears when a server is configured AND the release is
+    /// public — there's nothing to pick otherwise (Patreon releases use the server when
+    /// configured, the Patreon post otherwise; public releases without a server have only
+    /// GitHub as an option).
+    /// </summary>
+    public bool IsHostingSelectorVisible => IsPublicRelease && IsServerUploadConfigured;
+
+    /// <summary>
+    /// True when this public release will be uploaded to / served from GitHub. Used to
+    /// drive visibility of GitHub-specific form fields (repo, tag).
+    /// </summary>
+    public bool IsHostingOnGitHub => IsPublicRelease && HostingDestination == HostingGitHub;
+
+    /// <summary>
+    /// True when this public release will be uploaded to / served from the author's
+    /// download server instead of GitHub. Drives the inline info note and the auto-computed
+    /// URL path.
+    /// </summary>
+    public bool IsHostingOnServer => IsPublicRelease && HostingDestination == HostingMyServer;
+
+    /// <summary>
+    /// Friendly inline note explaining what happens on Save / Upload when the author has
+    /// picked their own server as the destination for a public release.
+    /// </summary>
+    public bool IsPublicServerInfoVisible => IsHostingOnServer;
 
     /// <summary>
     /// Patreon post URL + attachment dropdown + setup instructions are only relevant when
@@ -113,7 +176,9 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         ? (IsServerUploadConfigured
             ? "Build the wrapped ZIP and pick the tiers that get access. The AuthorTool uploads to your download server on Save; the manager fetches from there for entitled patrons."
             : "Build the wrapped ZIP, then upload it manually to a tier-locked Patreon post. The manager fetches it from Patreon for entitled patrons.")
-        : "Fill in the version, pick the wrapped ZIP, then upload to GitHub or save the URL directly.";
+        : (IsHostingOnServer
+            ? "Build the wrapped ZIP. The AuthorTool uploads it to your download server on Save; the manager fetches from there over plain HTTPS (no Patreon involved)."
+            : "Fill in the version, pick the wrapped ZIP, then upload to GitHub or save the URL directly.");
 
     /// <summary>
     /// Bumped whenever the bound <see cref="PatreonAuthorService"/> raises StateChanged.
@@ -151,6 +216,15 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// otherwise (still distinct from the "Upload and save" option which uses gh CLI).
     /// </summary>
     public string SaveButtonText => IsPatreonGated ? "Save" : "Save without upload";
+
+    /// <summary>
+    /// Accessibility label for the "Upload and save" button. Adapts to the destination so a
+    /// screen reader user hears where the upload is going. Falls back to the generic GitHub
+    /// wording for legacy behaviour when no server is configured.
+    /// </summary>
+    public string UploadButtonAutomationName => IsHostingOnServer
+        ? "Upload to your download server and save release"
+        : "Upload to GitHub and save release";
 
     [ObservableProperty]
     private string? _patreonPostUrl;
@@ -250,6 +324,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 _isPatreonGated = true;
                 _resolvedCampaignId = gate.CampaignId;
                 _patreonPostUrl = $"https://www.patreon.com/posts/{gate.PostId}";
+                _existingServerUrl = gate.ServerUrl;
 
                 // Seed the dropdown so the editor isn't empty before Validate runs again.
                 // The actual attachment list refreshes if the user clicks Validate.
@@ -257,6 +332,22 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 {
                     PatreonAttachmentFileNames.Add(gate.AttachmentFileName);
                     _selectedPatreonAttachmentFileName = gate.AttachmentFileName;
+                }
+            }
+            else if (IsServerUploadConfigured && _packageUrl != null)
+            {
+                // Re-opening a public release that was previously uploaded to the author's
+                // server: the URL should start with the configured PublicBaseUrl. Detect that
+                // so the dialog reopens with "My server" preselected and the GitHub-specific
+                // fields stay hidden. Pure heuristic — if the author moved their server or
+                // edited the URL by hand the detection silently falls back to GitHub mode,
+                // which only affects the *default* selector value (everything else is still
+                // editable).
+                var cfg = _configService.GetServerUploadConfig();
+                if (cfg != null && !string.IsNullOrEmpty(cfg.PublicBaseUrl) &&
+                    _packageUrl.StartsWith(cfg.PublicBaseUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    _hostingDestination = HostingMyServer;
                 }
             }
         }
@@ -377,6 +468,10 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             _previousAutoTag = string.IsNullOrWhiteSpace(value) ? null : $"v{value}";
             TagName = _previousAutoTag;
         }
+        // Server-hosted public URLs embed the version directly (no tag indirection), so a
+        // bare version change has to retrigger the URL recompute too. In GitHub mode the
+        // cascade through OnTagNameChanged already covers this.
+        RecomputeAutoPackageUrl();
     }
 
     partial void OnTagNameChanged(string? value)
@@ -393,6 +488,16 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
 
     partial void OnAssetFileNameChanged(string? value) => RecomputeAutoPackageUrl();
 
+    partial void OnHostingDestinationChanged(string value)
+    {
+        // Flipping between GitHub and server hosting changes which URL pattern is "the auto
+        // value", so re-run both so the URL field tracks the new destination. The auto-fill
+        // helpers preserve user-overrides — switching destinations after manually editing
+        // the URL won't clobber the manual value.
+        RecomputeAutoChangelog();
+        RecomputeAutoPackageUrl();
+    }
+
     /// <summary>
     /// The changelog URL points to the release notes the user reads when deciding to update.
     /// The natural source is the GitHub release page itself — once the user has picked a repo
@@ -405,7 +510,13 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         if (!string.IsNullOrEmpty(current) && current != _previousAutoChangelog)
             return; // user-edited
 
-        if (string.IsNullOrWhiteSpace(SourceRepo) || string.IsNullOrWhiteSpace(TagName))
+        // Only the GitHub destination has a deterministic public changelog URL we can derive
+        // (the release page). Server-hosted public releases and Patreon-gated releases don't,
+        // so clear any previous auto value and leave the field empty for the author to fill
+        // in manually if they want.
+        if (!IsHostingOnGitHub ||
+            string.IsNullOrWhiteSpace(SourceRepo) ||
+            string.IsNullOrWhiteSpace(TagName))
         {
             _previousAutoChangelog = null;
             ChangelogUrl = null;
@@ -430,16 +541,30 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         if (!string.IsNullOrEmpty(current) && current != _previousAutoPackageUrl)
             return; // user-edited
 
-        if (string.IsNullOrWhiteSpace(SourceRepo) ||
-            string.IsNullOrWhiteSpace(TagName) ||
-            string.IsNullOrWhiteSpace(AssetFileName))
+        string? url = null;
+        if (IsHostingOnServer)
         {
-            _previousAutoPackageUrl = null;
-            PackageUrl = null;
-            return;
+            // Server-hosted public release: URL is fully determined by the configured server,
+            // the gameId, the version, and the asset filename. Same pattern the manager hits
+            // for Patreon-gated server uploads — minus the gate-check on the server side.
+            var serverCfg = _configService.GetServerUploadConfig();
+            if (serverCfg != null &&
+                !string.IsNullOrWhiteSpace(Version) &&
+                !string.IsNullOrWhiteSpace(AssetFileName))
+            {
+                url = ServerUploadService.BuildPublicUrl(serverCfg, _gameId, Version!.Trim(), AssetFileName!.Trim());
+            }
+        }
+        else if (IsHostingOnGitHub)
+        {
+            if (!string.IsNullOrWhiteSpace(SourceRepo) &&
+                !string.IsNullOrWhiteSpace(TagName) &&
+                !string.IsNullOrWhiteSpace(AssetFileName))
+            {
+                url = GitHubService.BuildAssetUrl(SourceRepo, TagName!, AssetFileName!).AbsoluteUri;
+            }
         }
 
-        var url = GitHubService.BuildAssetUrl(SourceRepo, TagName!, AssetFileName!).AbsoluteUri;
         _previousAutoPackageUrl = url;
         PackageUrl = url;
     }
@@ -501,75 +626,16 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         {
             if (!string.IsNullOrWhiteSpace(LocalZipPath))
             {
-                if (string.IsNullOrWhiteSpace(SourceRepo))
+                if (IsHostingOnServer)
                 {
-                    _showInfoDialog("GitHub repo missing",
-                        $"Set the GitHub repo for '{GameDisplayName}' first (e.g. RealAmethyst/DigimonNOAccess) so we know where to upload.");
-                    return;
-                }
-
-                if (!await _gitHubService.IsAvailableAsync() || !await _gitHubService.IsAuthenticatedAsync())
-                {
-                    _showInfoDialog("GitHub CLI required",
-                        "Uploading a release requires the 'gh' CLI to be installed and signed in. " +
-                        "Install from https://cli.github.com/ then run 'gh auth login'.");
-                    return;
-                }
-
-                var tag = string.IsNullOrWhiteSpace(TagName) ? $"v{Version}" : TagName!;
-                var assetFileName = string.IsNullOrWhiteSpace(AssetFileName)
-                    ? Path.GetFileName(LocalZipPath)
-                    : AssetFileName!;
-
-                var stagingPath = LocalZipPath!;
-                if (!string.Equals(Path.GetFileName(stagingPath), assetFileName, StringComparison.OrdinalIgnoreCase))
-                {
-                    var dir = Path.GetDirectoryName(stagingPath) ?? Path.GetTempPath();
-                    var renamed = Path.Combine(dir, assetFileName);
-                    if (File.Exists(renamed)) File.Delete(renamed);
-                    File.Copy(stagingPath, renamed);
-                    stagingPath = renamed;
-                }
-
-                StatusMessage = $"Uploading {assetFileName} to {SourceRepo} {tag}...";
-                var existingReleases = await _gitHubService.ListReleasesAsync(SourceRepo);
-                var hasTag = existingReleases.Any(r => r.TagName == tag);
-
-                var notes = string.IsNullOrWhiteSpace(ReleaseNotes)
-                    ? $"Release {tag} for the Accessibility Mod Manager."
-                    : ReleaseNotes!;
-
-                ProcessResult result;
-                if (hasTag)
-                {
-                    result = await _gitHubService.UploadReleaseAssetAsync(SourceRepo, tag, stagingPath, clobber: true);
-                    if (result.Success && !string.IsNullOrWhiteSpace(ReleaseNotes))
-                    {
-                        // Tag already existed; refresh its release notes too.
-                        var editResult = await _gitHubService.EditReleaseNotesAsync(SourceRepo, tag, notes);
-                        if (!editResult.Success)
-                            _logger.Warning("Asset uploaded but release notes edit failed: {Output}", editResult.Combined);
-                    }
+                    var ok = await UploadPublicReleaseToServerAsync();
+                    if (!ok) return;
                 }
                 else
                 {
-                    result = await _gitHubService.CreateReleaseAsync(
-                        SourceRepo, tag,
-                        title: tag,
-                        notes: notes,
-                        new[] { stagingPath });
+                    var ok = await UploadPublicReleaseToGitHubAsync();
+                    if (!ok) return;
                 }
-
-                if (!result.Success)
-                {
-                    _showInfoDialog("Upload failed",
-                        $"GitHub release upload failed:\n\n{result.Combined}");
-                    return;
-                }
-
-                PackageUrl = GitHubService.BuildAssetUrl(SourceRepo, tag, assetFileName).AbsoluteUri;
-                _configService.SetGameSourceRepo(_projectPath, _gameId, SourceRepo);
-                StatusMessage = $"Uploaded. URL: {PackageUrl}";
             }
 
             BuildResult();
@@ -584,6 +650,139 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>
+    /// GitHub upload path for the "Upload and save" button. Mirrors the historical behaviour:
+    /// requires gh CLI, picks the right asset filename, creates the release if the tag is
+    /// new or clobbers the asset on an existing tag. Returns false when the caller should
+    /// abort (validation failed and we already surfaced a dialog); true on success.
+    /// </summary>
+    private async Task<bool> UploadPublicReleaseToGitHubAsync()
+    {
+        if (string.IsNullOrWhiteSpace(SourceRepo))
+        {
+            _showInfoDialog("GitHub repo missing",
+                $"Set the GitHub repo for '{GameDisplayName}' first (e.g. RealAmethyst/DigimonNOAccess) so we know where to upload.");
+            return false;
+        }
+
+        if (!await _gitHubService.IsAvailableAsync() || !await _gitHubService.IsAuthenticatedAsync())
+        {
+            _showInfoDialog("GitHub CLI required",
+                "Uploading a release requires the 'gh' CLI to be installed and signed in. " +
+                "Install from https://cli.github.com/ then run 'gh auth login'.");
+            return false;
+        }
+
+        var tag = string.IsNullOrWhiteSpace(TagName) ? $"v{Version}" : TagName!;
+        var assetFileName = string.IsNullOrWhiteSpace(AssetFileName)
+            ? Path.GetFileName(LocalZipPath!)
+            : AssetFileName!;
+
+        var stagingPath = LocalZipPath!;
+        if (!string.Equals(Path.GetFileName(stagingPath), assetFileName, StringComparison.OrdinalIgnoreCase))
+        {
+            var dir = Path.GetDirectoryName(stagingPath) ?? Path.GetTempPath();
+            var renamed = Path.Combine(dir, assetFileName);
+            if (File.Exists(renamed)) File.Delete(renamed);
+            File.Copy(stagingPath, renamed);
+            stagingPath = renamed;
+        }
+
+        StatusMessage = $"Uploading {assetFileName} to {SourceRepo} {tag}...";
+        var existingReleases = await _gitHubService.ListReleasesAsync(SourceRepo);
+        var hasTag = existingReleases.Any(r => r.TagName == tag);
+
+        var notes = string.IsNullOrWhiteSpace(ReleaseNotes)
+            ? $"Release {tag} for the Accessibility Mod Manager."
+            : ReleaseNotes!;
+
+        ProcessResult result;
+        if (hasTag)
+        {
+            result = await _gitHubService.UploadReleaseAssetAsync(SourceRepo, tag, stagingPath, clobber: true);
+            if (result.Success && !string.IsNullOrWhiteSpace(ReleaseNotes))
+            {
+                // Tag already existed; refresh its release notes too.
+                var editResult = await _gitHubService.EditReleaseNotesAsync(SourceRepo, tag, notes);
+                if (!editResult.Success)
+                    _logger.Warning("Asset uploaded but release notes edit failed: {Output}", editResult.Combined);
+            }
+        }
+        else
+        {
+            result = await _gitHubService.CreateReleaseAsync(
+                SourceRepo, tag,
+                title: tag,
+                notes: notes,
+                new[] { stagingPath });
+        }
+
+        if (!result.Success)
+        {
+            _showInfoDialog("Upload failed",
+                $"GitHub release upload failed:\n\n{result.Combined}");
+            return false;
+        }
+
+        PackageUrl = GitHubService.BuildAssetUrl(SourceRepo, tag, assetFileName).AbsoluteUri;
+        _configService.SetGameSourceRepo(_projectPath, _gameId, SourceRepo);
+        StatusMessage = $"Uploaded. URL: {PackageUrl}";
+        return true;
+    }
+
+    /// <summary>
+    /// Server upload path for a public (non-Patreon) release. Same SFTP service the Patreon
+    /// flow uses, just with no <c>gate.json</c> companion file — the download server serves
+    /// the ZIP over plain HTTPS without checking entitlements. Returns false on caller-abort
+    /// (validation or upload failed and the user has seen a dialog); true on success.
+    /// </summary>
+    private async Task<bool> UploadPublicReleaseToServerAsync()
+    {
+        var serverCfg = _configService.GetServerUploadConfig();
+        if (serverCfg == null)
+        {
+            _showInfoDialog("Server upload not configured",
+                "You don't have a download server configured. Open Settings → Server upload to add one, or pick GitHub as the destination.");
+            return false;
+        }
+
+        var assetFileName = string.IsNullOrWhiteSpace(AssetFileName)
+            ? Path.GetFileName(LocalZipPath!)
+            : AssetFileName!.Trim();
+
+        // Match the GitHub path's filename-rename behaviour so the file uploaded matches the
+        // public URL's filename component. Without this, picking a ZIP named "foo.zip" but
+        // editing AssetFileName to "bar.zip" would upload "foo.zip" but the URL would point
+        // at "bar.zip".
+        var stagingPath = LocalZipPath!;
+        if (!string.Equals(Path.GetFileName(stagingPath), assetFileName, StringComparison.OrdinalIgnoreCase))
+        {
+            var dir = Path.GetDirectoryName(stagingPath) ?? Path.GetTempPath();
+            var renamed = Path.Combine(dir, assetFileName);
+            if (File.Exists(renamed)) File.Delete(renamed);
+            File.Copy(stagingPath, renamed);
+            stagingPath = renamed;
+        }
+
+        StatusMessage = $"Uploading {assetFileName} to {serverCfg.Host}...";
+        try
+        {
+            await _serverUpload.UploadReleaseAsync(
+                serverCfg, _gameId, Version!.Trim(), stagingPath, gate: null, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Public server upload failed for {Game} v{Version}", _gameId, Version);
+            _showInfoDialog("Server upload failed",
+                $"Couldn't upload the wrapped ZIP to {serverCfg.Host}:\n\n{ex.Message}");
+            return false;
+        }
+
+        PackageUrl = ServerUploadService.BuildPublicUrl(serverCfg, _gameId, Version!.Trim(), assetFileName);
+        StatusMessage = $"Uploaded. URL: {PackageUrl}";
+        return true;
     }
 
     [RelayCommand]
@@ -704,7 +903,11 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 CampaignId = _resolvedCampaignId,
                 TierIds = selectedTierIds,
                 PostId = postId,
-                AttachmentFileName = attachmentFileName
+                AttachmentFileName = attachmentFileName,
+                // Preserve the existing download-server link by default. A fresh upload in
+                // SaveWithoutUploadAsync overwrites this with a newly computed URL; an edit
+                // that doesn't re-upload keeps the link the author already published.
+                ServerUrl = _existingServerUrl
             };
         }
 
@@ -734,6 +937,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             return "If you supply a URL directly, you must also fill in the SHA256.";
         if (!string.IsNullOrWhiteSpace(PackageUrl) && !PackageUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             return "Package URL must use https://.";
+        if (IsHostingOnServer && string.IsNullOrWhiteSpace(AssetFileName) && string.IsNullOrWhiteSpace(LocalZipPath))
+            return "Pick or build a wrapped ZIP so the server upload knows what file to send.";
         return null;
     }
 

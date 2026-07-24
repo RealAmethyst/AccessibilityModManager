@@ -132,8 +132,11 @@ public sealed class InstallActionExecutor
 
         var changes = new List<FileChange>();
 
-        if (File.Exists(targetPath) && action.Backup)
+        if (File.Exists(targetPath))
         {
+            // Always back up an existing file, even if the manifest set backup=false. A replaced
+            // file with no backup can't be restored on uninstall/rollback — it would silently
+            // destroy the user's original, which is never an acceptable outcome.
             var backupRel = _backupManager.BackupFile(gameDir, targetRelative, backupFolder);
             changes.Add(new FileChange
             {
@@ -142,19 +145,11 @@ public sealed class InstallActionExecutor
                 BackupRelativePath = backupRel
             });
         }
-        else if (!File.Exists(targetPath))
-        {
-            changes.Add(new FileChange
-            {
-                Type = ChangeType.Added,
-                RelativePath = targetRelative
-            });
-        }
         else
         {
             changes.Add(new FileChange
             {
-                Type = ChangeType.Replaced,
+                Type = ChangeType.Added,
                 RelativePath = targetRelative
             });
         }

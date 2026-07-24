@@ -1,6 +1,6 @@
-using System.Diagnostics;
 using System.Windows;
 using System.Windows.Input;
+using AccessibilityModManager.App.Services;
 
 namespace AccessibilityModManager.App.Views;
 
@@ -56,22 +56,15 @@ public partial class ChangelogDialog : Window
             DocumentViewer.Text = "No changelog available for this release.";
         }
 
-        _externalUrl = string.IsNullOrWhiteSpace(externalUrl) ? null : externalUrl;
+        // Only offer the "Open in browser" button for an https changelog URL — the changelog URL
+        // is untrusted author metadata, and this button hands it to ShellExecute.
+        _externalUrl = ExternalLink.IsAllowed(externalUrl) ? externalUrl : null;
         OpenInBrowserButton.Visibility = _externalUrl is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void OpenInBrowser_Click(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(_externalUrl)) return;
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = _externalUrl,
-                UseShellExecute = true
-            });
-        }
-        catch { }
+        ExternalLink.TryOpen(_externalUrl);
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

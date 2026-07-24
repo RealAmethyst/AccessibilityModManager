@@ -40,7 +40,8 @@
 
         <!-- Install path and per-game action buttons -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
-            <TextBlock VerticalAlignment="Center" Margin="0,0,8,0">
+            <TextBlock VerticalAlignment="Center" Margin="0,0,8,0"
+                       Visibility="{Binding IsGameInstalled, Converter={StaticResource BoolToVisConverter}}">
                 <Run Text="Install path: "/>
                 <Run Text="{Binding InstallPath, Mode=OneWay}" FontWeight="SemiBold"/>
             </TextBlock>
@@ -51,6 +52,7 @@
                     Margin="0,0,8,0"/>
             <Button Content="Open Folder"
                     Command="{Binding OpenGameFolderCommand}"
+                    Visibility="{Binding IsGameInstalled, Converter={StaticResource BoolToVisConverter}}"
                     AutomationProperties.Name="Open folder"/>
         </StackPanel>
 

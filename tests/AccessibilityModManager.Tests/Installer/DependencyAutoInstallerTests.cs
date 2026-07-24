@@ -148,6 +148,62 @@ public class DependencyAutoInstallerTests : IDisposable
     }
 
     [Fact]
+    public async Task InstallAsync_StaleReceiptButFilesMissing_Reinstalls()
+    {
+        // Regression: a receipt existed but its files were wiped (e.g. a game update/repair, or a
+        // manual cleanup during testing). The installer must re-extract instead of trusting the
+        // stale receipt — otherwise the mod installs but the loader (MelonLoader) is silently absent.
+        var zipPath = Path.Combine(_tempRoot, "loader.zip");
+        using (var fs = File.Create(zipPath))
+        using (var archive = new ZipArchive(fs, ZipArchiveMode.Create))
+        {
+            using var w = new StreamWriter(archive.CreateEntry("MelonLoader/dep.dll").Open());
+            w.Write("fresh-loader");
+        }
+        var sha = ComputeSha(zipPath);
+
+        // Receipt claims MelonLoader/dep.dll was added — but the file is NOT on disk.
+        await _store.SaveAsync(new DependencyReceipt
+        {
+            GameId = "game-1",
+            DependencyId = "melonloader",
+            Kind = "extractZip",
+            InstalledAt = DateTime.UtcNow,
+            Sha256 = sha,
+            Changes = new List<FileChange>
+            {
+                new() { Type = ChangeType.Added, RelativePath = Path.Combine("MelonLoader", "dep.dll") }
+            },
+            BackupFolder = _store.GetBackupDirectory("game-1", "melonloader"),
+            DependentPluginIds = new List<string> { "plug-a" }
+        });
+
+        var dep = new Dependency
+        {
+            Id = "melonloader",
+            Type = "framework",
+            Required = true,
+            Fix = new DependencyFix
+            {
+                DownloadUrl = "https://example.invalid/loader.zip",
+                AutoInstall = new ExtractZipAutoInstall { Sha256 = sha }
+            }
+        };
+
+        var localInstaller = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+
+        var result = await localInstaller.InstallAsync(dep, MakeGame(), "plug-b", host: null, ct: CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.ErrorMessage);
+        // It actually re-extracted the missing file instead of short-circuiting on the receipt.
+        Assert.Equal("fresh-loader", File.ReadAllText(Path.Combine(_gameDir, "MelonLoader", "dep.dll")));
+        // Refcount preserved the prior dependent and added the new one.
+        Assert.Contains("plug-a", result.Receipt!.DependentPluginIds);
+        Assert.Contains("plug-b", result.Receipt.DependentPluginIds);
+    }
+
+    [Fact]
     public async Task InstallAsync_Sha256Mismatch_FailsAndDoesNotWriteReceipt()
     {
         var zipPath = Path.Combine(_tempRoot, "loader.zip");
@@ -182,6 +238,101 @@ public class DependencyAutoInstallerTests : IDisposable
 
         Assert.False(result.Succeeded);
         Assert.Null(await _store.LoadAsync("game-1", "bad-loader"));
+    }
+
+    [Fact]
+    public async Task ExtractPortableAppAsync_ExtractsZipIntoDestination()
+    {
+        // A portable emulator ZIP with the exe at top level (F4) plus a sub-folder file.
+        var zipPath = Path.Combine(_tempRoot, "emu.zip");
+        using (var fs = File.Create(zipPath))
+        using (var archive = new ZipArchive(fs, ZipArchiveMode.Create))
+        {
+            using (var w = new StreamWriter(archive.CreateEntry("emulator.exe").Open())) w.Write("EMU");
+            using (var w2 = new StreamWriter(archive.CreateEntry("data/readme.txt").Open())) w2.Write("hi");
+        }
+        var sha = ComputeSha(zipPath);
+
+        var dep = new Dependency
+        {
+            Id = "myemu",
+            Type = "system",
+            IsGameInstaller = true,
+            Fix = new DependencyFix
+            {
+                DownloadUrl = "https://example.invalid/emu.zip",
+                AutoInstall = new ExtractAppAutoInstall { Sha256 = sha }
+            }
+        };
+
+        var dest = Path.Combine(_tempRoot, "install-here");
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+
+        await installer.ExtractPortableAppAsync(dep, dest, host: null, ct: CancellationToken.None);
+
+        Assert.Equal("EMU", File.ReadAllText(Path.Combine(dest, "emulator.exe")));
+        Assert.Equal("hi", File.ReadAllText(Path.Combine(dest, "data", "readme.txt")));
+    }
+
+    [Fact]
+    public async Task ExtractPortableAppAsync_Sha256Mismatch_ThrowsAndExtractsNothing()
+    {
+        var zipPath = Path.Combine(_tempRoot, "emu.zip");
+        using (var fs = File.Create(zipPath))
+        using (var archive = new ZipArchive(fs, ZipArchiveMode.Create))
+        {
+            using var w = new StreamWriter(archive.CreateEntry("emulator.exe").Open());
+            w.Write("EMU");
+        }
+
+        var dep = new Dependency
+        {
+            Id = "myemu",
+            Type = "system",
+            IsGameInstaller = true,
+            Fix = new DependencyFix
+            {
+                DownloadUrl = "https://example.invalid/emu.zip",
+                AutoInstall = new ExtractAppAutoInstall
+                {
+                    Sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        };
+
+        var dest = Path.Combine(_tempRoot, "install-here");
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            installer.ExtractPortableAppAsync(dep, dest, host: null, ct: CancellationToken.None));
+        Assert.False(File.Exists(Path.Combine(dest, "emulator.exe")));
+    }
+
+    [Fact]
+    public async Task ExtractPortableAppAsync_NonHttpsUrl_Rejected()
+    {
+        // HTTPS is a hard gate — an http:// URL must be refused before anything downloads. Uses the
+        // StubHandler installer, so if the gate somehow didn't fire we'd get a "reached network"
+        // error instead — either way it throws and nothing is placed.
+        var dep = new Dependency
+        {
+            Id = "myemu",
+            Type = "system",
+            IsGameInstaller = true,
+            Fix = new DependencyFix
+            {
+                DownloadUrl = "http://example.invalid/emu.zip",
+                AutoInstall = new ExtractAppAutoInstall { Sha256 = "deadbeef" }
+            }
+        };
+
+        var dest = Path.Combine(_tempRoot, "install-here");
+
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            _installer.ExtractPortableAppAsync(dep, dest, host: null, ct: CancellationToken.None));
+        Assert.False(Directory.Exists(dest));
     }
 
     private GameInstall MakeGame() => new()

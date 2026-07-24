@@ -18,6 +18,10 @@ public partial class GameDetailsViewModel : ObservableObject
     private readonly IReceiptStore _receiptStore;
     private readonly IDependencyChecker _dependencyChecker;
     private readonly IConfigService _configService;
+    private readonly IGameVerifier _gameVerifier;
+    private readonly IAsciiPathShimService _shimService;
+    private readonly IRegistryGameDetector _registryDetector;
+    private readonly DependencyAutoInstaller _depAutoInstaller;
     private readonly PatreonService _patreon;
     private readonly ILogger _logger;
     private readonly Action _navigateBack;
@@ -63,6 +67,12 @@ public partial class GameDetailsViewModel : ObservableObject
     /// </summary>
     private readonly Func<string, string, string?, string?> _pickFile;
 
+    /// <summary>
+    /// Opens a folder picker (arg: dialog title). Returns the chosen folder or null on cancel.
+    /// Used to let the user choose where a portable-app (emulator) game-installer extracts to.
+    /// </summary>
+    private readonly Func<string, string?> _pickFolder;
+
     [ObservableProperty]
     private string _gameId = string.Empty;
 
@@ -106,6 +116,8 @@ public partial class GameDetailsViewModel : ObservableObject
     public event Action? OperationCompleted;
 
     private GameInstall? _gameInstall;
+    private GameDefinition? _gameDef;
+    private string _pluginId = string.Empty;
     private Dictionary<string, PluginRepoIndex> _activeIndexes = [];
 
     public GameDetailsViewModel(
@@ -114,6 +126,10 @@ public partial class GameDetailsViewModel : ObservableObject
         IReceiptStore receiptStore,
         IDependencyChecker dependencyChecker,
         IConfigService configService,
+        IGameVerifier gameVerifier,
+        IAsciiPathShimService shimService,
+        IRegistryGameDetector registryDetector,
+        DependencyAutoInstaller depAutoInstaller,
         PatreonService patreon,
         ILogger logger,
         Action navigateBack,
@@ -122,13 +138,18 @@ public partial class GameDetailsViewModel : ObservableObject
         Func<string, string, IProgress<ProgressInfo>, Func<IScriptHost, IDependencyHost, CancellationToken, Task>, CancellationToken, Task> runWithProgress,
         Func<IScriptHost> createUninstallScriptHost,
         Action<string, string, string?, string?> showChangelog,
-        Func<string, string, string?, string?> pickFile)
+        Func<string, string, string?, string?> pickFile,
+        Func<string, string?> pickFolder)
     {
         _repoClient = repoClient;
         _installerEngine = installerEngine;
         _receiptStore = receiptStore;
         _dependencyChecker = dependencyChecker;
         _configService = configService;
+        _gameVerifier = gameVerifier;
+        _shimService = shimService;
+        _registryDetector = registryDetector;
+        _depAutoInstaller = depAutoInstaller;
         _patreon = patreon;
         _logger = logger;
         _navigateBack = navigateBack;
@@ -138,15 +159,44 @@ public partial class GameDetailsViewModel : ObservableObject
         _createUninstallScriptHost = createUninstallScriptHost;
         _showChangelog = showChangelog;
         _pickFile = pickFile;
+        _pickFolder = pickFolder;
     }
+
+    /// <summary>
+    /// True once we have a real game install (detected, or just installed via the game-installer
+    /// dependency). Gates the install-path line + Open Folder button — both hidden until the game
+    /// itself is present.
+    /// </summary>
+    public bool IsGameInstalled => _gameInstall != null;
 
     public void Load(GameInstall gameInstall, Dictionary<string, PluginRepoIndex> activeIndexes)
     {
         _gameInstall = gameInstall;
+        _gameDef = gameInstall.Game;
+        _pluginId = gameInstall.PluginId;
         _activeIndexes = activeIndexes;
         GameId = gameInstall.Game.GameId;
         DisplayName = gameInstall.Game.DisplayName;
         InstallPath = gameInstall.InstallPath;
+        OnPropertyChanged(nameof(IsGameInstalled));
+        _ = InitializeAsync();
+    }
+
+    /// <summary>
+    /// Opens details for a game that isn't installed yet but declares a game-installer dependency.
+    /// The version picker + Install still show; the game itself is installed as the first step of
+    /// the install (see <see cref="EnsureGameInstalledAsync"/>).
+    /// </summary>
+    public void LoadUninstalled(GameDefinition game, string pluginId, Dictionary<string, PluginRepoIndex> activeIndexes)
+    {
+        _gameInstall = null;
+        _gameDef = game;
+        _pluginId = pluginId;
+        _activeIndexes = activeIndexes;
+        GameId = game.GameId;
+        DisplayName = game.DisplayName;
+        InstallPath = null;
+        OnPropertyChanged(nameof(IsGameInstalled));
         _ = InitializeAsync();
     }
 
@@ -274,6 +324,415 @@ public partial class GameDetailsViewModel : ObservableObject
         _ = LoadReleasesAsync();
     }
 
+    /// <summary>
+    /// Ensures the game itself is installed before the mod install proceeds. Used when Game
+    /// Details was opened from the "not installed" state (the game declares a game-installer
+    /// dependency). After running the installer it re-detects via the registry; if the game still
+    /// isn't found (a bootstrapper that keeps downloading after it exits) it waits for the user to
+    /// confirm it's done, then re-detects. Returns true once we have a real install, false to
+    /// abort. See GAME_INSTALLER_QUESTIONS.md.
+    /// </summary>
+    private async Task<bool> EnsureGameInstalledAsync(CancellationToken ct)
+    {
+        if (_gameInstall != null) return true;
+        if (_gameDef == null) return false;
+
+        // It may have been installed since this page opened.
+        var existing = _registryDetector.ResolveInstallPath(_gameDef);
+        if (existing != null) { AdoptDetectedGame(existing); return true; }
+
+        var dep = _gameDef.Dependencies.FirstOrDefault(d => d.IsGameInstaller);
+
+        // Portable app / emulator: extract a ZIP into a folder the user picks (or reuse an existing
+        // install of the same emulator). See EMULATOR_INSTALL_QUESTIONS.md.
+        if (dep?.Fix?.AutoInstall is ExtractAppAutoInstall)
+            return await EnsureEmulatorInstalledAsync(dep, ct);
+
+        if (dep?.Fix?.AutoInstall is not RunInstallerAutoInstall)
+        {
+            _showInfoDialog($"{DisplayName} isn't installed",
+                $"{DisplayName} isn't installed and no game installer is configured for it. " +
+                "Install the game, then use \"Browse for Folder\" on the Mods list to point at it.");
+            return false;
+        }
+
+        var consent = _confirmDialog(
+            $"Install {DisplayName}",
+            $"{DisplayName} isn't installed yet. The manager will download its official installer " +
+            "(verified by SHA256) and run it. Follow the installer's prompts; when it finishes, the " +
+            "mod install continues automatically.\n\nContinue?");
+        if (!consent)
+        {
+            StatusMessage = $"{DisplayName} needs to be installed before the mod can be added.";
+            return false;
+        }
+
+        try
+        {
+            await _runWithProgress(
+                "Install",
+                $"Installing {DisplayName}...",
+                new Progress<ProgressInfo>(),
+                (scriptHost, depHost, innerCt) => _depAutoInstaller.RunGameInstallerAsync(dep, depHost, innerCt),
+                ct);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = $"{DisplayName} install cancelled.";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Game installer failed for {GameId}", GameId);
+            _showInfoDialog($"{DisplayName} install failed", ex.Message);
+            return false;
+        }
+
+        // 3A: re-detect once the installer process has closed. PTC fully installs before exit, so
+        // this usually finds it right away; the retry absorbs a brief settle, and the gate below
+        // covers download-after-exit (bootstrapper) installers.
+        var path = await ResolveWithRetryAsync(_gameDef, ct);
+        if (path == null)
+        {
+            var done = _confirmDialog(
+                $"Finish installing {DisplayName}",
+                $"Click OK once {DisplayName} has finished installing and the manager will continue.");
+            if (!done)
+            {
+                StatusMessage = $"{DisplayName} install not finished.";
+                return false;
+            }
+            path = await ResolveWithRetryAsync(_gameDef, ct);
+        }
+
+        if (path == null)
+        {
+            _showInfoDialog($"Couldn't find {DisplayName}",
+                $"The manager couldn't find {DisplayName} after the installer ran. If you did install it, " +
+                "use \"Browse for Folder\" on the Mods list to point at it.");
+            return false;
+        }
+
+        AdoptDetectedGame(path);
+        return true;
+    }
+
+    private void AdoptDetectedGame(string installPath)
+    {
+        _gameInstall = new GameInstall
+        {
+            Game = _gameDef!,
+            PluginId = _pluginId,
+            InstallPath = installPath,
+            IsValid = true
+        };
+        InstallPath = installPath;
+        OnPropertyChanged(nameof(IsGameInstalled));
+        _logger.Information("Game {GameId} present at {Path}; continuing with the mod install", GameId, installPath);
+    }
+
+    /// <summary>
+    /// Portable-app (emulator) game installer. If this emulator is already installed — matched by
+    /// the game's <see cref="GameDefinition.ExeName"/> against emulators the manager installed
+    /// before (F1-B / F3) — reuse that folder with no download and no prompt (F2). Otherwise ask
+    /// the user where to put it (2B), download + verify + extract the ZIP there, locate the folder
+    /// that actually holds the exe (F4), and record it as the install path (and remember the
+    /// emulator so a later game on the same one reuses it). Returns true to continue into the mod
+    /// install, false to abort. See EMULATOR_INSTALL_QUESTIONS.md.
+    /// </summary>
+    private async Task<bool> EnsureEmulatorInstalledAsync(Dependency dep, CancellationToken ct)
+    {
+        var exeName = _gameDef!.ExeName;
+
+        // 1) Reuse an emulator the manager already installed. Only our own installs are recorded
+        //    (Browse-for-Folder deliberately isn't), so this never grabs an unrelated copy.
+        if (!string.IsNullOrWhiteSpace(exeName))
+        {
+            var config = await _configService.LoadAsync();
+            if (config.InstalledEmulators.TryGetValue(exeName.ToLowerInvariant(), out var known))
+            {
+                var reuseRoot = PortableAppLayout.ResolveInstallRoot(known, exeName);
+                if (reuseRoot != null)
+                {
+                    await PersistEmulatorPathsAsync(reuseRoot, exeName);
+                    AdoptDetectedGame(reuseRoot);
+                    _logger.Information("Reusing existing {Exe} install at {Path} for {GameId}",
+                        exeName, reuseRoot, GameId);
+                    return true;
+                }
+                _logger.Information("Recorded {Exe} install is gone; installing {GameId} fresh", exeName, GameId);
+            }
+        }
+
+        // 2) Fresh install: consent → pick a folder → download + extract.
+        var consent = _confirmDialog(
+            $"Install {DisplayName}",
+            $"{DisplayName} isn't installed yet. Choose a folder and the manager will download it " +
+            "(verified by SHA256), extract it there, and then install the accessibility mod.\n\nContinue?");
+        if (!consent)
+        {
+            StatusMessage = $"{DisplayName} needs to be installed before the mod can be added.";
+            return false;
+        }
+
+        var picked = _pickFolder($"Select where to install {DisplayName}");
+        if (string.IsNullOrEmpty(picked))
+        {
+            StatusMessage = $"{DisplayName} install cancelled.";
+            return false;
+        }
+
+        try
+        {
+            await _runWithProgress(
+                "Install",
+                $"Installing {DisplayName}...",
+                new Progress<ProgressInfo>(),
+                (_, depHost, innerCt) => _depAutoInstaller.ExtractPortableAppAsync(dep, picked, depHost, innerCt),
+                ct);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = $"{DisplayName} install cancelled.";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Portable app install failed for {GameId}", GameId);
+            _showInfoDialog($"{DisplayName} install failed", ex.Message);
+            return false;
+        }
+
+        // 3) Find the folder that actually holds the exe (top level per F4, else a single
+        //    sub-folder if the ZIP wraps everything in one), then record + adopt.
+        var root = PortableAppLayout.ResolveInstallRoot(picked, exeName);
+        if (root == null)
+        {
+            _showInfoDialog($"Couldn't find {DisplayName}",
+                $"The download was extracted to \"{picked}\", but \"{exeName}\" wasn't found inside it. " +
+                $"The file may not be the expected {DisplayName} package.");
+            return false;
+        }
+
+        await PersistEmulatorPathsAsync(root, exeName);
+        AdoptDetectedGame(root);
+        return true;
+    }
+
+    /// <summary>
+    /// Persist the emulator's location so detection finds it next launch (KnownGameOverrides) and
+    /// so a later game on the same emulator can reuse it (InstalledEmulators, keyed by exe name).
+    /// Best-effort: the install still proceeds in-memory if the write fails; detection just won't
+    /// remember it next launch.
+    /// </summary>
+    private async Task PersistEmulatorPathsAsync(string root, string? exeName)
+    {
+        try
+        {
+            var config = await _configService.LoadAsync();
+            config.KnownGameOverrides[GameId] = root;
+            if (!string.IsNullOrWhiteSpace(exeName))
+                config.InstalledEmulators[exeName.ToLowerInvariant()] = root;
+            await _configService.SaveAsync(config);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Installed {GameId} at {Path} but couldn't persist the override", GameId, root);
+        }
+    }
+
+    /// <summary>
+    /// Registry detection, retried a few times with a short delay — a game installer's registry
+    /// key + files can take a moment to settle after the installer process exits.
+    /// </summary>
+    private async Task<string?> ResolveWithRetryAsync(GameDefinition game, CancellationToken ct)
+    {
+        const int attempts = 6;
+        for (var i = 0; i < attempts; i++)
+        {
+            var p = _registryDetector.ResolveInstallPath(game);
+            if (p != null) return p;
+            if (i < attempts - 1) await Task.Delay(400, ct);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// <see cref="IGameVerifier.VerifyInstallPath"/>, retried a few times with a short delay —
+    /// tolerant of a just-created junction or a game installer whose files are still settling.
+    /// Removes the "restart the manager and try again" workaround users reported.
+    /// </summary>
+    private async Task<bool> VerifyWithRetryAsync(GameDefinition game, string path, CancellationToken ct)
+    {
+        const int attempts = 6;
+        for (var i = 0; i < attempts; i++)
+        {
+            if (_gameVerifier.VerifyInstallPath(game, path)) return true;
+            if (i < attempts - 1) await Task.Delay(400, ct);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// For a game with an <see cref="AsciiPathShim"/>, ensure the ASCII junction exists and the
+    /// manager is pointed at it before installing. The junction is created on first install,
+    /// with the user's consent, then adopted as the install path (persisted as a known-game
+    /// override + swapped into the in-memory install) so install actions, verification, and the
+    /// Play button all run through the ASCII path while the real files stay put. Returns true to
+    /// proceed (a game with no shim also returns true), false to abort. See PTCGL_INSTALL_QUESTIONS.md.
+    /// </summary>
+    private async Task<bool> EnsureInstallPathReadyAsync(CancellationToken ct)
+    {
+        if (_gameInstall is null) return false;
+
+        var shim = _gameInstall.Game.AsciiPathShim;
+        if (shim is null) return true; // game doesn't use a path shim — nothing to do
+
+        var current = _gameInstall.InstallPath;
+        string junctionPath;
+        try
+        {
+            junctionPath = _shimService.GetJunctionPath(shim, current);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Couldn't compute junction path for {GameId}", GameId);
+            _showInfoDialog("Setup failed", $"Couldn't work out where to create the folder link.\n\n{ex.Message}");
+            return false;
+        }
+
+        // Already set up: detection resolved us straight to the junction (the override points
+        // here), so there's nothing to create or adopt.
+        if (PathsEqual(current, junctionPath))
+            return true;
+
+        // 'current' is the real (problematic) path. Create the junction the first time, with a
+        // one-time consent prompt. If it already exists we silently reuse it.
+        if (!_shimService.JunctionPathExists(junctionPath))
+        {
+            var consent = _confirmDialog(
+                $"Set up {DisplayName}",
+                $"{shim.Reason}\n\n" +
+                $"The manager will create a folder link at \"{junctionPath}\" pointing to your existing " +
+                $"install at \"{current}\". Your game files are not moved or copied — this just gives the " +
+                $"mod loader a compatible path. It's a one-time step.\n\nContinue?");
+            if (!consent)
+            {
+                StatusMessage = $"{DisplayName} needs a one-time setup before the mod can be installed.";
+                return false;
+            }
+
+            try
+            {
+                await _shimService.CreateJunctionAsync(junctionPath, current, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Failed to create ASCII junction {Junction} -> {Real}", junctionPath, current);
+                _showInfoDialog("Setup failed",
+                    $"Couldn't create the folder link at \"{junctionPath}\".\n\n{ex.Message}");
+                return false;
+            }
+        }
+        else
+        {
+            // The junction already exists. If it points somewhere other than the install we just
+            // detected — a stale link left from a previous install location — re-point it so we
+            // never install mods into the wrong/old copy while telling the user we're operating on
+            // the detected game. Removing the link is a non-recursive delete of the reparse point
+            // only; neither location's files are touched.
+            var existingTarget = _shimService.GetJunctionTarget(junctionPath);
+            if (existingTarget != null && !PathsEqual(existingTarget, current))
+            {
+                _logger.Warning("ASCII junction {Junction} points at {Old}, not the detected install {New}; re-pointing",
+                    junctionPath, existingTarget, current);
+                try
+                {
+                    _shimService.RemoveJunctionLink(junctionPath);
+                    await _shimService.CreateJunctionAsync(junctionPath, current, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex, "Failed to re-point stale junction {Junction}", junctionPath);
+                    _showInfoDialog("Setup failed",
+                        $"The folder link at \"{junctionPath}\" points at a different location and couldn't be updated.\n\n{ex.Message}");
+                    return false;
+                }
+            }
+        }
+
+        // Make sure the game is really present before we commit to the junction. The install we
+        // actually care about is the real path; the junction is just an ASCII-safe alias to it.
+        // Verify the REAL path (retried briefly for a game whose files are still settling right
+        // after a fresh install) and confirm the junction points there via its reparse target.
+        // Both read stable metadata, so neither depends on the freshly-created junction being
+        // walkable *through* yet — that dependency was the spurious "doesn't look like a valid
+        // install" users had to clear by restarting the manager. As a fallback (e.g. the link
+        // target couldn't be read), verify straight through the junction with the same retry.
+        var realValidAndLinked =
+            await VerifyWithRetryAsync(_gameInstall.Game, current, ct)
+            && PathsEqual(_shimService.GetJunctionTarget(junctionPath) ?? "", current);
+
+        if (!realValidAndLinked && !await VerifyWithRetryAsync(_gameInstall.Game, junctionPath, ct))
+        {
+            _showInfoDialog("Setup failed",
+                $"The folder link at \"{junctionPath}\" doesn't look like a valid {DisplayName} install, " +
+                $"so setup wasn't completed. Try installing again in a moment.");
+            return false;
+        }
+
+        // Adopt the junction: persist it as the override so future detection finds the game here,
+        // and swap the in-memory install so this install + the Play button use the ASCII path.
+        try
+        {
+            var config = await _configService.LoadAsync();
+            config.KnownGameOverrides[GameId] = junctionPath;
+            await _configService.SaveAsync(config);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: the junction exists and we still swap in-memory below, so this install
+            // proceeds correctly; detection just won't remember the junction next launch.
+            _logger.Warning(ex, "Junction created but couldn't persist the override for {GameId}", GameId);
+        }
+
+        _gameInstall = new GameInstall
+        {
+            Game = _gameInstall.Game,
+            PluginId = _gameInstall.PluginId,
+            InstallPath = junctionPath,
+            IsValid = true,
+            DetectedVersion = _gameInstall.DetectedVersion,
+            ModState = _gameInstall.ModState
+        };
+        InstallPath = junctionPath;
+        _logger.Information("Adopted ASCII junction {Junction} as install path for {GameId}", junctionPath, GameId);
+        return true;
+    }
+
+    private static bool PathsEqual(string a, string b)
+    {
+        try
+        {
+            return string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     [RelayCommand]
     private Task InstallAsync(ModReleaseGroup? group, CancellationToken ct) =>
         RunInstallOrUpdate(group, ct, isUpdate: false);
@@ -284,10 +743,25 @@ public partial class GameDetailsViewModel : ObservableObject
 
     private async Task RunInstallOrUpdate(ModReleaseGroup? group, CancellationToken ct, bool isUpdate)
     {
-        if (group?.SelectedRelease == null || _gameInstall == null) return;
+        if (group?.SelectedRelease == null) return;
         var release = group.SelectedRelease;
         var verb = isUpdate ? "Update" : "Install";
         var verbing = isUpdate ? "Updating" : "Installing";
+
+        // If the game itself isn't installed yet — this page was opened from the not-detected
+        // state via a game-installer dependency — install the game first, then detect where it
+        // landed. EnsureGameInstalledAsync sets _gameInstall on success.
+        if (_gameInstall == null)
+        {
+            if (!await EnsureGameInstalledAsync(ct))
+                return;
+        }
+
+        // For a game with an ASCII path shim (e.g. Pokémon TCG Live), make sure the junction is
+        // created and adopted as the install path before anything else — including before any
+        // Patreon browser tab opens — so a declined setup aborts cleanly with nothing done.
+        if (!await EnsureInstallPathReadyAsync(ct))
+            return;
 
         // Patreon-gated pre-flight. The path divides four ways:
         // 1. Creator of the campaign — API refuses to return a download URL for own posts;
@@ -402,6 +876,10 @@ public partial class GameDetailsViewModel : ObservableObject
         var hashFailed = false;
         var downloadedFile = string.Empty;
 
+        // Both ensure-steps above guarantee a non-null install (the game exists and, for a shimmed
+        // game, the junction has been adopted). Capture it so the progress closure is null-safe.
+        var gameInstall = _gameInstall!;
+
         try
         {
             await _runWithProgress(verb,
@@ -448,9 +926,9 @@ public partial class GameDetailsViewModel : ObservableObject
                     }
 
                     if (isUpdate)
-                        await _installerEngine.UpdateAsync(_gameInstall, release, downloadedFile, scriptHost, depHost, innerCt);
+                        await _installerEngine.UpdateAsync(gameInstall, release, downloadedFile, scriptHost, depHost, innerCt);
                     else
-                        await _installerEngine.InstallAsync(_gameInstall, release, downloadedFile, scriptHost, depHost, innerCt);
+                        await _installerEngine.InstallAsync(gameInstall, release, downloadedFile, scriptHost, depHost, innerCt);
                 },
                 ct);
 

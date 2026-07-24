@@ -39,11 +39,27 @@ public sealed class InstallReceipt
     public string? CachedPostUninstallExecutable { get; init; }
 
     /// <summary>
+    /// SHA256 of the cached post-uninstall executable at install time. Verified immediately before
+    /// the script runs at uninstall; if the cached file was swapped on disk the hash won't match and
+    /// the script is refused (the consent dialog described the original, not a replacement). Null for
+    /// receipts written before this field existed (back-compat) — those skip the check.
+    /// </summary>
+    public string? CachedPostUninstallSha256 { get; init; }
+
+    /// <summary>
     /// The PostUninstall script metadata captured at install time. Used to re-display the
     /// What/Why/Modifies fields in the uninstall warning dialog and to determine
     /// FailureFatal / NeedsAdmin.
     /// </summary>
     public LifecycleScript? PostUninstall { get; init; }
+
+    /// <summary>
+    /// A hash of the lifecycle scripts the user consented to at install (their bytes + flags), or
+    /// null if the mod declared no scripts. On update, the manager re-shows the script warning when
+    /// this differs from the new version's scripts — i.e. a script was added or changed since the
+    /// user last agreed. Null on receipts written before this field existed (they just re-warn once).
+    /// </summary>
+    public string? ScriptsFingerprint { get; init; }
 }
 
 /// <summary>

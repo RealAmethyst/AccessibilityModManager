@@ -127,6 +127,16 @@ public sealed class Dependency
     public bool Required { get; init; } = true;
 
     /// <summary>
+    /// When true, this dependency <em>is the game itself</em>, not a loader installed into the
+    /// game folder. If the game isn't detected, the manager runs this dependency's installer (a
+    /// <see cref="RunInstallerAutoInstall"/>) as a pre-step, then detects where the game landed
+    /// and continues the mod install. "Installed?" is answered by the game's
+    /// <see cref="GameDefinition.RegistryProbe"/> detection, not a file/registry
+    /// <see cref="Check"/>. See GAME_INSTALLER_QUESTIONS.md.
+    /// </summary>
+    public bool IsGameInstaller { get; init; }
+
+    /// <summary>
     /// Optional rule the AuthorTool uses to refresh <see cref="Fix"/>.AutoInstall to the
     /// latest upstream version. Has no effect at runtime — it's purely an authoring hint.
     /// </summary>
@@ -158,6 +168,7 @@ public sealed class DependencyFix
 [JsonDerivedType(typeof(ExtractZipAutoInstall), "extractZip")]
 [JsonDerivedType(typeof(RunInstallerAutoInstall), "runInstaller")]
 [JsonDerivedType(typeof(CopyFileAutoInstall), "copyFile")]
+[JsonDerivedType(typeof(ExtractAppAutoInstall), "extractApp")]
 public abstract class DependencyAutoInstall
 {
     /// <summary>
@@ -207,6 +218,21 @@ public sealed class CopyFileAutoInstall : DependencyAutoInstall
     /// is used.
     /// </summary>
     public string? TargetFileName { get; init; }
+}
+
+/// <summary>
+/// The dependency is a <em>portable app</em> — an emulator (or similar program) that the game
+/// definition represents. Unlike the other kinds, this doesn't install into an existing game
+/// folder: the manager downloads the ZIP, asks the user where to put it, extracts it there, and
+/// records that folder as the game's install path (a <c>KnownGameOverrides</c> entry). Pairs with
+/// <see cref="Dependency.IsGameInstaller"/> = true. A second game that runs on the same emulator
+/// (matched by the game's <c>ExeName</c>) reuses the existing install instead of downloading again.
+/// See EMULATOR_INSTALL_QUESTIONS.md. SHA256 + HTTPS gates apply exactly as for every other kind.
+/// </summary>
+public sealed class ExtractAppAutoInstall : DependencyAutoInstall
+{
+    // Deliberately minimal: the whole app goes into the folder the user picks, so there's no
+    // TargetDir, and there's no blocklist for v1 (a portable emulator ZIP is clean).
 }
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]

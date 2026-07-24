@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Windows;
+using AccessibilityModManager.App.Services;
 
 namespace AccessibilityModManager.App.Views;
 
@@ -28,15 +28,9 @@ public partial class ManualDependencyDialog : Window
 
     private void OpenInBrowser()
     {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = _url,
-                UseShellExecute = true
-            });
-        }
-        catch { /* user can copy the URL out of the box if launch fails */ }
+        // Defense in depth: the install flow already rejects a non-https manual-dependency URL
+        // before this dialog opens, but never hand an unvalidated author URL to ShellExecute.
+        ExternalLink.TryOpen(_url);
     }
 
     private void Continue_Click(object sender, RoutedEventArgs e)

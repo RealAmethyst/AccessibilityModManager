@@ -16,6 +16,16 @@ public sealed class AppConfig
 
     public string DefaultChannel { get; set; } = "stable";
     public Dictionary<string, string> KnownGameOverrides { get; set; } = [];
+
+    /// <summary>
+    /// Portable apps (emulators) the manager has installed, keyed by the app's exe file name
+    /// (lowercased) → its install folder. Lets a second game that runs on the same emulator reuse
+    /// the existing install instead of downloading + placing it again (matched by the game's
+    /// <c>ExeName</c>). Only manager-driven installs populate this — "Browse for Folder" does not,
+    /// since that points at a copy the manager didn't install. Absent in old configs → empty.
+    /// See EMULATOR_INSTALL_QUESTIONS.md (F1-B / F3).
+    /// </summary>
+    public Dictionary<string, string> InstalledEmulators { get; set; } = [];
     public string? LastSelectedGameId { get; set; }
     public List<string> EnabledPlugins { get; set; } = [];
 

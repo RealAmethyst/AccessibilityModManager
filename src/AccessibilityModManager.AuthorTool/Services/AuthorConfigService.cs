@@ -1,4 +1,6 @@
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Serilog;
 
@@ -42,6 +44,9 @@ public sealed class AuthorConfigService
 
             var json = File.ReadAllText(ConfigFile);
             _cached = JsonSerializer.Deserialize<AuthorConfig>(json, JsonOptions) ?? new AuthorConfig();
+            // Decrypt the SSH passphrase back to cleartext for in-memory use.
+            if (_cached.ServerUpload is { KeyPassphrase.Length: > 0 } su)
+                su.KeyPassphrase = UnprotectSecret(su.KeyPassphrase);
             return _cached;
         }
         catch (Exception ex)
@@ -55,9 +60,54 @@ public sealed class AuthorConfigService
     public void Save(AuthorConfig config)
     {
         Directory.CreateDirectory(ConfigDirectory);
-        var json = JsonSerializer.Serialize(config, JsonOptions);
-        File.WriteAllText(ConfigFile, json);
+
+        // Encrypt the SSH passphrase at rest (DPAPI, current user) instead of storing cleartext.
+        // Swap the ciphertext in only for serialization, then restore the cleartext so the rest of
+        // the app keeps using the passphrase normally.
+        var plainPassphrase = config.ServerUpload?.KeyPassphrase;
+        if (config.ServerUpload != null && !string.IsNullOrEmpty(plainPassphrase))
+            config.ServerUpload.KeyPassphrase = ProtectSecret(plainPassphrase);
+        try
+        {
+            var json = JsonSerializer.Serialize(config, JsonOptions);
+            File.WriteAllText(ConfigFile, json);
+        }
+        finally
+        {
+            if (config.ServerUpload != null && plainPassphrase != null)
+                config.ServerUpload.KeyPassphrase = plainPassphrase;
+        }
         _cached = config;
+    }
+
+    // DPAPI protection for the SSH key passphrase. Prefixed so we can tell an encrypted value from a
+    // legacy cleartext one written before encryption existed (those are used as-is, then re-encrypted
+    // on the next save). Entropy pins the blob to this specific use; DPAPI's per-user key is the secret.
+    private const string DpapiPrefix = "dpapi:";
+    private static readonly byte[] PassphraseEntropy = "AMM:Author:ServerUpload:v1"u8.ToArray();
+
+    private static string ProtectSecret(string plain)
+    {
+        if (plain.StartsWith(DpapiPrefix, StringComparison.Ordinal)) return plain; // already protected
+        var bytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), PassphraseEntropy, DataProtectionScope.CurrentUser);
+        return DpapiPrefix + Convert.ToBase64String(bytes);
+    }
+
+    private string UnprotectSecret(string stored)
+    {
+        if (!stored.StartsWith(DpapiPrefix, StringComparison.Ordinal))
+            return stored; // legacy cleartext — used as-is; the next Save re-writes it encrypted
+        try
+        {
+            var bytes = ProtectedData.Unprotect(
+                Convert.FromBase64String(stored[DpapiPrefix.Length..]), PassphraseEntropy, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't decrypt the saved SSH passphrase (config copied from another user/machine?) — clearing it");
+            return "";
+        }
     }
 
     public void RecordRecent(string projectPath, string? displayName = null, string? gitHubRepo = null)

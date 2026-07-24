@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Services;
@@ -50,7 +51,11 @@ public sealed class ReceiptStore : IReceiptStore
         }
         else
         {
-            _logger.Warning("No hash file for receipt {PluginId}/{GameId}", pluginId, gameId);
+            // SaveAsync always writes the hash sidecar, so a missing hash means the receipt was
+            // hand-placed or its hash was deleted — treat that as tampering and refuse to trust it,
+            // exactly like a hash mismatch. Receipts drive uninstall/rollback and collision checks.
+            _logger.Error("Receipt for {PluginId}/{GameId} has no hash file — refusing to trust it", pluginId, gameId);
+            return null;
         }
 
         try
@@ -113,11 +118,13 @@ public sealed class ReceiptStore : IReceiptStore
         return receipts;
     }
 
+    // pluginId/gameId come from the (unsigned) plugin index and manifest, so contain them to the
+    // receipts root — a value like "..\..\evil" must never redirect a receipt write elsewhere.
     public string GetReceiptDirectory(string gameId, string pluginId) =>
-        Path.Combine(ReceiptsRoot, pluginId, gameId);
+        PathSafety.CombineContained(ReceiptsRoot, pluginId, gameId);
 
     private static string GetReceiptPath(string pluginId, string gameId) =>
-        Path.Combine(ReceiptsRoot, pluginId, gameId, "receipt.json");
+        PathSafety.CombineContained(ReceiptsRoot, pluginId, gameId, "receipt.json");
 
     private static string ComputeHash(string content)
     {

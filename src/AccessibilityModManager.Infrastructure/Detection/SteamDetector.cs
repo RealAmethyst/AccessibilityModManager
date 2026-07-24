@@ -117,7 +117,20 @@ public sealed class SteamDetector : ISteamDetector
 
     private List<string> GetLibraryPaths(string steamPath)
     {
-        var paths = new List<string> { steamPath };
+        // Dedupe on a normalized form: the registry SteamPath uses forward slashes/lowercase
+        // ("c:/program files (x86)/steam") while libraryfolders.vdf lists the same root with
+        // backslashes ("C:\Program Files (x86)\Steam"). Without normalization the main library is
+        // added twice and every game in it is detected twice.
+        var paths = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddIfNew(string p)
+        {
+            var norm = Normalize(p);
+            if (seen.Add(norm)) paths.Add(norm);
+        }
+
+        AddIfNew(steamPath);
 
         var vdfPath = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
         if (!File.Exists(vdfPath))
@@ -132,8 +145,8 @@ public sealed class SteamDetector : ISteamDetector
             var parsed = VdfParser.ParseLibraryFolders(content);
             foreach (var p in parsed)
             {
-                if (Directory.Exists(p) && !paths.Contains(p, StringComparer.OrdinalIgnoreCase))
-                    paths.Add(p);
+                if (Directory.Exists(p))
+                    AddIfNew(p);
             }
         }
         catch (Exception ex)
@@ -142,6 +155,12 @@ public sealed class SteamDetector : ISteamDetector
         }
 
         return paths;
+    }
+
+    private static string Normalize(string path)
+    {
+        try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)); }
+        catch { return path; }
     }
 
     /// <summary>

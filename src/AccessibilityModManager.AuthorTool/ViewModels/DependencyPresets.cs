@@ -23,6 +23,27 @@ public static class DependencyPresets
     {
         new DependencyPreset
         {
+            DisplayName = "Emulator (portable app)",
+            Description = "The emulator itself, delivered as a portable ZIP. \"This dependency is the " +
+                          "game itself\" is already ticked and the auto-install kind is set to extractApp. " +
+                          "Set the game's Exe name (General tab) to the emulator's exe, then paste the " +
+                          "ZIP's HTTPS URL below and click \"Fetch from URL\" for the SHA256.",
+            Build = () => new Dependency
+            {
+                Id = "emulator",
+                Type = "system",
+                Required = true,
+                IsGameInstaller = true,
+                Fix = new DependencyFix
+                {
+                    // Author fills these in: the emulator ZIP's HTTPS URL, and its SHA256 (Fetch from URL).
+                    DownloadUrl = "",
+                    AutoInstall = new ExtractAppAutoInstall { Sha256 = "" }
+                }
+            }
+        },
+        new DependencyPreset
+        {
             DisplayName = "MelonLoader",
             Description = "MelonLoader runtime; checked by version.dll in the game folder.",
             Build = () => new Dependency

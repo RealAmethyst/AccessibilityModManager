@@ -22,6 +22,12 @@ public partial class GamesListViewModel : ObservableObject
     private readonly ILogger _logger;
     private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>> _navigateToDetails;
     /// <summary>
+    /// Opens Game Details for a game that isn't installed yet but declares a game-installer
+    /// dependency (so the user can install the game + mod in one flow). Args: game definition,
+    /// owning plugin id, scoped indexes. Wired in App.xaml.cs.
+    /// </summary>
+    private readonly Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> _navigateToDetailsUninstalled;
+    /// <summary>
     /// Returns the user-selected folder, or null if cancelled. The string param is an optional
     /// initial directory. Wired to <c>Microsoft.Win32.OpenFolderDialog</c> in App.xaml.cs.
     /// </summary>
@@ -65,6 +71,7 @@ public partial class GamesListViewModel : ObservableObject
         PatreonService patreon,
         ILogger logger,
         Action<GameInstall, Dictionary<string, PluginRepoIndex>> navigateToDetails,
+        Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> navigateToDetailsUninstalled,
         Func<string?, string?> browseForFolder)
     {
         _registryClient = registryClient;
@@ -76,6 +83,7 @@ public partial class GamesListViewModel : ObservableObject
         _patreon = patreon;
         _logger = logger;
         _navigateToDetails = navigateToDetails;
+        _navigateToDetailsUninstalled = navigateToDetailsUninstalled;
         _browseForFolder = browseForFolder;
 
         // When Patreon membership data finishes loading at startup (or refreshes after a
@@ -176,6 +184,7 @@ public partial class GamesListViewModel : ObservableObject
                         ModName = modName,
                         PluginId = pluginId,
                         IsDetected = install != null,
+                        HasGameInstaller = game.Dependencies.Any(d => d.IsGameInstaller),
                         InstallPath = install?.InstallPath,
                         InstalledVersion = receipt?.InstalledVersion,
                         HasUpdate = hasUpdate,
@@ -259,16 +268,30 @@ public partial class GamesListViewModel : ObservableObject
     [RelayCommand]
     private void OpenGameDetails(ModItemViewModel? mod)
     {
-        if (mod == null || !mod.IsDetected) return;
-
-        var install = _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
-        if (install == null) return;
+        if (mod == null) return;
+        // Detected games open normally; an undetected game opens only if it can install itself.
+        if (!mod.IsDetected && !mod.HasGameInstaller) return;
 
         // Scope the navigation payload to this mod's developer so Game Details shows just one
         // mod card (not every developer's mods for that game). Matches Developer Details flow.
         if (!_lastActiveIndexes.TryGetValue(mod.PluginId, out var pluginIndex)) return;
         var scoped = new Dictionary<string, PluginRepoIndex> { [mod.PluginId] = pluginIndex };
-        _navigateToDetails(install, scoped);
+
+        if (mod.IsDetected)
+        {
+            var install = _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
+            if (install == null) return;
+            _navigateToDetails(install, scoped);
+        }
+        else
+        {
+            // Not installed yet, but the game declares a game-installer dependency: open Game
+            // Details in the not-installed state so the user can pick a version and Install —
+            // which runs the game installer first, then the mod.
+            var def = pluginIndex.Games.FirstOrDefault(g => g.GameId == mod.GameId);
+            if (def == null) return;
+            _navigateToDetailsUninstalled(def, mod.PluginId, scoped);
+        }
     }
 
     [RelayCommand]
@@ -544,6 +567,9 @@ public partial class ModItemViewModel : ObservableObject
     public required string ModName { get; init; }
     public required string PluginId { get; init; }
     public required bool IsDetected { get; init; }
+    /// <summary>True when the game declares a game-installer dependency, so it can be installed
+    /// from the not-detected state.</summary>
+    public bool HasGameInstaller { get; init; }
     public string? InstallPath { get; init; }
     public string? InstalledVersion { get; init; }
     public bool HasUpdate { get; init; }
@@ -552,7 +578,7 @@ public partial class ModItemViewModel : ObservableObject
 
     public string StatusText => (IsDetected, InstalledVersion, HasUpdate) switch
     {
-        (false, _, _) => "Game not detected",
+        (false, _, _) => HasGameInstaller ? "Not installed" : "Game not detected",
         (true, null, _) => "Not installed",
         (true, _, true) => $"v{InstalledVersion} — update available",
         (true, _, false) => $"v{InstalledVersion} installed",

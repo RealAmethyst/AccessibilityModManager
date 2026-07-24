@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Services;
@@ -55,7 +56,9 @@ public sealed class DependencyReceiptStore : IDependencyReceiptStore
         }
         else
         {
-            _logger.Warning("No hash file for dep receipt {DepId}/{GameId}", dependencyId, gameId);
+            // SaveAsync always writes the hash sidecar — a missing hash means tampering; fail closed.
+            _logger.Error("Dep receipt for {DepId}/{GameId} has no hash file — refusing to trust it", dependencyId, gameId);
+            return null;
         }
 
         try
@@ -102,7 +105,8 @@ public sealed class DependencyReceiptStore : IDependencyReceiptStore
     public async Task<List<DependencyReceipt>> LoadAllForGameAsync(string gameId)
     {
         var receipts = new List<DependencyReceipt>();
-        var gameRoot = Path.Combine(DepReceiptsRoot, gameId);
+        // gameId is untrusted — contain it so a "..\.." value can't enumerate outside the root.
+        var gameRoot = PathSafety.CombineContained(DepReceiptsRoot, gameId);
         if (!Directory.Exists(gameRoot))
             return receipts;
 
@@ -115,11 +119,12 @@ public sealed class DependencyReceiptStore : IDependencyReceiptStore
         return receipts;
     }
 
+    // gameId/dependencyId are untrusted (plugin index) — contain them to the dep-receipts root.
     public string GetBackupDirectory(string gameId, string dependencyId) =>
-        Path.Combine(DepReceiptsRoot, gameId, dependencyId, "backup");
+        PathSafety.CombineContained(DepReceiptsRoot, gameId, dependencyId, "backup");
 
     private static string GetReceiptPath(string gameId, string dependencyId) =>
-        Path.Combine(DepReceiptsRoot, gameId, dependencyId, "receipt.json");
+        PathSafety.CombineContained(DepReceiptsRoot, gameId, dependencyId, "receipt.json");
 
     private static string ComputeHash(string content)
     {

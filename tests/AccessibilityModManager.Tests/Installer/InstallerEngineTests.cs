@@ -135,6 +135,47 @@ public class InstallerEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task InstallAsync_CopyFolderCollisionWithOtherPlugin_Throws()
+    {
+        // plug-a owns a game file via copyFile (author-written forward slash target).
+        var zipA = CreateMod("plug-a", "game-1", "1.0.0",
+            files: new[] { ("shared.dll", "a") },
+            actions: new[] { (object)new { type = "copyFile", source = "shared.dll", target = "libs/shared.dll" } });
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zipA);
+
+        // plug-b writes the SAME game file via copyFolder — previously slipped past collision
+        // detection entirely (copyFolder targets weren't enumerated).
+        var zipB = CreateMod("plug-b", "game-1", "1.0.0",
+            files: new[] { ("payload/shared.dll", "b") },
+            actions: new[] { (object)new { type = "copyFolder", sourceDir = "payload", targetDir = "libs" } });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-b"), MakeRelease("plug-b", "game-1", "1.0.0"), zipB));
+        Assert.Contains("conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InstallAsync_SecondActionFails_RollsBackFirstActionAndWritesNoReceipt()
+    {
+        // Two actions: the first copies a real file, the second references a missing package source
+        // and throws mid-install. The first file must be rolled back — previously it was orphaned
+        // in the game folder because the receipt wasn't built yet, so rollback was skipped.
+        var zip = CreateMod("plug-a", "game-1", "1.0.0",
+            files: new[] { ("good.dll", "x") },
+            actions: new[]
+            {
+                (object)new { type = "copyFile", source = "good.dll", target = "mods/good.dll" },
+                (object)new { type = "copyFile", source = "missing.dll", target = "mods/missing.dll" }
+            });
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() =>
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip));
+
+        Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "good.dll")));
+        Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
+    }
+
+    [Fact]
     public async Task UninstallAsync_RemovesAddedFilesAndReceipt()
     {
         var zip = CreateMod("plug-a", "game-1", "1.0.0",
@@ -147,6 +188,46 @@ public class InstallerEngineTests : IDisposable
 
         Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "added.dll")));
         Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
+    }
+
+    [Fact]
+    public async Task UninstallAsync_WhenInstallPathIsJunction_DoesNotDestroyRealGame()
+    {
+        // The catastrophic scenario for an AsciiPathShim game (e.g. Pokémon TCG Live): the
+        // install path is an NTFS junction pointing into the real game folder. Uninstall must
+        // remove only the mod's own files and must NEVER recursively delete the install root
+        // through the junction.
+        var realGame = Path.Combine(_tempRoot, "real-game");
+        Directory.CreateDirectory(realGame);
+        var precious = Path.Combine(realGame, "Pokemon TCG Live.exe");
+        File.WriteAllText(precious, "PRECIOUS GAME BINARY");
+
+        var junction = Path.Combine(_tempRoot, "PokemonTCGLive");
+        await new AsciiPathShimService(TestLogger.Create()).CreateJunctionAsync(junction, realGame);
+
+        var gameInstall = new GameInstall
+        {
+            Game = new GameDefinition { GameId = "game-1", DisplayName = "Game 1" },
+            PluginId = "plug-a",
+            InstallPath = junction,
+            IsValid = true
+        };
+
+        var zip = CreateMod("plug-a", "game-1", "1.0.0",
+            files: new[] { ("Mods/mod.dll", "modbytes") },
+            actions: new[] { (object)new { type = "copyFile", source = "Mods/mod.dll", target = "Mods/mod.dll" } });
+
+        await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        Assert.True(File.Exists(Path.Combine(junction, "Mods", "mod.dll")));
+        Assert.True(File.Exists(precious));
+
+        await _engine.UninstallAsync(gameInstall, "plug-a");
+
+        // Mod file removed, but the junction and the real game binary both survive.
+        Assert.False(File.Exists(Path.Combine(junction, "Mods", "mod.dll")));
+        Assert.True(Directory.Exists(junction));
+        Assert.True(File.Exists(precious));
+        Assert.Equal("PRECIOUS GAME BINARY", File.ReadAllText(precious));
     }
 
     [Fact]
@@ -165,6 +246,132 @@ public class InstallerEngineTests : IDisposable
         await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a");
 
         Assert.Equal("ORIGINAL", File.ReadAllText(Path.Combine(_gameDir, "config", "settings.cfg")));
+    }
+
+    [Fact]
+    public async Task ReplaceFileWithBackupFalse_StillRestoresOriginalOnUninstall()
+    {
+        // Even when the manifest sets backup=false, an existing file must be backed up so uninstall
+        // can restore it — a non-restorable replacement would silently destroy the original.
+        Directory.CreateDirectory(Path.Combine(_gameDir, "config"));
+        File.WriteAllText(Path.Combine(_gameDir, "config", "settings.cfg"), "ORIGINAL");
+
+        var zip = CreateMod("plug-a", "game-1", "1.0.0",
+            files: new[] { ("settings.cfg", "MODDED") },
+            actions: new[] { (object)new { type = "replaceFile", source = "settings.cfg", target = "config/settings.cfg", backup = false } });
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        Assert.Equal("MODDED", File.ReadAllText(Path.Combine(_gameDir, "config", "settings.cfg")));
+
+        await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a");
+
+        Assert.Equal("ORIGINAL", File.ReadAllText(Path.Combine(_gameDir, "config", "settings.cfg")));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_NewVersionFailsVerification_RestoresPreviousVersion()
+    {
+        // v1 installs cleanly.
+        var zip1 = CreateMod("plug-a", "game-1", "1.0.0",
+            files: new[] { ("mod.dll", "V1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip1);
+        Assert.Equal("V1", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
+
+        // v2 fails post-install verification, so the update must roll the game back to v1 rather than
+        // leaving the user with nothing installed.
+        var zip2 = CreateMod("plug-a", "game-1", "1.1.0",
+            files: new[] { ("mod.dll", "V2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            verify: new[] { (object)new { type = "fileExists", path = "should-not-exist.dll" } });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0"), zip2));
+
+        // Previous version restored: file content back to V1 and the v1 receipt is present again.
+        Assert.Equal("V1", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
+        var receipt = await _receiptStore.LoadAsync("game-1", "plug-a");
+        Assert.NotNull(receipt);
+        Assert.Equal("1.0.0", receipt!.InstalledVersion);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ChangedScript_ReConfirms()
+    {
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+
+        var zipV1 = CreateModWithScripts("plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+        Assert.Equal(1, host.InstallConfirmCount);
+
+        // v2's pre-install script has DIFFERENT contents — the user must be re-warned.
+        var zipV2 = CreateModWithScripts("plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@echo changed behaviour\r\n@exit /b 0\r\n", "x", "x", "x"),
+            postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+
+        Assert.Equal(2, host.InstallConfirmCount);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_DoesNotRunOldPostUninstallScript()
+    {
+        // On update the mod is replaced, not removed — the old version's post-uninstall (removal
+        // cleanup) must NOT run. Its side effects wouldn't be undone if the update then failed.
+        var host = new RecordingScriptHost { ConfirmInstallResult = true, ConfirmUninstallResult = true };
+
+        var zipV1 = CreateModWithScripts("plug-a", "game-1", "1.0.0",
+            preInstall: null, postInstall: null,
+            postUninstall: ("cleanup.cmd", "@exit /b 0\r\n", "cleanup", "cleanup", "cleans"),
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+
+        var zipV2 = CreateModWithScripts("plug-a", "game-1", "1.1.0",
+            preInstall: null, postInstall: null,
+            postUninstall: ("cleanup.cmd", "@exit /b 0\r\n", "cleanup", "cleanup", "cleans"),
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+
+        Assert.DoesNotContain("Post-uninstall", host.StartingHooks);
+        Assert.Equal("v2", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
+    }
+
+    [Fact]
+    public async Task UninstallAsync_TamperedCachedPostUninstallScript_IsRefused()
+    {
+        var zip = CreateModWithScripts("plug-tamper", "game-tamper", "1.0.0",
+            preInstall: null, postInstall: null,
+            postUninstall: ("cleanup.cmd", "@echo cleanup\r\n@exit /b 0\r\n", "cleanup", "cleanup", "removes files"),
+            files: new[] { ("mod.dll", "x") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
+
+        var gi = MakeGameInstall("game-tamper", "plug-tamper");
+        await _engine.InstallAsync(gi, MakeRelease("plug-tamper", "game-tamper", "1.0.0"), zip,
+            new RecordingScriptHost { ConfirmInstallResult = true });
+
+        // Swap the cached post-uninstall script on disk for a different one.
+        var cachedScript = Path.Combine(Path.GetTempPath(), "amm-test-receipts",
+            "plug-tamper", "game-tamper", "scripts", "cleanup.cmd");
+        Assert.True(File.Exists(cachedScript));
+        File.WriteAllText(cachedScript, "@echo TAMPERED\r\n@exit /b 0\r\n");
+
+        var uninstallHost = new RecordingScriptHost { ConfirmUninstallResult = true };
+        await _engine.UninstallAsync(gi, "plug-tamper", uninstallHost);
+
+        // The tampered script must not run — no post-uninstall hook started, and no consent prompt.
+        Assert.DoesNotContain("Post-uninstall", uninstallHost.StartingHooks);
+        Assert.Equal(0, uninstallHost.UninstallConfirmCount);
     }
 
     [Fact]
@@ -237,6 +444,50 @@ public class InstallerEngineTests : IDisposable
         // No file should have been written, no receipt stored.
         Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "added.dll")));
         Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
+    }
+
+    [Fact]
+    public async Task InstallAsync_GameInstallerDependency_IsIgnoredByDepResolution()
+    {
+        // A game-installer dependency is handled by the manager's pre-install step, not the
+        // engine — by install time the game is already there. The engine must skip it entirely,
+        // even though it's Required and has no Check (so the checker would call it Missing).
+        // Without the exclusion this throws MissingRequiredDependencyException (no host passed).
+        var gameInstall = new GameInstall
+        {
+            Game = new GameDefinition
+            {
+                GameId = "game-1",
+                DisplayName = "Game 1",
+                Dependencies = new List<Dependency>
+                {
+                    new()
+                    {
+                        Id = "the-game-itself",
+                        Type = "system",
+                        Required = true,
+                        IsGameInstaller = true,
+                        Fix = new DependencyFix
+                        {
+                            DownloadUrl = "https://example.invalid/installer.msi",
+                            AutoInstall = new RunInstallerAutoInstall { Sha256 = "deadbeef" }
+                        }
+                    }
+                }
+            },
+            PluginId = "plug-a",
+            InstallPath = _gameDir,
+            IsValid = true
+        };
+
+        var zip = CreateMod("plug-a", "game-1", "1.0.0",
+            files: new[] { ("mods/added.dll", "x") },
+            actions: new[] { (object)new { type = "copyFile", source = "mods/added.dll", target = "mods/added.dll" } });
+
+        var receipt = await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+
+        Assert.Equal("1.0.0", receipt.InstalledVersion);
+        Assert.True(File.Exists(Path.Combine(_gameDir, "mods", "added.dll")));
     }
 
     [Fact]

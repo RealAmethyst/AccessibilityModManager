@@ -365,6 +365,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private async Task AddReleaseAsync()
     {
         if (SelectedGame == null) return;
+        if (!TryValidateGameInstaller(SelectedGame)) return;
 
         var initialSourceRepo = _configService.GetGameSourceRepo(_projectPath, SelectedGame.GameId)
             ?? SelectedGame.PerGameSourceRepo;
@@ -414,6 +415,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private async Task EditSelectedReleaseAsync()
     {
         if (SelectedGame?.SelectedRelease == null) return;
+        if (!TryValidateGameInstaller(SelectedGame)) return;
         var existing = SelectedGame.SelectedRelease;
 
         var initialSourceRepo = _configService.GetGameSourceRepo(_projectPath, SelectedGame.GameId)
@@ -563,6 +565,36 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 $"{ex.Message}\n\nFix it on the Scripts tab, then try again.");
             return false;
         }
+    }
+
+    /// <summary>
+    /// A game whose game-installer is a portable app (emulator) needs an Exe name: it's the Play
+    /// target and the key by which a second game reuses the same emulator install (F1-B). Warn and
+    /// abort the release cleanly if it's missing. See EMULATOR_INSTALL_QUESTIONS.md.
+    /// </summary>
+    private bool TryValidateGameInstaller(GameItemViewModel game)
+    {
+        var portableApp = game.Dependencies.FirstOrDefault(
+            d => d.IsGameInstaller && d.AutoInstallEnabled && d.AutoInstallKind == "extractApp");
+        if (portableApp == null) return true;
+
+        if (string.IsNullOrWhiteSpace(game.ExeName))
+        {
+            _showInfoDialog("Exe name required",
+                $"\"{game.DisplayName}\" installs a portable app (emulator), so it needs an Exe name " +
+                "on the General tab — it's the Play target and how a second game reuses the same " +
+                "emulator install. Set it, then try again.");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(portableApp.FixDownloadUrl))
+        {
+            _showInfoDialog("Download URL required",
+                $"\"{game.DisplayName}\" installs a portable app (emulator), so its game-installer " +
+                "dependency needs the emulator ZIP's HTTPS download URL. Set it on the Dependencies " +
+                "tab (and \"Fetch from URL\" for the SHA256), then try again.");
+            return false;
+        }
+        return true;
     }
 
     [RelayCommand]

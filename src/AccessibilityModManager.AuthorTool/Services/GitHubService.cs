@@ -249,6 +249,11 @@ public sealed class GitHubService
     /// </summary>
     public static Uri BuildAssetUrl(string repo, string tagName, string assetFilename)
     {
-        return new Uri($"https://github.com/{repo}/releases/download/{tagName}/{assetFilename}");
+        // repo is "owner/name" (keep its slash). The tag and filename are single path segments that
+        // can contain characters needing URL-encoding (#, ?, %, spaces) — escape them so the URL
+        // written into the index actually points at the uploaded asset.
+        var escapedTag = Uri.EscapeDataString(tagName);
+        var escapedFile = Uri.EscapeDataString(assetFilename);
+        return new Uri($"https://github.com/{repo}/releases/download/{escapedTag}/{escapedFile}");
     }
 }

@@ -24,6 +24,12 @@
                         AutomationProperties.Name="Remove this dependency"/>
             </Grid>
 
+            <CheckBox Content="This dependency is the game itself"
+                      IsChecked="{Binding IsGameInstaller}"
+                      AutomationProperties.Name="This dependency is the game itself"
+                      AutomationProperties.HelpText="When on, and the game isn't detected, the manager runs this installer first (use a runInstaller auto-install with the official installer URL + SHA256), then detects the game via its registry probe and continues the mod install."
+                      Margin="0,0,0,8"/>
+
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -112,6 +118,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="160"/>
@@ -126,6 +133,7 @@
                             <sys:String>extractZip</sys:String>
                             <sys:String>runInstaller</sys:String>
                             <sys:String>copyFile</sys:String>
+                            <sys:String>extractApp</sys:String>
                         </ComboBox>
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Text="SHA256:" VerticalAlignment="Center" Margin="0,2"/>
@@ -156,12 +164,12 @@
                         </Grid>
 
                         <TextBlock Grid.Row="2" Grid.Column="0" Text="Target dir:" VerticalAlignment="Center" Margin="0,2"
-                                   Visibility="{Binding IsRunInstallerKind, Converter={StaticResource InvertBoolToVisConverter}}"/>
+                                   Visibility="{Binding ShowTargetDir, Converter={StaticResource BoolToVisConverter}}"/>
                         <TextBox Grid.Row="2" Grid.Column="1"
                                  Text="{Binding AutoInstallTargetDir, UpdateSourceTrigger=PropertyChanged}"
                                  AutomationProperties.Name="AutoInstall target directory inside the game folder"
                                  AutomationProperties.HelpText="Relative to the game folder. Empty means game root."
-                                 Visibility="{Binding IsRunInstallerKind, Converter={StaticResource InvertBoolToVisConverter}}"
+                                 Visibility="{Binding ShowTargetDir, Converter={StaticResource BoolToVisConverter}}"
                                  Margin="0,2"/>
 
                         <TextBlock Grid.Row="3" Grid.Column="0" Text="Blocklist:" VerticalAlignment="Center" Margin="0,2"
@@ -200,6 +208,12 @@
                                       AutomationProperties.Name="Installer needs administrator rights"
                                       Margin="0,4,0,0"/>
                         </Grid>
+
+                        <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
+                                   TextWrapping="Wrap" Foreground="#555" Margin="0,6,0,0"
+                                   Visibility="{Binding IsExtractAppKind, Converter={StaticResource BoolToVisConverter}}"
+                                   AutomationProperties.Name="Portable app help"
+                                   Text="Portable app (emulator): the manager asks the user where to install it, extracts this ZIP there, and records that folder as the game's location. Pair with &quot;This dependency is the game itself&quot; above, and set the game's Exe name on the General tab — it's the Play target and how a second game reuses the same emulator install."/>
                     </Grid>
                 </StackPanel>
             </Border>

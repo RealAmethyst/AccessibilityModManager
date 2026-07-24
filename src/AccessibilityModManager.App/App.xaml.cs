@@ -80,6 +80,7 @@ public partial class App : Application
         // Infrastructure — detection
         services.AddSingleton<IGameVerifier, GameVerifier>();
         services.AddSingleton<ISteamDetector, SteamDetector>();
+        services.AddSingleton<IRegistryGameDetector, RegistryGameDetector>();
         services.AddSingleton<GameAggregator>();
 
         // Infrastructure — installer
@@ -90,6 +91,7 @@ public partial class App : Application
         services.AddSingleton<SafeZipExtractor>();
         services.AddSingleton<LifecycleScriptRunner>();
         services.AddSingleton<DependencyAutoInstaller>();
+        services.AddSingleton<IAsciiPathShimService, AsciiPathShimService>();
         services.AddSingleton<IInstallerEngine, InstallerEngine>();
 
         // ViewModels
@@ -124,6 +126,15 @@ public partial class App : Application
                             var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
                             detailsVm.Load(gameInstall, activeIndexes);
                             mainVm!.ShowGameDetails(detailsVm, plugin);
+                        },
+                        (game, pluginId, activeIndexes) =>
+                        {
+                            // Not-detected game with a game-installer dep, opened from Developer
+                            // Details: open Game Details in the not-installed state, returning here
+                            // on Back.
+                            var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
+                            detailsVm.LoadUninstalled(game, pluginId, activeIndexes);
+                            mainVm!.ShowGameDetails(detailsVm, plugin);
                         });
                     mainVm!.ShowDeveloperDetails(devVm);
                 });
@@ -143,6 +154,14 @@ public partial class App : Application
                     // straight to the main tabs.
                     var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
                     detailsVm.Load(gameInstall, activeIndexes);
+                    mainVm!.ShowGameDetails(detailsVm);
+                },
+                (game, pluginId, activeIndexes) =>
+                {
+                    // Not-detected game with a game-installer dependency: open Game Details in the
+                    // not-installed state so Install can fetch the game first, then the mod.
+                    var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
+                    detailsVm.LoadUninstalled(game, pluginId, activeIndexes);
                     mainVm!.ShowGameDetails(detailsVm);
                 },
                 BrowseForFolder);
@@ -170,6 +189,10 @@ public partial class App : Application
             sp.GetRequiredService<IReceiptStore>(),
             sp.GetRequiredService<IDependencyChecker>(),
             sp.GetRequiredService<IConfigService>(),
+            sp.GetRequiredService<IGameVerifier>(),
+            sp.GetRequiredService<IAsciiPathShimService>(),
+            sp.GetRequiredService<IRegistryGameDetector>(),
+            sp.GetRequiredService<DependencyAutoInstaller>(),
             sp.GetRequiredService<PatreonService>(),
             sp.GetRequiredService<ILogger>(),
             () => mainVm.CloseGameDetails(),
@@ -221,7 +244,8 @@ public partial class App : Application
                 () => Application.Current.MainWindow,
                 sp.GetRequiredService<ProgressDialogViewModel>()),
             ShowChangelog,
-            PickFile);
+            PickFile,
+            BrowseForFolderTitled);
     }
 
     /// <summary>
@@ -352,13 +376,17 @@ public partial class App : Application
 
             // Hand off to the OS — Inno detects the existing install via AppId and runs an
             // upgrade. The current app must exit before file replacement runs.
+            // /SILENT runs the upgrade with just a progress bar (no wizard pages); the installer's
+            // [Run] entry (no longer skipifsilent) relaunches the app once files are replaced.
+            // /NORESTART keeps it from ever forcing a reboot.
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = installerPath,
+                Arguments = "/SILENT /NORESTART",
                 UseShellExecute = true
             });
 
-            logger.Information("Launched update installer; shutting down to allow upgrade");
+            logger.Information("Launched update installer (/SILENT); shutting down to allow upgrade");
             Application.Current.Shutdown();
         }
         catch (Exception ex)
@@ -416,6 +444,23 @@ public partial class App : Application
             dialog.InitialDirectory = initialDirectory;
         }
 
+        var owner = Application.Current?.MainWindow;
+        var ok = owner != null ? dialog.ShowDialog(owner) : dialog.ShowDialog();
+        return ok == true ? dialog.FolderName : null;
+    }
+
+    /// <summary>
+    /// Folder picker with a caller-supplied title. Used by the GameDetails install flow to let the
+    /// user choose where a portable-app (emulator) game-installer extracts to. Returns the chosen
+    /// folder, or null if the user cancelled.
+    /// </summary>
+    private static string? BrowseForFolderTitled(string title)
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = title,
+            Multiselect = false
+        };
         var owner = Application.Current?.MainWindow;
         var ok = owner != null ? dialog.ShowDialog(owner) : dialog.ShowDialog();
         return ok == true ? dialog.FolderName : null;

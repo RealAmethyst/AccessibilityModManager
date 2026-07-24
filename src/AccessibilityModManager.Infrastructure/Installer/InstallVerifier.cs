@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Installer;
@@ -49,9 +50,26 @@ public sealed class InstallVerifier
         return allPassed;
     }
 
-    private bool VerifyFileExists(VerifyRule rule, string gameDir)
+    /// <summary>
+    /// Resolves a rule path under the game folder, returning null (a failed rule) if it escapes.
+    /// Verify rules come from an untrusted manifest; without this a rule like <c>..\..\file</c>
+    /// could probe or hash arbitrary local files outside the game.
+    /// </summary>
+    private string? ResolveWithinGame(VerifyRule rule, string gameDir)
     {
         var fullPath = Path.GetFullPath(Path.Combine(gameDir, rule.Path));
+        if (!PathSafety.IsContained(gameDir, fullPath))
+        {
+            _logger.Error("Verify rule path '{Path}' escapes the game folder — failing the rule", rule.Path);
+            return null;
+        }
+        return fullPath;
+    }
+
+    private bool VerifyFileExists(VerifyRule rule, string gameDir)
+    {
+        var fullPath = ResolveWithinGame(rule, gameDir);
+        if (fullPath is null) return false;
         var exists = File.Exists(fullPath);
         _logger.Debug("VerifyFileExists: {Path} = {Result}", rule.Path, exists);
         return exists;
@@ -59,7 +77,8 @@ public sealed class InstallVerifier
 
     private bool VerifyFolderExists(VerifyRule rule, string gameDir)
     {
-        var fullPath = Path.GetFullPath(Path.Combine(gameDir, rule.Path));
+        var fullPath = ResolveWithinGame(rule, gameDir);
+        if (fullPath is null) return false;
         var exists = Directory.Exists(fullPath);
         _logger.Debug("VerifyFolderExists: {Path} = {Result}", rule.Path, exists);
         return exists;
@@ -73,7 +92,8 @@ public sealed class InstallVerifier
             return false;
         }
 
-        var fullPath = Path.GetFullPath(Path.Combine(gameDir, rule.Path));
+        var fullPath = ResolveWithinGame(rule, gameDir);
+        if (fullPath is null) return false;
         if (!File.Exists(fullPath))
         {
             _logger.Debug("VerifyHashEquals: file not found: {Path}", rule.Path);

@@ -11,11 +11,13 @@ namespace AccessibilityModManager.Infrastructure.Detection;
 public sealed class GameAggregator
 {
     private readonly ISteamDetector _steamDetector;
+    private readonly IRegistryGameDetector _registryDetector;
     private readonly ILogger _logger;
 
-    public GameAggregator(ISteamDetector steamDetector, ILogger logger)
+    public GameAggregator(ISteamDetector steamDetector, IRegistryGameDetector registryDetector, ILogger logger)
     {
         _steamDetector = steamDetector;
+        _registryDetector = registryDetector;
         _logger = logger;
     }
 
@@ -40,14 +42,16 @@ public sealed class GameAggregator
             var detected = await _steamDetector.DetectInstalledGamesAsync(index.Games, pluginId, ct);
             allInstalls.AddRange(detected);
 
-            // Apply manual overrides
+            // For games Steam didn't find: manual override first, then registry probe.
             foreach (var game in index.Games)
             {
                 // Skip if already detected via Steam
                 if (detected.Any(d => d.Game.GameId == game.GameId))
                     continue;
 
-                // Check manual overrides
+                // Manual override. This is also where an adopted ASCII junction lives after a
+                // shimmed game's first install (the install flow writes the junction path here),
+                // so the override deliberately takes precedence over the registry real-path.
                 if (manualOverrides.TryGetValue(game.GameId, out var overridePath) &&
                     Directory.Exists(overridePath))
                 {
@@ -59,6 +63,26 @@ public sealed class GameAggregator
                         IsValid = true
                     });
                     _logger.Information("Using manual override for {Game}: {Path}", game.DisplayName, overridePath);
+                    continue;
+                }
+
+                // Registry-based detection for non-Steam games (e.g. Pokémon TCG Live). Returns
+                // the REAL install path; for a game with an AsciiPathShim the junction isn't
+                // created until the first install, so before setup the game detects at its real
+                // (possibly non-ASCII) path. That's fine — detection only reads.
+                if (game.RegistryProbe is not null)
+                {
+                    var regPath = _registryDetector.ResolveInstallPath(game);
+                    if (regPath is not null)
+                    {
+                        allInstalls.Add(new GameInstall
+                        {
+                            Game = game,
+                            PluginId = pluginId,
+                            InstallPath = regPath,
+                            IsValid = true
+                        });
+                    }
                 }
             }
         }

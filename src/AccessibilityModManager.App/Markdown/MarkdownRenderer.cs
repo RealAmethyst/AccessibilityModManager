@@ -1,7 +1,7 @@
-using System.Diagnostics;
 using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Media;
+using AccessibilityModManager.App.Services;
 using Markdig;
 using Markdig.Extensions.Tables;
 using Markdig.Syntax.Inlines;
@@ -206,20 +206,14 @@ public static class MarkdownRenderer
                     {
                         Uri? uri = null;
                         try { uri = new Uri(link.Url, UriKind.Absolute); } catch { }
-                        if (uri != null)
+                        // Only make it a live link if it's https. Release notes are untrusted author
+                        // content; a file:/ms-*/custom-scheme link would run a shell action on click.
+                        if (ExternalLink.IsAllowed(uri))
                         {
                             var hyperlink = new Hyperlink { NavigateUri = uri };
                             hyperlink.RequestNavigate += (_, e) =>
                             {
-                                try
-                                {
-                                    Process.Start(new ProcessStartInfo
-                                    {
-                                        FileName = e.Uri.AbsoluteUri,
-                                        UseShellExecute = true
-                                    });
-                                }
-                                catch { }
+                                ExternalLink.TryOpen(e.Uri.AbsoluteUri);
                                 e.Handled = true;
                             };
                             RenderInlines(link, hyperlink.Inlines);
@@ -227,7 +221,7 @@ public static class MarkdownRenderer
                         }
                         else
                         {
-                            // Bad URL — render as plain text.
+                            // Bad or non-https URL — render as plain text, never a clickable link.
                             RenderInlines(link, inlines);
                         }
                     }
@@ -246,26 +240,20 @@ public static class MarkdownRenderer
                     break;
 
                 case AutolinkInline auto:
-                    if (Uri.TryCreate(auto.Url, UriKind.Absolute, out var autoUri))
+                    if (Uri.TryCreate(auto.Url, UriKind.Absolute, out var autoUri) &&
+                        ExternalLink.IsAllowed(autoUri))
                     {
                         var h = new Hyperlink(new Run(auto.Url)) { NavigateUri = autoUri };
                         h.RequestNavigate += (_, e) =>
                         {
-                            try
-                            {
-                                Process.Start(new ProcessStartInfo
-                                {
-                                    FileName = e.Uri.AbsoluteUri,
-                                    UseShellExecute = true
-                                });
-                            }
-                            catch { }
+                            ExternalLink.TryOpen(e.Uri.AbsoluteUri);
                             e.Handled = true;
                         };
                         inlines.Add(h);
                     }
                     else
                     {
+                        // Non-https autolink — plain text, not clickable.
                         inlines.Add(new Run(auto.Url));
                     }
                     break;

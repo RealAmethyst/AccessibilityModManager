@@ -58,10 +58,10 @@ public sealed class DependencyAutoInstaller
         UrlValidator.RequireHttps(new Uri(url), $"dependency '{dependency.Id}' download");
 
         var existing = await _receiptStore.LoadAsync(game.Game.GameId, dependency.Id);
-        if (existing != null)
+        if (existing != null && DependencyFilesPresent(existing, game.InstallPath))
         {
-            // Already installed by another plugin (or this same plugin earlier). Bump the
-            // refcount and short-circuit — the loader's already on disk, no work to do.
+            // Genuinely installed and its files are still on disk (e.g. another plugin already put
+            // this loader there). Bump the refcount and short-circuit — no work to do.
             if (!existing.DependentPluginIds.Contains(requestingPluginId))
             {
                 existing.DependentPluginIds.Add(requestingPluginId);
@@ -72,27 +72,47 @@ public sealed class DependencyAutoInstaller
             return new DependencyInstallResult(true, existing, null);
         }
 
+        // Either no receipt, or a stale receipt whose files are gone (a game update/repair wiped
+        // them, or they were removed by hand). We only reach InstallAsync when the dependency
+        // checker already reported the dep missing, so (re)install rather than trust the stale
+        // receipt — that was the cause of "mod installs but MelonLoader isn't actually applied".
+        // Keep any prior dependents so the refcount survives the reinstall.
+        if (existing != null)
+            _logger.Warning("Dep {DepId} has a receipt but its files are missing — reinstalling.", dependency.Id);
+        var priorDependents = existing?.DependentPluginIds ?? new List<string>();
+
         host?.OnDependencyStarting(dependency.Id, KindLabel(auto), dependency.Id);
 
         string? tempFile = null;
+        // Tracked outside the try so a failure mid-extract/copy rolls back what was already written.
+        var changes = new List<FileChange>();
+        string? backupFolder = null;
         try
         {
             tempFile = await DownloadAsync(url, dependency.Id, ct);
             await VerifySha256Async(tempFile, auto.Sha256, dependency.Id, ct);
 
-            var backupFolder = _receiptStore.GetBackupDirectory(game.Game.GameId, dependency.Id);
+            backupFolder = _receiptStore.GetBackupDirectory(game.Game.GameId, dependency.Id);
             Directory.CreateDirectory(backupFolder);
 
-            var (kind, changes) = auto switch
+            string kind;
+            switch (auto)
             {
-                ExtractZipAutoInstall ez => ("extractZip",
-                    ExtractZip(tempFile, ez, game.InstallPath, backupFolder)),
-                RunInstallerAutoInstall ri => ("runInstaller",
-                    await RunInstallerAsync(tempFile, ri, host, ct)),
-                CopyFileAutoInstall cf => ("copyFile",
-                    CopyFile(tempFile, cf, url, game.InstallPath, backupFolder)),
-                _ => throw new InvalidOperationException($"Unknown AutoInstall kind: {auto.GetType().Name}")
-            };
+                case ExtractZipAutoInstall ez:
+                    kind = "extractZip";
+                    ExtractZip(tempFile, ez, game.InstallPath, backupFolder, changes);
+                    break;
+                case RunInstallerAutoInstall ri:
+                    kind = "runInstaller";
+                    changes.AddRange(await RunInstallerAsync(tempFile, ri, host, ct));
+                    break;
+                case CopyFileAutoInstall cf:
+                    kind = "copyFile";
+                    CopyFile(tempFile, cf, url, game.InstallPath, backupFolder, changes);
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unknown AutoInstall kind: {auto.GetType().Name}");
+            }
 
             var receipt = new DependencyReceipt
             {
@@ -103,7 +123,9 @@ public sealed class DependencyAutoInstaller
                 Sha256 = auto.Sha256,
                 Changes = changes,
                 BackupFolder = backupFolder,
-                DependentPluginIds = new List<string> { requestingPluginId }
+                DependentPluginIds = priorDependents.Contains(requestingPluginId)
+                    ? priorDependents
+                    : priorDependents.Append(requestingPluginId).ToList()
             };
             await _receiptStore.SaveAsync(receipt);
 
@@ -113,6 +135,10 @@ public sealed class DependencyAutoInstaller
         catch (Exception ex)
         {
             _logger.Error(ex, "Dep auto-install failed: {DepId}", dependency.Id);
+            // Roll back whatever this attempt already wrote so a failed dependency install doesn't
+            // leave a half-installed loader behind (no receipt is written on failure).
+            if (backupFolder != null && changes.Count > 0)
+                RollBackDependencyChanges(changes, game.InstallPath, backupFolder);
             host?.OnDependencyFinished(dependency.Id, succeeded: false);
             return new DependencyInstallResult(false, null, ex.Message);
         }
@@ -125,10 +151,185 @@ public sealed class DependencyAutoInstaller
         }
     }
 
+    /// <summary>
+    /// Drops <paramref name="pluginId"/> from the refcount of every auto-installed dependency for
+    /// this game. When a dependency's refcount reaches zero — no installed mod needs it any more —
+    /// its files are removed and its receipt deleted. Called when a mod is uninstalled. Best-effort:
+    /// a failure to clean one dependency is logged and the rest still proceed.
+    /// </summary>
+    public async Task ReleaseDependenciesForPluginAsync(GameInstall game, string pluginId, CancellationToken ct)
+    {
+        var receipts = await _receiptStore.LoadAllForGameAsync(game.Game.GameId);
+        foreach (var receipt in receipts)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!receipt.DependentPluginIds.Remove(pluginId))
+                continue; // this plugin wasn't a dependent — nothing to release
+
+            if (receipt.DependentPluginIds.Count == 0)
+            {
+                _logger.Information("Dependency {DepId} no longer needed by any mod; removing it", receipt.DependencyId);
+                RollBackDependencyChanges(receipt.Changes, game.InstallPath, receipt.BackupFolder);
+                await _receiptStore.DeleteAsync(game.Game.GameId, receipt.DependencyId);
+            }
+            else
+            {
+                await _receiptStore.SaveAsync(receipt);
+                _logger.Information("Dependency {DepId} still needed by {Count} mod(s) after {Plugin} uninstalled",
+                    receipt.DependencyId, receipt.DependentPluginIds.Count, pluginId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Undoes the file changes from a dependency install: removes added files, restores replaced
+    /// files from the dependency's backup folder. Mirrors the mod-install rollback. Best-effort.
+    /// </summary>
+    private void RollBackDependencyChanges(List<FileChange> changes, string gameDir, string backupFolder)
+    {
+        foreach (var change in Enumerable.Reverse(changes))
+        {
+            try
+            {
+                var target = Path.Combine(gameDir, change.RelativePath);
+                if (change.Type == ChangeType.Added)
+                {
+                    if (File.Exists(target)) File.Delete(target);
+                }
+                else if (!string.IsNullOrEmpty(change.BackupRelativePath))
+                {
+                    var backup = Path.Combine(backupFolder, change.BackupRelativePath);
+                    if (File.Exists(backup)) File.Copy(backup, target, overwrite: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "Failed to roll back dependency file {Path}", change.RelativePath);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Is the dependency actually on disk? A receipt alone isn't proof — a game update/repair (or
+    /// manual cleanup) can wipe a loader's files while the receipt lingers. We check the files the
+    /// dep <em>added</em> (replaced/patched entries were originals, not the dep's own). Deps that
+    /// track no file changes (e.g. runInstaller) can't be checked this way, so we trust the receipt.
+    /// </summary>
+    private static bool DependencyFilesPresent(DependencyReceipt receipt, string gameDir)
+    {
+        var added = receipt.Changes.Where(c => c.Type == ChangeType.Added).ToList();
+        if (added.Count == 0) return true;
+        return added.All(c =>
+        {
+            var p = Path.Combine(gameDir, c.RelativePath);
+            return File.Exists(p) || Directory.Exists(p);
+        });
+    }
+
+    /// <summary>
+    /// Runs a game-installer dependency: download (HTTPS + mandatory SHA256), then run the
+    /// installer and wait for it to exit. Unlike <see cref="InstallAsync"/> this writes NO
+    /// dependency receipt — a game install isn't a tracked/rolled-back change, and "is the game
+    /// installed?" is answered by detection (the game's RegistryProbe), not a receipt. Throws on
+    /// a download / hash / non-zero-exit failure.
+    /// </summary>
+    public async Task RunGameInstallerAsync(Dependency dependency, IDependencyHost? host, CancellationToken ct)
+    {
+        if (dependency.Fix?.AutoInstall is not RunInstallerAutoInstall ri)
+            throw new InvalidOperationException(
+                $"Game-installer dependency '{dependency.Id}' must use a runInstaller auto-install.");
+
+        var url = dependency.Fix?.DownloadUrl;
+        if (string.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException(
+                $"Game-installer dependency '{dependency.Id}' has no download URL.");
+
+        UrlValidator.RequireHttps(new Uri(url), $"game installer '{dependency.Id}' download");
+
+        host?.OnDependencyStarting(dependency.Id, "runInstaller", dependency.Id);
+
+        string? tempFile = null;
+        try
+        {
+            tempFile = await DownloadAsync(url, dependency.Id, ct);
+            await VerifySha256Async(tempFile, ri.Sha256, dependency.Id, ct);
+            await RunInstallerAsync(tempFile, ri, host, ct, throwOnNonZeroExit: false);
+            host?.OnDependencyFinished(dependency.Id, succeeded: true);
+        }
+        catch
+        {
+            host?.OnDependencyFinished(dependency.Id, succeeded: false);
+            throw;
+        }
+        finally
+        {
+            if (tempFile != null)
+            {
+                try { File.Delete(tempFile); } catch { /* best effort; RunInstaller may have renamed it */ }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Installs a portable-app (emulator) game-installer dependency: download (HTTPS + mandatory
+    /// SHA256), then extract the ZIP into <paramref name="destinationFolder"/> with the same
+    /// zip-slip-safe extractor the mod install uses. Like <see cref="RunGameInstallerAsync"/> this
+    /// writes NO dependency receipt — the app is tracked by detection (a <c>KnownGameOverrides</c>
+    /// entry the caller writes), not a rolled-back change. Throws on a download / hash / extraction
+    /// failure. See EMULATOR_INSTALL_QUESTIONS.md.
+    /// </summary>
+    public async Task ExtractPortableAppAsync(
+        Dependency dependency, string destinationFolder, IDependencyHost? host, CancellationToken ct)
+    {
+        if (dependency.Fix?.AutoInstall is not ExtractAppAutoInstall app)
+            throw new InvalidOperationException(
+                $"Portable-app dependency '{dependency.Id}' must use an extractApp auto-install.");
+
+        var url = dependency.Fix?.DownloadUrl;
+        if (string.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException(
+                $"Portable-app dependency '{dependency.Id}' has no download URL.");
+
+        UrlValidator.RequireHttps(new Uri(url), $"portable app '{dependency.Id}' download");
+
+        host?.OnDependencyStarting(dependency.Id, "extractApp", dependency.Id);
+
+        string? tempFile = null;
+        try
+        {
+            tempFile = await DownloadAsync(url, dependency.Id, ct);
+            await VerifySha256Async(tempFile, app.Sha256, dependency.Id, ct);
+
+            // Reuse the same zip-slip-safe extractor the main install uses (it only needs the
+            // logger). No FileChange tracking: a portable app isn't a rolled-back mod change.
+            var extractor = new SafeZipExtractor(_logger);
+            await extractor.ExtractAsync(tempFile, destinationFolder, ct);
+
+            host?.OnDependencyFinished(dependency.Id, succeeded: true);
+            _logger.Information("Portable app {DepId} extracted to {Dir}", dependency.Id, destinationFolder);
+        }
+        catch
+        {
+            host?.OnDependencyFinished(dependency.Id, succeeded: false);
+            throw;
+        }
+        finally
+        {
+            if (tempFile != null)
+            {
+                try { File.Delete(tempFile); } catch { /* best effort */ }
+            }
+        }
+    }
+
     private async Task<string> DownloadAsync(string url, string depId, CancellationToken ct)
     {
+        // Keep the URL's file extension on the temp file. An installer in particular must keep its
+        // .msi / .exe so it's launched the right way later — a .msi renamed to .exe makes Windows
+        // try to exec a non-PE file and fail with "Unsupported 16-Bit Application". Harmless for
+        // zip/copyFile, which open the artifact by path regardless of extension.
         var tempFile = Path.Combine(Path.GetTempPath(), "AccessibilityModManager",
-            $"depdl_{depId}_{Guid.NewGuid():N}");
+            $"depdl_{depId}_{Guid.NewGuid():N}{SafeUrlExtension(url)}");
         Directory.CreateDirectory(Path.GetDirectoryName(tempFile)!);
 
         _logger.Information("Downloading dep {DepId} from {Url}", depId, url);
@@ -138,6 +339,22 @@ public sealed class DependencyAutoInstaller
         await using var fs = File.Create(tempFile);
         await response.Content.CopyToAsync(fs, ct);
         return tempFile;
+    }
+
+    /// <summary>
+    /// The file extension from a URL's path (e.g. <c>.msi</c>), or empty. Guards against junk:
+    /// only short, alphanumeric extensions are kept.
+    /// </summary>
+    private static string SafeUrlExtension(string url)
+    {
+        try
+        {
+            var ext = Path.GetExtension(new Uri(url).AbsolutePath);
+            if (!string.IsNullOrEmpty(ext) && ext.Length <= 6 && ext.Skip(1).All(char.IsLetterOrDigit))
+                return ext.ToLowerInvariant();
+        }
+        catch { /* not a parseable URL extension — fall through */ }
+        return string.Empty;
     }
 
     private async Task VerifySha256Async(string filePath, string expected, string depId, CancellationToken ct)
@@ -153,14 +370,14 @@ public sealed class DependencyAutoInstaller
         _logger.Information("Dep {DepId} SHA256 verified: {Hash}", depId, actual);
     }
 
-    private List<FileChange> ExtractZip(
-        string zipPath, ExtractZipAutoInstall action, string gameDir, string backupFolder)
+    private void ExtractZip(
+        string zipPath, ExtractZipAutoInstall action, string gameDir, string backupFolder,
+        List<FileChange> changes)
     {
         var targetDir = ResolveTargetDir(gameDir, action.TargetDir);
         Directory.CreateDirectory(targetDir);
 
         var fullGameDir = Path.GetFullPath(gameDir);
-        var changes = new List<FileChange>();
         var blocklist = action.Blocklist ?? new List<string>();
 
         using var archive = ZipFile.OpenRead(zipPath);
@@ -199,21 +416,22 @@ public sealed class DependencyAutoInstaller
                 };
             }
 
+            // Record the change BEFORE writing so a failure mid-write is still rolled back (the
+            // backup, if any, was already taken above).
+            changes.Add(change);
+
             Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
             using var es = entry.Open();
             using var fs = File.Create(destPath);
             es.CopyTo(fs);
-
-            changes.Add(change);
         }
 
         _logger.Information("Dep extract complete: {Count} files placed in {Dir}", changes.Count, targetDir);
-        return changes;
     }
 
-    private List<FileChange> CopyFile(
+    private void CopyFile(
         string sourcePath, CopyFileAutoInstall action, string downloadUrl,
-        string gameDir, string backupFolder)
+        string gameDir, string backupFolder, List<FileChange> changes)
     {
         var targetDir = ResolveTargetDir(gameDir, action.TargetDir);
         var fileName = string.IsNullOrWhiteSpace(action.TargetFileName)
@@ -252,33 +470,50 @@ public sealed class DependencyAutoInstaller
             };
         }
 
+        // Record the change BEFORE writing so a failure mid-write is still rolled back.
+        changes.Add(change);
         File.Copy(sourcePath, destPath, overwrite: true);
         _logger.Information("Dep copyFile placed {File}", relativeToGame);
-        return new List<FileChange> { change };
     }
 
     private async Task<List<FileChange>> RunInstallerAsync(
         string installerPath, RunInstallerAutoInstall action, IDependencyHost? host,
-        CancellationToken ct)
+        CancellationToken ct, bool throwOnNonZeroExit = true)
     {
-        // Move the downloaded artifact to a stable path with the right extension before
-        // spawning — Windows resolves runners (.msi, .exe) by file extension.
-        var renamed = installerPath;
-        var declaredExt = Path.GetExtension(installerPath);
-        if (string.IsNullOrEmpty(declaredExt))
+        var ext = Path.GetExtension(installerPath).ToLowerInvariant();
+
+        // Extensionless download (the URL had no extension): assume a native .exe so Windows runs
+        // it directly.
+        if (string.IsNullOrEmpty(ext))
         {
-            renamed = installerPath + ".exe";
+            var renamed = installerPath + ".exe";
             File.Move(installerPath, renamed);
+            installerPath = renamed;
+            ext = ".exe";
         }
 
         var psi = new ProcessStartInfo
         {
-            FileName = renamed,
             UseShellExecute = action.NeedsAdmin,
             CreateNoWindow = !action.NeedsAdmin,
             RedirectStandardOutput = !action.NeedsAdmin,
             RedirectStandardError = !action.NeedsAdmin
         };
+
+        if (ext == ".msi")
+        {
+            // An .msi is a database, not an executable — it has to run through msiexec. Executing
+            // it directly makes Windows try to load a non-PE file and fail with "Unsupported
+            // 16-Bit Application".
+            psi.FileName = "msiexec.exe";
+            psi.ArgumentList.Add("/i");
+            psi.ArgumentList.Add(installerPath);
+        }
+        else
+        {
+            psi.FileName = installerPath;
+        }
+
         if (action.NeedsAdmin)
             psi.Verb = "runas";
         else
@@ -322,8 +557,15 @@ public sealed class DependencyAutoInstaller
         }
 
         if (process.ExitCode != 0)
-            throw new InvalidOperationException(
-                $"Dependency installer exited with code {process.ExitCode}.");
+        {
+            if (throwOnNonZeroExit)
+                throw new InvalidOperationException(
+                    $"Dependency installer exited with code {process.ExitCode}.");
+            // Game-installer path: the installer is interactive and may exit non-zero on a user
+            // cancel (1602) or reboot-required (3010). Don't treat that as fatal here — the caller
+            // decides success by re-detecting the game.
+            _logger.Warning("Installer exited with code {Code}; leaving success to detection.", process.ExitCode);
+        }
 
         // runInstaller's outputs aren't tracked as FileChanges — the installer owns its files.
         return new List<FileChange>();

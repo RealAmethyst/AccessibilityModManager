@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using AccessibilityModManager.App.Services;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Detection;
@@ -23,6 +24,11 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     private readonly ILogger _logger;
     private readonly Action _navigateBack;
     private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>, string> _navigateToGameDetails;
+    /// <summary>
+    /// Opens Game Details for a not-detected game that can install itself (declares a
+    /// game-installer dependency). Args: game definition, owning plugin id, scoped indexes.
+    /// </summary>
+    private readonly Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> _navigateToGameDetailsUninstalled;
 
     private readonly PluginEntry _plugin;
 
@@ -84,7 +90,8 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         GameAggregator gameAggregator,
         ILogger logger,
         Action navigateBack,
-        Action<GameInstall, Dictionary<string, PluginRepoIndex>, string> navigateToGameDetails)
+        Action<GameInstall, Dictionary<string, PluginRepoIndex>, string> navigateToGameDetails,
+        Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> navigateToGameDetailsUninstalled)
     {
         _plugin = plugin;
         _repoClient = repoClient;
@@ -94,6 +101,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         _logger = logger;
         _navigateBack = navigateBack;
         _navigateToGameDetails = navigateToGameDetails;
+        _navigateToGameDetailsUninstalled = navigateToGameDetailsUninstalled;
 
         // Seed DisplayName from the registry's PluginEntry so the header renders something
         // sensible before LoadAsync replaces it with the per-plugin index's author info.
@@ -169,6 +177,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
                     ModName = modName,
                     PluginId = _plugin.Id,
                     IsDetected = install != null,
+                    HasGameInstaller = game.Dependencies.Any(d => d.IsGameInstaller),
                     InstalledVersion = receipt?.InstalledVersion,
                     HasUpdate = hasUpdate
                 });
@@ -193,18 +202,31 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     {
         if (mod == null || _pluginIndex == null) return;
 
+        var indexes = new Dictionary<string, PluginRepoIndex> { [_plugin.Id] = _pluginIndex };
+
         var install = _installs.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
-        if (install == null)
+        if (install != null)
         {
-            // Game isn't detected — Game Details view requires a GameInstall, so we can't open
-            // it. Tell the user.
-            StatusMessage = $"Cannot open {mod.GameDisplayName} — game not detected. Open it from the Games tab to use Browse for Folder.";
+            // Pass the plugin id so MainViewModel knows to return here when the user presses Back.
+            _navigateToGameDetails(install, indexes, _plugin.Id);
             return;
         }
 
-        var indexes = new Dictionary<string, PluginRepoIndex> { [_plugin.Id] = _pluginIndex };
-        // Pass the plugin id so MainViewModel knows to return here when the user presses Back.
-        _navigateToGameDetails(install, indexes, _plugin.Id);
+        // Not detected. If the game can install itself (declares a game-installer dependency),
+        // open Game Details in the not-installed state so the user can install the game + mod
+        // right here — the same flow the Games tab offers.
+        if (mod.HasGameInstaller)
+        {
+            var def = _pluginIndex.Games.FirstOrDefault(g => g.GameId == mod.GameId);
+            if (def != null)
+            {
+                _navigateToGameDetailsUninstalled(def, _plugin.Id, indexes);
+                return;
+            }
+        }
+
+        // Not detected and can't self-install — point them at the Games tab's Browse for Folder.
+        StatusMessage = $"Cannot open {mod.GameDisplayName} — game not detected. Open it from the Games tab to use Browse for Folder.";
     }
 
     [RelayCommand]
@@ -214,17 +236,11 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     private void OpenUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        try
+        // Author social/website URLs are untrusted plugin metadata — only launch https links,
+        // never a file:/custom-scheme URI that would trigger a shell action.
+        if (!ExternalLink.TryOpen(url, _logger))
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "Failed to open URL {Url}", url);
+            StatusMessage = "That link isn't an https web address, so it wasn't opened.";
         }
     }
 
@@ -263,12 +279,15 @@ public partial class DeveloperModItemViewModel : ObservableObject
     public required string ModName { get; init; }
     public required string PluginId { get; init; }
     public required bool IsDetected { get; init; }
+    /// <summary>True when the game can install itself (declares a game-installer dependency),
+    /// so it's openable from the not-detected state.</summary>
+    public bool HasGameInstaller { get; init; }
     public string? InstalledVersion { get; init; }
     public bool HasUpdate { get; init; }
 
     public string StatusText => (IsDetected, InstalledVersion, HasUpdate) switch
     {
-        (false, _, _) => "Game not detected",
+        (false, _, _) => HasGameInstaller ? "Not installed" : "Game not detected",
         (true, null, _) => "Not installed",
         (true, _, true) => $"v{InstalledVersion} — update available",
         (true, _, false) => $"v{InstalledVersion} installed",

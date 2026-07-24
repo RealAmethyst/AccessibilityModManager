@@ -92,3 +92,22 @@ PATREON_API_FINDINGS.md
 PATREON_GATING_QUESTIONS.md
 PATREON_POST_PER_GAME_QUESTIONS.md
 RELEASE_PROCESS.md
+
+## Round 11-13 internal docs (design Q&A, handoffs, audits, team log) plus
+## product notes that ship through the app/releases rather than the repo.
+AUDIT_FINDINGS.md
+AUDIT_2026-07-24.md
+CHANGELOG.md
+EMULATOR_AUTHORING_GUIDE.md
+EMULATOR_INSTALL_PLAN.md
+EMULATOR_INSTALL_QUESTIONS.md
+GAME_INSTALLER_ARGS.md
+GAME_INSTALLER_QUESTIONS.md
+PTCGL_INSTALL_QUESTIONS.md
+SERVER_OVERVIEW.md
+TEAM-LOG.md
+document.md
+end-user-setup.md
+setup.md
+todo.md
+server-dev.zip

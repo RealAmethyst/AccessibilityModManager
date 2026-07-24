@@ -51,6 +51,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="160"/>
@@ -208,29 +209,45 @@
                   </StackPanel>
                 </Border>
 
-                <TextBlock Grid.Row="2" Grid.Column="0"
-                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                <!-- Hosting destination for public releases. Only meaningful when a download
+                     server is configured AND the release isn't Patreon-gated (Patreon flow
+                     has its own dedicated server-vs-post logic above). Hidden otherwise so
+                     authors who only use GitHub never see an irrelevant dropdown. -->
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Host on:" VerticalAlignment="Center" Margin="0,4"
+                           Visibility="{Binding IsHostingSelectorVisible, Converter={StaticResource BoolToVisConverter}}"/>
+                <ComboBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                          SelectedItem="{Binding HostingDestination}"
+                          AutomationProperties.Name="Where to host this release"
+                          AutomationProperties.HelpText="GitHub publishes a tagged release; My server uploads via SFTP to your download server."
+                          Visibility="{Binding IsHostingSelectorVisible, Converter={StaticResource BoolToVisConverter}}"
+                          Margin="0,4">
+                    <sys:String>GitHub</sys:String>
+                    <sys:String>My server</sys:String>
+                </ComboBox>
+
+                <TextBlock Grid.Row="3" Grid.Column="0"
+                           Visibility="{Binding IsHostingOnGitHub, Converter={StaticResource BoolToVisConverter}}"
                            Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
-                <controls:FlatComboBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                <controls:FlatComboBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
                           x:Name="SourceRepoBox"
                           IsEditable="True"
                           ItemsSource="{Binding AvailableGitHubRepos}"
                           Text="{Binding SourceRepo, UpdateSourceTrigger=PropertyChanged}"
                           AutomationProperties.Name="GitHub repo for this game"
                           AutomationProperties.HelpText="Pick from your GitHub repos, or type a name like RealAmethyst slash DigimonNOAccess"
-                          Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                          Visibility="{Binding IsHostingOnGitHub, Converter={StaticResource BoolToVisConverter}}"
                           Margin="0,4"/>
 
-                <TextBlock Grid.Row="3" Grid.Column="0" Text="Version:" VerticalAlignment="Center" Margin="0,4"/>
-                <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Version:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
                          x:Name="VersionBox"
                          Text="{Binding Version, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="Release version"
                          AutomationProperties.HelpText="Examples: 1.0.0, 1.8.0, 2.0.0-beta1"
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="4" Grid.Column="0" Text="Channel:" VerticalAlignment="Center" Margin="0,4"/>
-                <ComboBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Channel:" VerticalAlignment="Center" Margin="0,4"/>
+                <ComboBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2"
                           SelectedItem="{Binding Channel}"
                           AutomationProperties.Name="Release channel"
                           Margin="0,4">
@@ -238,22 +255,22 @@
                     <sys:String>beta</sys:String>
                 </ComboBox>
 
-                <TextBlock Grid.Row="5" Grid.Column="0" Text="Tag:" VerticalAlignment="Center" Margin="0,4"
-                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
-                <TextBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2"
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Tag:" VerticalAlignment="Center" Margin="0,4"
+                           Visibility="{Binding IsHostingOnGitHub, Converter={StaticResource BoolToVisConverter}}"/>
+                <TextBox Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2"
                          Text="{Binding TagName, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="Tag name"
                          AutomationProperties.HelpText="Auto-fills from version. Override only if your tags don't follow v X.Y.Z."
-                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                         Visibility="{Binding IsHostingOnGitHub, Converter={StaticResource BoolToVisConverter}}"
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="6" Grid.Column="0" Text="Wrapped ZIP:" VerticalAlignment="Center" Margin="0,4"/>
-                <TextBox Grid.Row="6" Grid.Column="1"
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="Wrapped ZIP:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="7" Grid.Column="1"
                          Text="{Binding LocalZipPath, Mode=OneWay}"
                          IsReadOnly="True"
                          AutomationProperties.Name="Selected wrapped ZIP path"
                          Margin="0,4"/>
-                <StackPanel Grid.Row="6" Grid.Column="2" Orientation="Horizontal" Margin="8,4,0,4">
+                <StackPanel Grid.Row="7" Grid.Column="2" Orientation="Horizontal" Margin="8,4,0,4">
                     <Button Content="Build..."
                             Command="{Binding BuildPackageCommand}"
                             AutomationProperties.Name="Build wrapped ZIP from a folder of mod files"
@@ -263,49 +280,50 @@
                             AutomationProperties.Name="Pick a pre-built wrapped ZIP file"/>
                 </StackPanel>
 
-                <TextBlock Grid.Row="7" Grid.Column="0" Text="Asset filename:" VerticalAlignment="Center" Margin="0,4"
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="Asset filename:" VerticalAlignment="Center" Margin="0,4"
                            Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
-                <TextBox Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2"
+                <TextBox Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2"
                          Text="{Binding AssetFileName, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="Asset filename"
                          AutomationProperties.HelpText="The filename used when uploading. Defaults to the picked file's name."
                          Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="8" Grid.Column="0" Text="SHA256:" VerticalAlignment="Center" Margin="0,4"/>
-                <TextBox Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2"
+                <TextBlock Grid.Row="9" Grid.Column="0" Text="SHA256:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2"
                          Text="{Binding Sha256, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="SHA 256 hash"
                          FontFamily="Consolas"
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="9" Grid.Column="0" Text="Public URL:" VerticalAlignment="Center" Margin="0,4"
-                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
-                <TextBox Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="2"
-                         Text="{Binding PackageUrl, UpdateSourceTrigger=PropertyChanged}"
-                         AutomationProperties.Name="Public package URL"
-                         AutomationProperties.HelpText="Pre-filled from the GitHub repo, tag, and asset filename. Override only if you uploaded the asset somewhere else."
-                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
-                         Margin="0,4"/>
-
-                <!-- Changelog URL is auto-filled from the GitHub release page, so it only
-                     applies to public releases. Patreon-gated releases use the post body
-                     for changelog narrative. -->
-                <TextBlock Grid.Row="10" Grid.Column="0" Text="Changelog URL:" VerticalAlignment="Center" Margin="0,4"
-                           ToolTip="Optional. A web page describing what changed in this version. The manager can show this to users when offering an update."
+                <TextBlock Grid.Row="10" Grid.Column="0" Text="Public URL:" VerticalAlignment="Center" Margin="0,4"
                            Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
                 <TextBox Grid.Row="10" Grid.Column="1" Grid.ColumnSpan="2"
-                         Text="{Binding ChangelogUrl, UpdateSourceTrigger=PropertyChanged}"
-                         AutomationProperties.Name="Changelog URL"
-                         AutomationProperties.HelpText="Auto-fills to the GitHub release page once the repo and tag are set. The notes you write below appear there."
+                         Text="{Binding PackageUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Public package URL"
+                         AutomationProperties.HelpText="Pre-filled from the destination — GitHub repo+tag+asset for GitHub mode, or your server base URL + game id + version + asset for server mode. Override only if you uploaded the asset somewhere else."
                          Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="3"
+                <!-- Changelog URL is auto-filled from the GitHub release page in GitHub mode.
+                     In server mode it stays editable but won't auto-populate. Patreon-gated
+                     releases use the post body for changelog narrative, so the field is
+                     hidden for them. -->
+                <TextBlock Grid.Row="11" Grid.Column="0" Text="Changelog URL:" VerticalAlignment="Center" Margin="0,4"
+                           ToolTip="Optional. A web page describing what changed in this version. The manager can show this to users when offering an update."
+                           Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"/>
+                <TextBox Grid.Row="11" Grid.Column="1" Grid.ColumnSpan="2"
+                         Text="{Binding ChangelogUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Changelog URL"
+                         AutomationProperties.HelpText="Auto-fills to the GitHub release page once the repo and tag are set. In server mode you can type your own URL here. The notes you write below appear on the GitHub release body when uploading there."
+                         Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="12" Grid.Column="0" Grid.ColumnSpan="3"
                            Text="Release notes (markdown):"
                            AutomationProperties.HeadingLevel="Level2"
                            Margin="0,12,0,4"/>
-                <TextBox Grid.Row="12" Grid.Column="0" Grid.ColumnSpan="3"
+                <TextBox Grid.Row="13" Grid.Column="0" Grid.ColumnSpan="3"
                          Text="{Binding ReleaseNotes, UpdateSourceTrigger=PropertyChanged}"
                          AcceptsReturn="True"
                          AcceptsTab="False"
@@ -333,7 +351,7 @@
                  not via gh CLI. Hidden when the Patreon toggle is on. -->
             <Button Content="Upload and save"
                     Command="{Binding UploadAndSaveCommand}"
-                    AutomationProperties.Name="Upload to GitHub and save release"
+                    AutomationProperties.Name="{Binding UploadButtonAutomationName}"
                     IsDefault="True"
                     Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
                     Margin="0,0,8,0" MinWidth="120"/>

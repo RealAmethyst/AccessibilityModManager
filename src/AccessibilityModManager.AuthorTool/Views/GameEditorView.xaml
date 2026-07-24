@@ -98,6 +98,88 @@
             </ScrollViewer>
         </TabItem>
 
+        <TabItem Header="Detection" AutomationProperties.Name="Detection">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
+                <StackPanel>
+                    <TextBlock Text="Registry detection (non-Steam games)" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                    <TextBlock Text="If this game isn't on Steam but records its install location in the Windows registry, fill these in so the manager can find it without the user browsing. Leave blank to skip."
+                               TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
+                    <Grid Margin="0,0,0,16">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Registry hive:" VerticalAlignment="Center" Margin="0,4"/>
+                        <ComboBox Grid.Row="0" Grid.Column="1"
+                                  SelectedItem="{Binding RegistryHive, UpdateSourceTrigger=PropertyChanged}"
+                                  AutomationProperties.Name="Registry hive"
+                                  AutomationProperties.HelpText="HKCU for the current user, HKLM for the local machine"
+                                  Margin="0,4">
+                            <sys:String>HKCU</sys:String>
+                            <sys:String>HKLM</sys:String>
+                        </ComboBox>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Registry key:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="1" Grid.Column="1"
+                                 Text="{Binding RegistryKey, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Registry key"
+                                 AutomationProperties.HelpText="Subkey path under the hive. Example: Software\The Pokémon Company International\Pokémon Trading Card Game Live"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Registry value:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="2" Grid.Column="1"
+                                 Text="{Binding RegistryValue, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Registry value"
+                                 AutomationProperties.HelpText="The value holding the install path. Example: Path"
+                                 Margin="0,4"/>
+
+                        <CheckBox Grid.Row="3" Grid.Column="1"
+                                  IsChecked="{Binding RegistryProbeSubfolders}"
+                                  Content="Value is a parent folder — search its subfolders for the game"
+                                  AutomationProperties.Name="Search subfolders when the value is a parent folder"
+                                  AutomationProperties.HelpText="On when the registry value points at a publisher folder and the game is in a subfolder under it."
+                                  Margin="0,8"/>
+                    </Grid>
+
+                    <TextBlock Text="ASCII folder link (junction)" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                    <TextBlock Text="Use only when the real install path breaks the mod loader (e.g. accented characters) but can't be moved (e.g. login is tied to it). The manager creates an ASCII-named folder link on the same drive on first install — with the user's consent — and installs and launches through it. Leave blank to skip."
+                               TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="160"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Junction name:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Text="{Binding JunctionName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Junction name"
+                                 AutomationProperties.HelpText="ASCII folder name created at the drive root. Example: PokemonTCGLive becomes C:\PokemonTCGLive"
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Reason:" VerticalAlignment="Top" Margin="0,8"/>
+                        <TextBox Grid.Row="1" Grid.Column="1"
+                                 Text="{Binding JunctionReason, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MinHeight="60"
+                                 AutomationProperties.Name="Reason shown to the user"
+                                 AutomationProperties.HelpText="Plain-language explanation shown in the one-time consent prompt before the link is created."
+                                 Margin="0,4"/>
+                    </Grid>
+                </StackPanel>
+            </ScrollViewer>
+        </TabItem>
+
         <TabItem Header="Filters" AutomationProperties.Name="Filters">
             <views:FiltersEditorView Margin="8" DataContext="{Binding}"/>
         </TabItem>

@@ -119,9 +119,16 @@ public sealed class PatreonAuthorService
                 "AccessibilityModManager-Author",
                 "debug");
             Directory.CreateDirectory(debugDir);
-            var path = Path.Combine(debugDir, $"patreon-post-{postId}.json");
-            File.WriteAllText(path, rawJson);
-            _logger.Information("Patreon post probe returned 0 attachments — raw response saved to {Path}", path);
+            var path = Path.Combine(debugDir, $"patreon-post-{postId}.diagnostic.json");
+            // Prefix a clear warning: this is a raw Patreon API response and may contain private
+            // account/campaign metadata. The author should review it before sharing it for support.
+            var content =
+                "// DIAGNOSTIC DUMP — raw Patreon API response.\n" +
+                "// This MAY contain private Patreon account or campaign metadata. Review before sharing.\n" +
+                rawJson;
+            File.WriteAllText(path, content);
+            _logger.Information(
+                "Patreon post probe returned 0 attachments — raw response saved to {Path} (may contain private data)", path);
             return path;
         }
         catch (Exception ex)

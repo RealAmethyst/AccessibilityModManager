@@ -1,3 +1,4 @@
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Installer;
@@ -21,7 +22,9 @@ public sealed class BackupManager
     public string CreateBackupFolder(string gameInstallPath, string pluginId, string gameId)
     {
         var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-        var backupFolder = Path.Combine(gameInstallPath, "modmanager_backups", pluginId, gameId, timestamp);
+        // pluginId/gameId are untrusted — keep the backup folder inside the game install.
+        var backupFolder = PathSafety.CombineContained(
+            gameInstallPath, "modmanager_backups", pluginId, gameId, timestamp);
         Directory.CreateDirectory(backupFolder);
         _logger.Information("Created backup folder: {BackupFolder}", backupFolder);
         return backupFolder;
