@@ -370,7 +370,8 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         var initialSourceRepo = _configService.GetGameSourceRepo(_projectPath, SelectedGame.GameId)
             ?? SelectedGame.PerGameSourceRepo;
 
-        var deps = SelectedGame.Dependencies.Select(d => d.ToModel()).ToList();
+        if (!TryBuildDependencies(SelectedGame, out var deps))
+            return;
         if (!TryBuildScripts(SelectedGame, out var scriptInputs))
             return;
 
@@ -420,7 +421,8 @@ public sealed partial class IndexEditorViewModel : ObservableObject
 
         var initialSourceRepo = _configService.GetGameSourceRepo(_projectPath, SelectedGame.GameId)
             ?? SelectedGame.PerGameSourceRepo;
-        var deps = SelectedGame.Dependencies.Select(d => d.ToModel()).ToList();
+        if (!TryBuildDependencies(SelectedGame, out var deps))
+            return;
         if (!TryBuildScripts(SelectedGame, out var scriptInputs))
             return;
 
@@ -545,6 +547,27 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// each public script with the absolute source path the author picked via Browse so the
     /// builder can always bundle the file (Browse paths can live outside the source folder).
     /// </summary>
+    /// <summary>
+    /// Builds the dependency models for a release dialog, surfacing validation errors (bad SHA,
+    /// absolute/traversing target folder, non-leaf target file name) as an info dialog instead of
+    /// letting the exception escape the relay command — an unhandled throw there closes the app.
+    /// </summary>
+    private bool TryBuildDependencies(GameItemViewModel game, out List<Dependency> deps)
+    {
+        deps = [];
+        try
+        {
+            deps = game.Dependencies.Select(d => d.ToModel()).ToList();
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            _showInfoDialog("Dependency needs fixing",
+                $"{ex.Message}\n\nFix it on the Dependencies tab, then try again.");
+            return false;
+        }
+    }
+
     private bool TryBuildScripts(GameItemViewModel game, out LifecycleScriptInputs? inputs)
     {
         inputs = null;

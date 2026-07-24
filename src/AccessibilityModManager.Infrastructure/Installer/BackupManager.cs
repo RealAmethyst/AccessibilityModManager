@@ -96,30 +96,26 @@ public sealed class BackupManager
 
     private void CleanEmptyDirectories(string directory, string stopAt)
     {
-        var stopAtFull = Path.GetFullPath(stopAt);
-        var current = Path.GetFullPath(directory);
+        var stopAtFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(stopAt));
+        var current = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
 
-        while (current != stopAtFull && current.StartsWith(stopAtFull))
+        while (!string.Equals(current, stopAtFull, StringComparison.OrdinalIgnoreCase) &&
+               PathSafety.IsContained(stopAtFull, current))
         {
             if (!Directory.Exists(current) || Directory.EnumerateFileSystemEntries(current).Any())
                 break;
 
             Directory.Delete(current);
             _logger.Debug("Removed empty directory: {Dir}", current);
-            current = Path.GetDirectoryName(current)!;
+
+            var parent = Path.GetDirectoryName(current);
+            if (parent is null) break;
+            current = parent;
         }
     }
 
     private static void ValidatePathWithinDirectory(string fullPath, string directory, string context)
     {
-        var normalizedDir = Path.GetFullPath(directory);
-        var normalizedPath = Path.GetFullPath(fullPath);
-
-        if (!normalizedPath.StartsWith(normalizedDir + Path.DirectorySeparatorChar) &&
-            normalizedPath != normalizedDir)
-        {
-            throw new InvalidOperationException(
-                $"Path escape detected in {context}: '{fullPath}' is outside '{directory}'");
-        }
+        PathSafety.EnsureContained(directory, fullPath, context);
     }
 }

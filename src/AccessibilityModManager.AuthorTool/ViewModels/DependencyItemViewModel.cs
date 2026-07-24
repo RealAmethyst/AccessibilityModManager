@@ -1,4 +1,5 @@
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace AccessibilityModManager.AuthorTool.ViewModels;
@@ -195,7 +196,7 @@ public sealed partial class DependencyItemViewModel : ObservableObject
             "extractZip" => new ExtractZipAutoInstall
             {
                 Sha256 = AutoInstallSha256!.Trim(),
-                TargetDir = string.IsNullOrWhiteSpace(AutoInstallTargetDir) ? null : AutoInstallTargetDir,
+                TargetDir = NormalizedTargetDirOrThrow(),
                 Blocklist = ParseList(AutoInstallBlocklistText, ',')
             },
             "runInstaller" => new RunInstallerAutoInstall
@@ -207,8 +208,8 @@ public sealed partial class DependencyItemViewModel : ObservableObject
             "copyFile" => new CopyFileAutoInstall
             {
                 Sha256 = AutoInstallSha256!.Trim(),
-                TargetDir = string.IsNullOrWhiteSpace(AutoInstallTargetDir) ? null : AutoInstallTargetDir,
-                TargetFileName = string.IsNullOrWhiteSpace(AutoInstallTargetFileName) ? null : AutoInstallTargetFileName
+                TargetDir = NormalizedTargetDirOrThrow(),
+                TargetFileName = NormalizedTargetFileNameOrThrow()
             },
             "extractApp" => new ExtractAppAutoInstall
             {
@@ -216,6 +217,31 @@ public sealed partial class DependencyItemViewModel : ObservableObject
             },
             _ => throw new InvalidOperationException($"Unknown AutoInstall kind: {AutoInstallKind}")
         };
+    }
+
+    /// <summary>
+    /// The target dir as the manager will interpret it: leading/trailing slashes stripped (the
+    /// "/Updater/1.5.0/" mistake published for Pokémon TCG Live gets healed right here at
+    /// authoring time), absolute paths and ".." rejected with a save-blocking message so a value
+    /// the manager would refuse can never be published.
+    /// </summary>
+    private string? NormalizedTargetDirOrThrow()
+    {
+        var normalized = PathSafety.NormalizeRelativeDir(
+            AutoInstallTargetDir, $"Dependency '{Id}': AutoInstall target folder");
+        return normalized.Length == 0 ? null : normalized;
+    }
+
+    /// <summary>
+    /// copyFile's target file name must be a bare file name — the manager rejects anything with
+    /// folders, a root, or invalid filename characters in it, so the AuthorTool blocks it at save
+    /// time with the exact same shared rule.
+    /// </summary>
+    private string? NormalizedTargetFileNameOrThrow()
+    {
+        if (string.IsNullOrWhiteSpace(AutoInstallTargetFileName)) return null;
+        return PathSafety.EnsureLeafFileName(
+            AutoInstallTargetFileName, $"Dependency '{Id}': target file name");
     }
 
     private static List<string> ParseList(string? text, char separator)

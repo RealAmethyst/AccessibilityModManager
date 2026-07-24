@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Microsoft.Win32;
 using Serilog;
 
@@ -123,18 +124,12 @@ public sealed class DependencyChecker : IDependencyChecker
         // File/folder presence relative to game install
         if (!string.IsNullOrEmpty(dep.Check.FilePath))
         {
-            // Normalize BOTH paths through GetFullPath so the StartsWith check below isn't
-            // foiled by trivial separator differences (forward vs back slashes, mixed case).
-            // Without this, a gameInstallPath like "c:/program files/.../game" — which can
-            // come from VDF parsing or a folder picker — fails the path-traversal check
-            // because GetFullPath canonicalizes the resolved path with backslashes but the
-            // base still has forward slashes, and StartsWith mismatches purely on that.
             var normalizedBase = Path.GetFullPath(gameInstallPath);
             var fullPath = Path.GetFullPath(Path.Combine(normalizedBase, dep.Check.FilePath));
 
-            // Path traversal protection — separator-aware now that both sides are canonical.
-            if (!fullPath.StartsWith(normalizedBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(fullPath, normalizedBase, StringComparison.OrdinalIgnoreCase))
+            // Path traversal protection — PathSafety canonicalizes both sides (separators, case,
+            // trailing separators) so a VDF/folder-picker style base can't foil the check.
+            if (!PathSafety.IsContained(normalizedBase, fullPath))
             {
                 _logger.Warning("Dependency check path escapes game directory: {Path}", dep.Check.FilePath);
                 return new DependencyStatus

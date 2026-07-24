@@ -1,4 +1,5 @@
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Installer;
@@ -167,14 +168,6 @@ public sealed class InstallActionExecutor
     private static string ResolveSafe(string baseDir, string relativePath, string context)
     {
         var fullPath = Path.GetFullPath(Path.Combine(baseDir, relativePath));
-        var fullBase = Path.GetFullPath(baseDir);
-
-        if (!fullPath.StartsWith(fullBase + Path.DirectorySeparatorChar) && fullPath != fullBase)
-        {
-            throw new InvalidOperationException(
-                $"Path escape detected in {context}: '{relativePath}' resolves outside '{baseDir}'");
-        }
-
-        return fullPath;
+        return PathSafety.EnsureContained(baseDir, fullPath, context);
     }
 }

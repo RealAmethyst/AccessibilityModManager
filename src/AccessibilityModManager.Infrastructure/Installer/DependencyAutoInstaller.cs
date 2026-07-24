@@ -387,7 +387,7 @@ public sealed class DependencyAutoInstaller
             if (IsBlocked(entry.FullName, blocklist)) continue;
 
             var destPath = Path.GetFullPath(Path.Combine(targetDir, entry.FullName));
-            if (!destPath.StartsWith(Path.GetFullPath(targetDir) + Path.DirectorySeparatorChar))
+            if (!PathSafety.IsContained(targetDir, destPath))
                 throw new SecurityException(
                     $"Zip slip detected in dependency: '{entry.FullName}' would extract outside '{targetDir}'.");
 
@@ -434,15 +434,18 @@ public sealed class DependencyAutoInstaller
         string gameDir, string backupFolder, List<FileChange> changes)
     {
         var targetDir = ResolveTargetDir(gameDir, action.TargetDir);
-        var fileName = string.IsNullOrWhiteSpace(action.TargetFileName)
-            ? Path.GetFileName(new Uri(downloadUrl).LocalPath)
-            : action.TargetFileName!;
+        // Both name sources are untrusted (author-typed, or derived from the download URL's last
+        // path segment) — either way it must be a bare file name, or it could ignore the resolved
+        // target directory or address an NTFS alternate data stream.
+        var fileName = PathSafety.EnsureLeafFileName(
+            string.IsNullOrWhiteSpace(action.TargetFileName)
+                ? Path.GetFileName(new Uri(downloadUrl).LocalPath)
+                : action.TargetFileName,
+            "copyFile target file name");
 
         var destPath = Path.GetFullPath(Path.Combine(targetDir, fileName));
         var fullGameDir = Path.GetFullPath(gameDir);
-        if (!destPath.StartsWith(fullGameDir + Path.DirectorySeparatorChar))
-            throw new InvalidOperationException(
-                $"copyFile target '{destPath}' resolves outside the game folder.");
+        PathSafety.EnsureContained(fullGameDir, destPath, "copyFile target");
 
         Directory.CreateDirectory(targetDir);
 
@@ -573,14 +576,15 @@ public sealed class DependencyAutoInstaller
 
     private static string ResolveTargetDir(string gameDir, string? targetDir)
     {
-        if (string.IsNullOrWhiteSpace(targetDir)) return Path.GetFullPath(gameDir);
-
-        var resolved = Path.GetFullPath(Path.Combine(gameDir, targetDir));
-        var fullGameDir = Path.GetFullPath(gameDir);
-        if (!resolved.StartsWith(fullGameDir + Path.DirectorySeparatorChar) && resolved != fullGameDir)
-            throw new InvalidOperationException(
-                $"AutoInstall targetDir '{targetDir}' resolves outside the game folder.");
-        return resolved;
+        // Authors write targetDir by hand; leading/trailing slashes are noise, not intent
+        // ("/Updater/1.5.0/" means <game>\Updater\1.5.0 — the live PTCG failure). Absolute values
+        // and ".." are rejected with a message that says what to write instead; the containment
+        // check stays as defense in depth behind the normalization.
+        var relative = PathSafety.NormalizeRelativeDir(targetDir, "AutoInstall targetDir");
+        var resolved = relative.Length == 0
+            ? Path.GetFullPath(gameDir)
+            : Path.GetFullPath(Path.Combine(gameDir, relative));
+        return PathSafety.EnsureContained(gameDir, resolved, "AutoInstall targetDir");
     }
 
     private static bool IsBlocked(string entryFullName, List<string> blocklist)

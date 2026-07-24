@@ -335,6 +335,182 @@ public class DependencyAutoInstallerTests : IDisposable
         Assert.False(Directory.Exists(dest));
     }
 
+    [Fact]
+    public async Task InstallAsync_TargetDirWithLeadingAndTrailingSlash_ExtractsInsideGame()
+    {
+        // THE live Pokemon TCG regression: an author-written targetDir of "/Updater/1.5.0/" used
+        // to fail with "resolves outside the game folder" (leading slash made Path.Combine discard
+        // the game dir). It must now mean <game>\Updater\1.5.0.
+        var zipPath = MakeLoaderZip("MelonLoader/dep.dll", "loader-bits");
+        var dep = MakeExtractZipDep(zipPath, targetDir: "/Updater/1.5.0/");
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.ErrorMessage);
+        Assert.Equal("loader-bits",
+            File.ReadAllText(Path.Combine(_gameDir, "Updater", "1.5.0", "MelonLoader", "dep.dll")));
+    }
+
+    [Fact]
+    public async Task InstallAsync_TargetDirWithTrailingSlashOnly_NoFalseZipSlip()
+    {
+        // Second half of the same regression: with only a trailing slash the resolved target kept
+        // its separator and the zip-slip prefix check built a doubled separator that no entry could
+        // match — every file failed as a false "Zip slip detected".
+        var zipPath = MakeLoaderZip("MelonLoader/dep.dll", "loader-bits");
+        var dep = MakeExtractZipDep(zipPath, targetDir: "Updater/1.5.0/");
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.ErrorMessage);
+        Assert.True(File.Exists(Path.Combine(_gameDir, "Updater", "1.5.0", "MelonLoader", "dep.dll")));
+    }
+
+    [Fact]
+    public async Task InstallAsync_AbsoluteTargetDir_FailsWithClearMessage()
+    {
+        var zipPath = MakeLoaderZip("a.dll", "x");
+        var dep = MakeExtractZipDep(zipPath, targetDir: "C:\\evil");
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("relative to the game folder", result.ErrorMessage);
+        Assert.Null(await _store.LoadAsync("game-1", "melonloader"));
+    }
+
+    [Fact]
+    public async Task InstallAsync_TraversalTargetDir_Fails()
+    {
+        var zipPath = MakeLoaderZip("a.dll", "x");
+        var dep = MakeExtractZipDep(zipPath, targetDir: "..\\out");
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("..", result.ErrorMessage);
+        Assert.False(Directory.Exists(Path.Combine(_tempRoot, "out")));
+    }
+
+    [Fact]
+    public async Task InstallAsync_CopyFile_TargetDirSlashNoise_PlacesFileInsideGame()
+    {
+        var payloadPath = Path.Combine(_tempRoot, "tool.dll");
+        File.WriteAllText(payloadPath, "tool-bits");
+        var dep = new Dependency
+        {
+            Id = "tool",
+            Type = "framework",
+            Required = true,
+            Fix = new DependencyFix
+            {
+                DownloadUrl = "https://example.invalid/tool.dll",
+                AutoInstall = new CopyFileAutoInstall { Sha256 = ComputeSha(payloadPath), TargetDir = "/Tools/" }
+            }
+        };
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(payloadPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.True(result.Succeeded, result.ErrorMessage);
+        Assert.Equal("tool-bits", File.ReadAllText(Path.Combine(_gameDir, "Tools", "tool.dll")));
+    }
+
+    [Fact]
+    public async Task InstallAsync_CopyFile_TargetFileNameWithFolders_Fails()
+    {
+        var payloadPath = Path.Combine(_tempRoot, "tool.dll");
+        File.WriteAllText(payloadPath, "tool-bits");
+        var dep = new Dependency
+        {
+            Id = "tool",
+            Type = "framework",
+            Required = true,
+            Fix = new DependencyFix
+            {
+                DownloadUrl = "https://example.invalid/tool.dll",
+                AutoInstall = new CopyFileAutoInstall
+                {
+                    Sha256 = ComputeSha(payloadPath),
+                    TargetFileName = "sub\\evil.dll"
+                }
+            }
+        };
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(payloadPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("plain file name", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task InstallAsync_ZipWithTraversalEntry_FailsAndWritesNothingOutside()
+    {
+        // The lenient targetDir handling must not loosen real zip-slip protection on the
+        // dependency extractor: an archive entry that climbs out of the target still aborts.
+        var zipPath = MakeLoaderZip("../evil.txt", "escape");
+        var dep = MakeExtractZipDep(zipPath, targetDir: "Loader");
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Zip slip", result.ErrorMessage);
+        Assert.False(File.Exists(Path.Combine(_gameDir, "evil.txt")));
+    }
+
+    [Fact]
+    public async Task InstallAsync_ZipWithRootedEntry_Fails()
+    {
+        // A rooted entry name makes Path.Combine discard the target dir entirely — containment
+        // must still catch the resolved path landing outside.
+        var zipPath = MakeLoaderZip("C:\\evil\\payload.txt", "escape");
+        var dep = MakeExtractZipDep(zipPath, targetDir: "Loader");
+
+        var installer = new DependencyAutoInstaller(
+            new HttpClient(new ServeFileHandler(zipPath)), _store, TestLogger.Create());
+        var result = await installer.InstallAsync(dep, MakeGame(), "plug-a", host: null, ct: CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Zip slip", result.ErrorMessage);
+    }
+
+    private string MakeLoaderZip(string entryName, string content)
+    {
+        var zipPath = Path.Combine(_tempRoot, $"loader_{Guid.NewGuid():N}.zip");
+        using (var fs = File.Create(zipPath))
+        using (var archive = new ZipArchive(fs, ZipArchiveMode.Create))
+        {
+            using var w = new StreamWriter(archive.CreateEntry(entryName).Open());
+            w.Write(content);
+        }
+        return zipPath;
+    }
+
+    private Dependency MakeExtractZipDep(string zipPath, string targetDir) => new()
+    {
+        Id = "melonloader",
+        Type = "framework",
+        Required = true,
+        Fix = new DependencyFix
+        {
+            DownloadUrl = "https://example.invalid/loader.zip",
+            AutoInstall = new ExtractZipAutoInstall { Sha256 = ComputeSha(zipPath), TargetDir = targetDir }
+        }
+    };
+
     private GameInstall MakeGame() => new()
     {
         Game = new GameDefinition { GameId = "game-1", DisplayName = "Game 1" },

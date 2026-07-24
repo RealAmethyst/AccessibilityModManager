@@ -54,6 +54,32 @@ public class SafeZipExtractorTests : IDisposable
     }
 
     [Fact]
+    public async Task ExtractAsync_ThrowsOnRootedEntryName()
+    {
+        // A rooted entry name makes Path.Combine discard the target entirely; containment must
+        // reject the resolved outside path.
+        var zipPath = CreateTestZip(("C:\\evil\\payload.txt", "malicious"));
+        var extractDir = Path.Combine(_tempDir, "output");
+
+        await Assert.ThrowsAsync<SecurityException>(() =>
+            _extractor.ExtractAsync(zipPath, extractDir));
+    }
+
+    [Fact]
+    public async Task ExtractAsync_TargetWithTrailingSeparator_Succeeds()
+    {
+        // Regression for the doubled-separator false positive: extracting into a destination
+        // written with a trailing separator (the shape a bare drive root like "D:\" arrives in)
+        // used to fail every entry as "Zip slip detected".
+        var zipPath = CreateTestZip(("data/file.txt", "hello"));
+        var extractDir = Path.Combine(_tempDir, "output") + Path.DirectorySeparatorChar;
+
+        await _extractor.ExtractAsync(zipPath, extractDir);
+
+        Assert.Equal("hello", File.ReadAllText(Path.Combine(_tempDir, "output", "data", "file.txt")));
+    }
+
+    [Fact]
     public async Task ExtractAsync_RespectssCancellation()
     {
         var zipPath = CreateTestZip(("a.txt", "data"));

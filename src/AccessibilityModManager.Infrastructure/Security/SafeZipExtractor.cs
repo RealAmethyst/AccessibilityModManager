@@ -36,9 +36,9 @@ public sealed class SafeZipExtractor
 
             var destinationPath = Path.GetFullPath(Path.Combine(fullTargetPath, entry.FullName));
 
-            // Zip slip protection: ensure the resolved path stays inside the target
-            if (!destinationPath.StartsWith(fullTargetPath + Path.DirectorySeparatorChar) &&
-                destinationPath != fullTargetPath)
+            // Zip slip protection: ensure the resolved path stays inside the target. PathSafety
+            // handles trailing-separator roots (extracting to "D:\" must not false-positive).
+            if (!PathSafety.IsContained(fullTargetPath, destinationPath))
             {
                 _logger.Error("Zip slip detected: entry {Entry} resolves to {Path} which is outside {Target}",
                     entry.FullName, destinationPath, fullTargetPath);

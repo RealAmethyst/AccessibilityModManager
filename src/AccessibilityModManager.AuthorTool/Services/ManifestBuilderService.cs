@@ -2,6 +2,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Text.Json;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.AuthorTool.Services;
@@ -307,8 +308,7 @@ public sealed class ManifestBuilderService
 
         var inSource = rel[filesPrefix.Length..].Replace('/', Path.DirectorySeparatorChar);
         var fullPath = Path.GetFullPath(Path.Combine(sourceFolder, inSource));
-        var sourceFull = Path.GetFullPath(sourceFolder);
-        if (!fullPath.StartsWith(sourceFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        if (!PathSafety.IsContained(sourceFolder, fullPath))
             throw new InvalidOperationException(
                 $"{label}: '{script.Executable}' resolves outside the source folder.");
 

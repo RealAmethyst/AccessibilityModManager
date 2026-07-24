@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Installer;
@@ -178,11 +179,10 @@ public sealed class LifecycleScriptRunner
             throw new InvalidOperationException(
                 $"Lifecycle script extension '{ext}' is not allowed. Use .exe, .ps1, .cmd, or .bat.");
 
-        // Reject path traversal — script must live inside the staging dir.
-        var stagingFull = Path.GetFullPath(stagingDir);
+        // Reject path traversal — script must live inside the staging dir. PathSafety handles
+        // trailing-separator and case aliases so a legitimate staging path can't false-fail.
         var scriptFull = Path.GetFullPath(Path.Combine(stagingDir, script.Executable));
-        if (!scriptFull.StartsWith(stagingFull + Path.DirectorySeparatorChar,
-                StringComparison.OrdinalIgnoreCase))
+        if (!PathSafety.IsContained(stagingDir, scriptFull))
             throw new InvalidOperationException(
                 $"Lifecycle script path '{script.Executable}' escapes the package staging dir.");
 
