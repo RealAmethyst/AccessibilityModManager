@@ -1,5 +1,5 @@
 using System.Collections.ObjectModel;
-using AccessibilityModManager.App.Services;
+using AccessibilityModManager.Infrastructure.Security;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Detection;
@@ -240,7 +240,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         // never a file:/custom-scheme URI that would trigger a shell action.
         if (!ExternalLink.TryOpen(url, _logger))
         {
-            StatusMessage = "That link isn't an https web address, so it wasn't opened.";
+            StatusMessage = "Couldn't open that link in your browser — it may not be a safe https address, or no browser responded.";
         }
     }
 

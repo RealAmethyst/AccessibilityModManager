@@ -175,7 +175,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     public string SubtitleText => IsPatreonGated
         ? (IsServerUploadConfigured
             ? "Build the wrapped ZIP and pick the tiers that get access. The AuthorTool uploads to your download server on Save; the manager fetches from there for entitled patrons."
-            : "Build the wrapped ZIP, then upload it manually to a tier-locked Patreon post. The manager fetches it from Patreon for entitled patrons.")
+            : "Build the wrapped ZIP, then upload it manually to a tier-locked Patreon post. Entitled patrons download it from the post in their browser and pick the file in the manager (SHA256-checked).")
         : (IsHostingOnServer
             ? "Build the wrapped ZIP. The AuthorTool uploads it to your download server on Save; the manager fetches from there over plain HTTPS (no Patreon involved)."
             : "Fill in the version, pick the wrapped ZIP, then upload to GitHub or save the URL directly.");

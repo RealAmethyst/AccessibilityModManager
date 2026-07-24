@@ -68,7 +68,7 @@
                           Content="Make this release Patreon-only (the wrapped ZIP lives on a tier-locked Patreon post)"
                           IsChecked="{Binding IsPatreonGated}"
                           AutomationProperties.Name="Patreon-gate this release"
-                          AutomationProperties.HelpText="When checked, the GitHub upload fields disappear. The manager downloads the asset from Patreon for entitled patrons only."
+                          AutomationProperties.HelpText="When checked, the GitHub upload fields disappear. Entitled patrons get the file from your download server, or by downloading it from the Patreon post in their browser and picking it in the manager."
                           FontWeight="SemiBold"
                           Background="#F8F4FF"
                           Padding="6"

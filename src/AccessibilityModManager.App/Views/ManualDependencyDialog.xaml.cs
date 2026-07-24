@@ -1,5 +1,5 @@
 using System.Windows;
-using AccessibilityModManager.App.Services;
+using AccessibilityModManager.Infrastructure.Security;
 
 namespace AccessibilityModManager.App.Views;
 

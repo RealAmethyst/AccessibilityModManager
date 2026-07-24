@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using Serilog;
 
-namespace AccessibilityModManager.App.Services;
+namespace AccessibilityModManager.Infrastructure.Security;
 
 /// <summary>
 /// Opens author-supplied external URLs (changelog links, release-note markdown links, author

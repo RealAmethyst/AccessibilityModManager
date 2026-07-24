@@ -1,7 +1,7 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
@@ -63,7 +63,7 @@ public partial class PluginsViewModel : ObservableObject
             Plugins.Clear();
             foreach (var entry in registry.Plugins.OrderBy(p => p.Name))
             {
-                Plugins.Add(new PluginItemViewModel(entry, _logger));
+                Plugins.Add(new PluginItemViewModel(entry, _logger, msg => StatusMessage = msg));
             }
 
             StatusMessage = $"Loaded {Plugins.Count} developer{(Plugins.Count == 1 ? "" : "s")}.";
@@ -87,6 +87,7 @@ public partial class PluginsViewModel : ObservableObject
 public partial class PluginItemViewModel : ObservableObject
 {
     private readonly ILogger _logger;
+    private readonly Action<string>? _reportStatus;
 
     public PluginEntry Entry { get; }
 
@@ -98,24 +99,21 @@ public partial class PluginItemViewModel : ObservableObject
     public Dictionary<string, Uri> Links => Entry.Links;
     public bool HasLinks => Website != null || Links.Count > 0;
 
-    public PluginItemViewModel(PluginEntry entry, ILogger logger)
+    public PluginItemViewModel(PluginEntry entry, ILogger logger, Action<string>? reportStatus = null)
     {
         Entry = entry;
         _logger = logger;
+        _reportStatus = reportStatus;
     }
 
     [RelayCommand]
     private void OpenLink(Uri? uri)
     {
+        // Registry entries are signed, but the launch path follows the same app-wide rule as
+        // every other author-supplied link: https only, through the shared opener.
         if (uri == null) return;
-        try
-        {
-            Process.Start(new ProcessStartInfo { FileName = uri.AbsoluteUri, UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Failed to open link {Uri}", uri);
-        }
+        if (!ExternalLink.TryOpen(uri.AbsoluteUri, _logger))
+            _reportStatus?.Invoke("Couldn't open that link in your browser — it may not be a safe https address, or no browser responded.");
     }
 
     public override string ToString() => Name;

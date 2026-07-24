@@ -154,6 +154,10 @@ public sealed partial class DependencyItemViewModel : ObservableObject
 
     public Dependency ToModel()
     {
+        // Dependency ids become folder names on every user's machine — same shared rule the
+        // manager enforces on fetch, applied here so a bad id can't be published.
+        PathSafety.EnsureSafeId(Id, "Dependency id");
+
         var hasCheck = !string.IsNullOrWhiteSpace(CheckRegistryKey)
             || !string.IsNullOrWhiteSpace(CheckRegistryValue)
             || !string.IsNullOrWhiteSpace(CheckFilePath);

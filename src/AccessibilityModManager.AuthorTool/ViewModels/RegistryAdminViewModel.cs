@@ -556,6 +556,34 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             return;
         }
 
+        // Replay-guard discipline (audit finding 19): the manager refuses a registry whose
+        // content changed without a higher registryVersion, so publishing must enforce the bump
+        // HERE — republishing an unchanged-version registry would strand every up-to-date user.
+        string registryVersion;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(RegistryJsonPath));
+            registryVersion = doc.RootElement.GetProperty("registryVersion").GetString()
+                ?? throw new InvalidOperationException("registryVersion is null");
+        }
+        catch (Exception ex)
+        {
+            _showInfoDialog("Can't read registryVersion",
+                $"The registry JSON has no readable registryVersion field:\n\n{ex.Message}");
+            return;
+        }
+
+        var lastPublished = ReadLastPublishedVersion();
+        if (!string.IsNullOrEmpty(lastPublished) &&
+            VersionComparer.Instance.Compare(registryVersion, lastPublished) <= 0)
+        {
+            _showInfoDialog("Version bump needed",
+                $"registryVersion is still {registryVersion}, but {lastPublished} was already published from " +
+                "this machine. Managers refuse a changed registry that doesn't raise its version.\n\n" +
+                "Edit registryVersion in the JSON to a higher value, Save, Sign, and publish again.");
+            return;
+        }
+
         // Tag based on UTC timestamp keeps releases unique without bookkeeping. The manager
         // fetches /releases/latest/download/... so the tag itself is informational; users
         // never see it.
@@ -580,7 +608,9 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
                 _showInfoDialog("Publish failed", result.Combined);
                 return;
             }
-            StatusMessage = $"Published release {tag}. Live for users on next manager refresh.";
+            var markerSaved = WriteLastPublishedVersion(registryVersion);
+            StatusMessage = $"Published release {tag} (registry v{registryVersion}). Live for users on next manager refresh." +
+                (markerSaved ? "" : " Warning: couldn't record the published version locally — remember to bump registryVersion yourself before the next publish.");
         }
         catch (Exception ex)
         {
@@ -590,6 +620,40 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    private static readonly string LastPublishedMarkerPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "AccessibilityModManager.AuthorTool", "registry-last-published.txt");
+
+    private string? ReadLastPublishedVersion()
+    {
+        try
+        {
+            return File.Exists(LastPublishedMarkerPath)
+                ? File.ReadAllText(LastPublishedMarkerPath).Trim()
+                : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't read last-published registry version marker");
+            return null;
+        }
+    }
+
+    private bool WriteLastPublishedVersion(string version)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LastPublishedMarkerPath)!);
+            File.WriteAllText(LastPublishedMarkerPath, version);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't persist last-published registry version marker");
+            return false;
         }
     }
 

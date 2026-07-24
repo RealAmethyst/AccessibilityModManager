@@ -49,7 +49,7 @@ public class EngineIntegrityTests : IDisposable
         var engine = MakeEngine(new HttpClient(new RefuseHandler()));
         var zip = CreateMod("plug-b", "game-x", "1.0.0");
 
-        await engine.InstallAsync(MakeGame("plug-b", withDep: true), MakeRelease("plug-b", "1.0.0"), zip);
+        await engine.InstallAsync(MakeGame("plug-b", withDep: true), MakeRelease("plug-b", "1.0.0", zip), zip);
 
         var receipt = await _depStore.LoadAsync("game-x", "melonloader");
         Assert.NotNull(receipt);
@@ -69,7 +69,7 @@ public class EngineIntegrityTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "missing.dll", target = "mods/missing.dll" } });
 
         await Assert.ThrowsAsync<FileNotFoundException>(() =>
-            engine.InstallAsync(MakeGame("plug-b", withDep: true), MakeRelease("plug-b", "1.0.0"), zip));
+            engine.InstallAsync(MakeGame("plug-b", withDep: true), MakeRelease("plug-b", "1.0.0", zip), zip));
 
         var receipt = await _depStore.LoadAsync("game-x", "melonloader");
         Assert.NotNull(receipt);
@@ -90,7 +90,7 @@ public class EngineIntegrityTests : IDisposable
 
         await Assert.ThrowsAsync<FileNotFoundException>(() =>
             engine.InstallAsync(MakeGame("plug-b", withDep: true, depSha: Sha(depZip)),
-                MakeRelease("plug-b", "1.0.0"), zip, dependencyHost: new AcceptingDepHost()));
+                MakeRelease("plug-b", "1.0.0", zip), zip, dependencyHost: new AcceptingDepHost()));
 
         Assert.Null(await _depStore.LoadAsync("game-x", "melonloader"));
         Assert.False(File.Exists(Path.Combine(_gameDir, "version.dll")),
@@ -110,7 +110,7 @@ public class EngineIntegrityTests : IDisposable
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             engine.InstallAsync(MakeGame("plug-b", withDep: true, depSha: Sha(depZip)),
-                MakeRelease("plug-b", "1.0.0"), zip, dependencyHost: new AcceptingDepHost()));
+                MakeRelease("plug-b", "1.0.0", zip), zip, dependencyHost: new AcceptingDepHost()));
 
         Assert.Contains("still reports", ex.Message);
         // The failed acquisition was released: receipt gone, extracted file rolled back.
@@ -128,10 +128,28 @@ public class EngineIntegrityTests : IDisposable
         var zip = CreateMod("plug-b", "game-x", "9.9.9"); // manifest says 9.9.9
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip));
+            engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip));
 
         Assert.Contains("version mismatch", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "mod.dll")));
+    }
+
+    [Fact]
+    public async Task Install_PackageHashMismatch_EngineRefusesBeforeExtraction()
+    {
+        // Wave 3, finding 17: the hash gate is the ENGINE's, not the caller's — a file swapped
+        // (or wrong) after the UI's own check must be refused right before extraction.
+        var engine = MakeEngine(new HttpClient(new RefuseHandler()));
+        var zip = CreateMod("plug-b", "game-x", "1.0.0");
+        var release = MakeRelease("plug-b", "1.0.0", zip); // hash captured now...
+        await File.AppendAllTextAsync(zip, "tampered");    // ...file changed afterwards
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            engine.InstallAsync(MakeGame("plug-b"), release, zip));
+
+        Assert.Contains("SHA256 mismatch", ex.Message);
+        Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "mod.dll")));
+        Assert.Null(await _receiptStore.LoadAsync("game-x", "plug-b"));
     }
 
     // ---------------------------------------------------------------- finding 29: re-verify path
@@ -150,7 +168,7 @@ public class EngineIntegrityTests : IDisposable
         };
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            engine.InstallAsync(ghost, MakeRelease("plug-b", "1.0.0"), zip));
+            engine.InstallAsync(ghost, MakeRelease("plug-b", "1.0.0", zip), zip));
         Assert.Contains("no longer exists", ex.Message);
     }
 
@@ -163,7 +181,7 @@ public class EngineIntegrityTests : IDisposable
         var host = new BlockingScriptHost();
         var zip = CreateModWithScript("plug-b", "game-x", "1.0.0");
 
-        var installTask = engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip, host);
+        var installTask = engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip, host);
         await host.ConsentRequested.Task; // the install now holds the game lock
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -189,7 +207,7 @@ public class EngineIntegrityTests : IDisposable
         var zip = CreateMod("plug-b", "game-x", "1.0.0",
             files: new[] { ("settings.cfg", "MODDED") },
             actions: new[] { (object)new { type = "replaceFile", source = "settings.cfg", target = "config/settings.cfg" } });
-        var receipt = await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip);
+        var receipt = await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip);
 
         // Sabotage: the backup of the original disappears (disk cleanup, user deletion...).
         Directory.Delete(receipt.BackupFolder, recursive: true);
@@ -215,7 +233,7 @@ public class EngineIntegrityTests : IDisposable
         var zip = CreateMod("plug-b", "game-x", "1.0.0",
             files: new[] { ("settings.cfg", "MODDED") },
             actions: new[] { (object)new { type = "replaceFile", source = "settings.cfg", target = "config/settings.cfg" } });
-        await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip);
+        await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip);
         Assert.True(Directory.Exists(Path.Combine(_gameDir, "modmanager_backups")));
 
         await engine.UninstallAsync(MakeGame("plug-b"), "plug-b");
@@ -234,7 +252,7 @@ public class EngineIntegrityTests : IDisposable
         var host = new AcceptingScriptHost();
 
         var zipV1 = CreateModWithPostUninstall("plug-b", "game-x", "1.0.0");
-        await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zipV1, host);
+        await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zipV1), zipV1, host);
 
         var cachedScript = Path.Combine(
             _receiptStore.GetReceiptDirectory("game-x", "plug-b"), "scripts", "cleanup.cmd");
@@ -244,7 +262,7 @@ public class EngineIntegrityTests : IDisposable
         var zipV2 = CreateModWithPostUninstall("plug-b", "game-x", "1.1.0",
             verify: new[] { (object)new { type = "fileExists", path = "never-there.dll" } });
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            engine.UpdateAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.1.0"), zipV2, host));
+            engine.UpdateAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.1.0", zipV2), zipV2, host));
 
         Assert.True(File.Exists(cachedScript),
             "the failed update must restore the old version's cached post-uninstall script");
@@ -309,7 +327,7 @@ public class EngineIntegrityTests : IDisposable
                 new { type = "copyFile", source = "a.dll", target = "x.dll" },
                 new { type = "copyFile", source = "b.dll", target = "x.dll" }
             });
-        await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip);
+        await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip);
         Assert.Equal("BBB", File.ReadAllText(Path.Combine(_gameDir, "x.dll")));
 
         await engine.UninstallAsync(MakeGame("plug-b"), "plug-b");
@@ -391,7 +409,7 @@ public class EngineIntegrityTests : IDisposable
         var zip = CreateModWithPostUninstall("plug-b", "game-x", "1.0.0",
             files: new[] { ("settings.cfg", "MODDED") },
             actions: new object[] { new { type = "replaceFile", source = "settings.cfg", target = "config/settings.cfg" } });
-        var receipt = await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip, host);
+        var receipt = await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip, host);
 
         // Sabotage rollback so the uninstall fails AFTER the cleanup script ran.
         Directory.Delete(receipt.BackupFolder, recursive: true);
@@ -409,6 +427,40 @@ public class EngineIntegrityTests : IDisposable
     }
 
     [Fact]
+    public async Task Uninstall_LegacyScriptWithoutRecordedHash_IsRefusedButUninstallCompletes()
+    {
+        // Wave 3, finding 18: a cached script from before hash recording can't be proven to be
+        // what the user consented to — it must not run, and must not even prompt.
+        var engine = MakeEngine(new HttpClient(new RefuseHandler()));
+        var host = new AcceptingScriptHost();
+
+        var zip = CreateModWithPostUninstall("plug-b", "game-x", "1.0.0");
+        var receipt = await engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip, host);
+
+        // Simulate a legacy receipt: strip the recorded hash.
+        await _receiptStore.SaveAsync(new InstallReceipt
+        {
+            GameId = receipt.GameId,
+            PluginId = receipt.PluginId,
+            InstalledVersion = receipt.InstalledVersion,
+            InstalledAt = receipt.InstalledAt,
+            Changes = receipt.Changes,
+            BackupFolder = receipt.BackupFolder,
+            ManifestHash = receipt.ManifestHash,
+            CachedPostUninstallExecutable = receipt.CachedPostUninstallExecutable,
+            CachedPostUninstallSha256 = null,
+            PostUninstall = receipt.PostUninstall,
+            ScriptsFingerprint = receipt.ScriptsFingerprint
+        });
+
+        await engine.UninstallAsync(MakeGame("plug-b"), "plug-b", host);
+
+        Assert.Equal(0, host.UninstallConfirmCount);
+        Assert.DoesNotContain("Post-uninstall", host.StartingHooks);
+        Assert.Null(await _receiptStore.LoadAsync("game-x", "plug-b"));
+    }
+
+    [Fact]
     public async Task Install_CorruptDependencyReceipt_FailsClosedBeforeAnyMutation()
     {
         _depStore.Unreadable = true;
@@ -416,7 +468,7 @@ public class EngineIntegrityTests : IDisposable
         var zip = CreateMod("plug-b", "game-x", "1.0.0");
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0"), zip));
+            engine.InstallAsync(MakeGame("plug-b"), MakeRelease("plug-b", "1.0.0", zip), zip));
 
         Assert.Contains("could not be read", ex.Message);
         Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "mod.dll")));
@@ -469,14 +521,14 @@ public class EngineIntegrityTests : IDisposable
         };
     }
 
-    private static ModRelease MakeRelease(string pluginId, string version) => new()
+    private static ModRelease MakeRelease(string pluginId, string version, string zipPath) => new()
     {
         GameId = "game-x",
         PluginId = pluginId,
         Version = version,
         Channel = "stable",
         PackageUrl = new Uri("https://example.com/pkg.zip"),
-        Sha256 = "00"
+        Sha256 = Sha(zipPath)
     };
 
     private static Dependency MakeDep(string sha) => new()

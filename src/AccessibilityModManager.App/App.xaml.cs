@@ -64,20 +64,15 @@ public partial class App : Application
         // Infrastructure — services
         services.AddSingleton<IConfigService, ConfigService>();
 
-        // Registry signature verification (RSA-PSS/SHA256)
-        // TODO: Set your real RSA public key PEM to enable signature verification.
-        // Generate key pair:  openssl genrsa -out registry-private.pem 4096
-        // Extract public key: openssl rsa -in registry-private.pem -pubout -out registry-public.pem
-        // Sign registry:      openssl dgst -sha256 -sigopt rsa_padding_mode:pss -sign registry-private.pem registry.json | base64 > registry.json.sig
-        // Replace with your PEM string to enable signature verification
-        var registryPublicKeyPem = GetRegistryPublicKey();
-        if (registryPublicKeyPem != null)
-            services.AddSingleton(new RegistrySignatureVerifier(registryPublicKeyPem, logger));
+        // Registry signature verification (RSA-PSS/SHA256). The verifier is REQUIRED — the
+        // registry is the trust anchor, and both the verifier and the client refuse to exist
+        // without a key, so a wiring mistake can never silently accept unsigned registries.
+        services.AddSingleton(new RegistrySignatureVerifier(GetRegistryPublicKey(), logger));
 
         services.AddSingleton<IPluginRegistryClient>(sp => new PluginRegistryClient(
             sp.GetRequiredService<HttpClient>(),
             sp.GetRequiredService<ILogger>(),
-            sp.GetService<RegistrySignatureVerifier>()));
+            sp.GetRequiredService<RegistrySignatureVerifier>()));
         services.AddSingleton<UpdateChecker>();
         services.AddSingleton<IPluginRepoClient, PluginRepoClient>();
         services.AddSingleton<IReceiptStore, ReceiptStore>();
@@ -328,7 +323,7 @@ public partial class App : Application
     /// matching .sig file is published alongside plugin-registry.json on each release.
     /// Public keys are safe to commit — only the private key is sensitive.
     /// </summary>
-    private static string? GetRegistryPublicKey() =>
+    private static string GetRegistryPublicKey() =>
         """
         -----BEGIN PUBLIC KEY-----
         MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvPTABidJcBN5V4kWommo

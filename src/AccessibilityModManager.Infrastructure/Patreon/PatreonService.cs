@@ -193,31 +193,6 @@ public sealed class PatreonService
     }
 
     /// <summary>
-    /// Look up the attachment metadata for a gated release without downloading it. Returns
-    /// the chosen attachment (filename + tier ids + maybe a URL) or null if the API didn't
-    /// list any attachments. Used by the install flow to decide upfront whether the API can
-    /// give us a download URL — when <see cref="PatreonPostAttachment.DownloadUrl"/> is null
-    /// even for an entitled patron, we degrade to a manual "open post in browser, pick the
-    /// file" flow because Patreon's current API doesn't return signed URLs to anyone for
-    /// post attachments.
-    /// </summary>
-    public async Task<PatreonPostAttachment?> TryResolveAttachmentAsync(
-        PatreonGate gate, CancellationToken ct)
-    {
-        if (_currentAccount == null) return null;
-        if (string.IsNullOrEmpty(gate.PostId)) return null;
-        await EnsureFreshTokenAsync(ct);
-        var attachments = await _client.FetchPostAttachmentsAsync(_currentAccount, gate.PostId, ct);
-        if (attachments.Count == 0) return null;
-        if (!string.IsNullOrEmpty(gate.AttachmentFileName))
-        {
-            return attachments.FirstOrDefault(a =>
-                string.Equals(a.FileName, gate.AttachmentFileName, StringComparison.OrdinalIgnoreCase));
-        }
-        return attachments[0];
-    }
-
-    /// <summary>
     /// Download a gated release from the author's own download server, passing the user's
     /// Patreon access token in <c>Authorization: Bearer ...</c>. The server validates the
     /// token against Patreon's API and only serves the file if the user is currently
@@ -278,52 +253,11 @@ public sealed class PatreonService
         }
     }
 
-    /// <summary>
-    /// Fetch the Patreon-hosted attachment for a gated release and stream it to disk. When
-    /// the gate names a specific <see cref="PatreonGate.AttachmentFileName"/>, that file is
-    /// picked out of the post's attachment list (supports "one post per game, many files");
-    /// otherwise the first attachment is used (back-compat with one-post-per-release).
-    /// </summary>
-    public async Task DownloadGatedReleaseAsync(
-        PatreonGate gate, string destPath,
-        IProgress<ProgressInfo>? progress, CancellationToken ct)
-    {
-        if (_currentAccount == null)
-            throw new InvalidOperationException("Not signed in to Patreon — can't download gated release.");
-        if (string.IsNullOrEmpty(gate.PostId))
-            throw new InvalidOperationException(
-                "This release has no Patreon post id, so the Patreon-API download path doesn't apply. " +
-                "It should be served from the author's download server instead.");
-
-        await EnsureFreshTokenAsync(ct);
-
-        var attachments = await _client.FetchPostAttachmentsAsync(_currentAccount, gate.PostId, ct);
-        if (attachments.Count == 0)
-            throw new InvalidOperationException(
-                $"Couldn't find any attachments on Patreon post {gate.PostId} — was the file removed or the post unpublished?");
-
-        PatreonPostAttachment chosen;
-        if (!string.IsNullOrEmpty(gate.AttachmentFileName))
-        {
-            chosen = attachments.FirstOrDefault(a =>
-                string.Equals(a.FileName, gate.AttachmentFileName, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException(
-                    $"Patreon post {gate.PostId} has no attachment named '{gate.AttachmentFileName}'. " +
-                    "The author may have removed or renamed it.");
-        }
-        else
-        {
-            chosen = attachments[0];
-        }
-
-        if (chosen.DownloadUrl is null)
-            throw new InvalidOperationException(
-                $"Patreon returned attachment metadata for '{chosen.FileName}' on post {gate.PostId} but no download URL. " +
-                "This usually means the signed-in account isn't entitled to the post's tier (or sign-in expired). " +
-                "Sign in again and re-check your Patreon membership.");
-
-        await _client.DownloadAttachmentAsync(_currentAccount, chosen.DownloadUrl, destPath, progress, ct);
-    }
+    // The old "auto-download straight from Patreon's CDN" path (TryResolveAttachmentAsync +
+    // DownloadGatedReleaseAsync) was removed in the round-2 audit: Amethyst doesn't distribute
+    // files through Patreon's site any more, and the path attached the user's bearer token to
+    // API-supplied URLs without a host check. Gated installs now use the creator file picker,
+    // the author's download server, or the manual browser-download flow.
 
     private async Task EnsureFreshTokenAsync(CancellationToken ct)
     {

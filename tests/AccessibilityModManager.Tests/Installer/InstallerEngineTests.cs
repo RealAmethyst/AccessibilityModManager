@@ -67,7 +67,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mods/mod.dll", "modbytes") },
             actions: new[] { (object)new { type = "copyFile", source = "mods/mod.dll", target = "mods/mod.dll" } });
 
-        var receipt = await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        var receipt = await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
 
         Assert.Equal("plug-a", receipt.PluginId);
         Assert.Equal("game-1", receipt.GameId);
@@ -86,7 +86,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "a.txt", target = "a.txt" } });
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip));
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "a.txt", target = "a.txt" } });
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip));
     }
 
     [Fact]
@@ -107,14 +107,14 @@ public class InstallerEngineTests : IDisposable
         var zip = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("a.txt", "x") },
             actions: new[] { (object)new { type = "copyFile", source = "a.txt", target = "a.txt" } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
 
         // Second install of the same plugin should refuse
         var zip2 = CreateMod("plug-a", "game-1", "1.1.0",
             files: new[] { ("a.txt", "y") },
             actions: new[] { (object)new { type = "copyFile", source = "a.txt", target = "a.txt" } });
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0"), zip2));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0", zip2), zip2));
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public class InstallerEngineTests : IDisposable
         var zipA = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("shared.dll", "a") },
             actions: new[] { (object)new { type = "copyFile", source = "shared.dll", target = "shared.dll" } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zipA);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zipA), zipA);
 
         // plug-b tries to touch the same file
         var zipB = CreateMod("plug-b", "game-1", "1.0.0",
@@ -132,7 +132,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "shared.dll", target = "shared.dll" } });
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-b"), MakeRelease("plug-b", "game-1", "1.0.0"), zipB));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-b"), MakeRelease("plug-b", "game-1", "1.0.0", zipB), zipB));
         Assert.Contains("conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -143,7 +143,7 @@ public class InstallerEngineTests : IDisposable
         var zipA = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("shared.dll", "a") },
             actions: new[] { (object)new { type = "copyFile", source = "shared.dll", target = "libs/shared.dll" } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zipA);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zipA), zipA);
 
         // plug-b writes the SAME game file via copyFolder — previously slipped past collision
         // detection entirely (copyFolder targets weren't enumerated).
@@ -152,7 +152,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFolder", sourceDir = "payload", targetDir = "libs" } });
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-b"), MakeRelease("plug-b", "game-1", "1.0.0"), zipB));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-b"), MakeRelease("plug-b", "game-1", "1.0.0", zipB), zipB));
         Assert.Contains("conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -171,7 +171,7 @@ public class InstallerEngineTests : IDisposable
             });
 
         await Assert.ThrowsAsync<FileNotFoundException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip));
 
         Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "good.dll")));
         Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
@@ -183,7 +183,7 @@ public class InstallerEngineTests : IDisposable
         var zip = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("mods/added.dll", "x") },
             actions: new[] { (object)new { type = "copyFile", source = "mods/added.dll", target = "mods/added.dll" } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
         Assert.True(File.Exists(Path.Combine(_gameDir, "mods", "added.dll")));
 
         await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a");
@@ -219,7 +219,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("Mods/mod.dll", "modbytes") },
             actions: new[] { (object)new { type = "copyFile", source = "Mods/mod.dll", target = "Mods/mod.dll" } });
 
-        await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
         Assert.True(File.Exists(Path.Combine(junction, "Mods", "mod.dll")));
         Assert.True(File.Exists(precious));
 
@@ -242,7 +242,7 @@ public class InstallerEngineTests : IDisposable
         var zip = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("settings.cfg", "MODDED") },
             actions: new[] { (object)new { type = "replaceFile", source = "settings.cfg", target = "config/settings.cfg", backup = true } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
         Assert.Equal("MODDED", File.ReadAllText(Path.Combine(_gameDir, "config", "settings.cfg")));
 
         await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a");
@@ -261,7 +261,7 @@ public class InstallerEngineTests : IDisposable
         var zip = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("settings.cfg", "MODDED") },
             actions: new[] { (object)new { type = "replaceFile", source = "settings.cfg", target = "config/settings.cfg", backup = false } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
         Assert.Equal("MODDED", File.ReadAllText(Path.Combine(_gameDir, "config", "settings.cfg")));
 
         await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a");
@@ -276,7 +276,7 @@ public class InstallerEngineTests : IDisposable
         var zip1 = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("mod.dll", "V1") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip1);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip1), zip1);
         Assert.Equal("V1", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
 
         // v2 fails post-install verification, so the update must roll the game back to v1 rather than
@@ -287,7 +287,7 @@ public class InstallerEngineTests : IDisposable
             verify: new[] { (object)new { type = "fileExists", path = "should-not-exist.dll" } });
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0"), zip2));
+            _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0", zip2), zip2));
 
         // Previous version restored: file content back to V1 and the v1 receipt is present again.
         Assert.Equal("V1", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
@@ -307,7 +307,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mod.dll", "v1") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
         Assert.Equal(1, host.InstallConfirmCount);
 
         // v2's pre-install script has DIFFERENT contents — the user must be re-warned.
@@ -317,7 +317,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mod.dll", "v2") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
         await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
 
         Assert.Equal(2, host.InstallConfirmCount);
     }
@@ -335,7 +335,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mod.dll", "v1") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
 
         var zipV2 = CreateModWithScripts("plug-a", "game-1", "1.1.0",
             preInstall: null, postInstall: null,
@@ -343,7 +343,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mod.dll", "v2") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
         await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
 
         Assert.DoesNotContain("Post-uninstall", host.StartingHooks);
         Assert.Equal("v2", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
@@ -359,7 +359,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
 
         var gi = MakeGameInstall("game-tamper", "plug-tamper");
-        await _engine.InstallAsync(gi, MakeRelease("plug-tamper", "game-tamper", "1.0.0"), zip,
+        await _engine.InstallAsync(gi, MakeRelease("plug-tamper", "game-tamper", "1.0.0", zip), zip,
             new RecordingScriptHost { ConfirmInstallResult = true });
 
         // Swap the cached post-uninstall script on disk for a different one.
@@ -382,12 +382,12 @@ public class InstallerEngineTests : IDisposable
         var zip1 = CreateMod("plug-a", "game-1", "1.0.0",
             files: new[] { ("mod.dll", "v1") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
-        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip1);
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip1), zip1);
 
         var zip2 = CreateMod("plug-a", "game-1", "1.1.0",
             files: new[] { ("mod.dll", "v2") },
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
-        var receipt = await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0"), zip2);
+        var receipt = await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.1.0", zip2), zip2);
 
         Assert.Equal("1.1.0", receipt.InstalledVersion);
         Assert.Equal("v2", File.ReadAllText(Path.Combine(_gameDir, "mod.dll")));
@@ -403,7 +403,7 @@ public class InstallerEngineTests : IDisposable
             verify: new[] { (object)new { type = "fileExists", path = "should-not-exist.dll" } });
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zip));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zip), zip));
 
         // Rollback should have removed the added file and not saved a receipt
         Assert.False(File.Exists(Path.Combine(_gameDir, "mod.dll")));
@@ -441,7 +441,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "mods/added.dll", target = "mods/added.dll" } });
 
         await Assert.ThrowsAsync<MissingRequiredDependencyException>(() =>
-            _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0"), zip));
+            _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0", zip), zip));
 
         // No file should have been written, no receipt stored.
         Assert.False(File.Exists(Path.Combine(_gameDir, "mods", "added.dll")));
@@ -486,7 +486,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mods/added.dll", "x") },
             actions: new[] { (object)new { type = "copyFile", source = "mods/added.dll", target = "mods/added.dll" } });
 
-        var receipt = await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        var receipt = await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
 
         Assert.Equal("1.0.0", receipt.InstalledVersion);
         Assert.True(File.Exists(Path.Combine(_gameDir, "mods", "added.dll")));
@@ -521,7 +521,7 @@ public class InstallerEngineTests : IDisposable
             files: new[] { ("mods/added.dll", "x") },
             actions: new[] { (object)new { type = "copyFile", source = "mods/added.dll", target = "mods/added.dll" } });
 
-        var receipt = await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0"), zip);
+        var receipt = await _engine.InstallAsync(gameInstall, MakeRelease("plug-a", "game-1", "1.0.0", zip), zip);
         Assert.Equal("1.0.0", receipt.InstalledVersion);
     }
 
@@ -539,7 +539,7 @@ public class InstallerEngineTests : IDisposable
         var host = new RecordingScriptHost { ConfirmInstallResult = true };
         var receipt = await _engine.InstallAsync(
             MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zip, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zip), zip, host);
 
         Assert.Equal(1, host.InstallConfirmCount);
         Assert.Equal(2, host.StartingHooks.Count); // pre-install + post-install
@@ -563,7 +563,7 @@ public class InstallerEngineTests : IDisposable
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-                MakeRelease("plug-a", "game-1", "1.0.0"), zip, host));
+                MakeRelease("plug-a", "game-1", "1.0.0", zip), zip, host));
 
         Assert.Empty(host.StartingHooks); // no script was run
         Assert.False(File.Exists(Path.Combine(_gameDir, "mod.dll")));
@@ -587,7 +587,7 @@ public class InstallerEngineTests : IDisposable
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-                MakeRelease("plug-a", "game-1", "1.0.0"), zip, host));
+                MakeRelease("plug-a", "game-1", "1.0.0", zip), zip, host));
 
         Assert.False(File.Exists(Path.Combine(_gameDir, "mod.dll")));
         Assert.Null(await _receiptStore.LoadAsync("game-1", "plug-a"));
@@ -608,7 +608,7 @@ public class InstallerEngineTests : IDisposable
 
         var installHost = new RecordingScriptHost { ConfirmInstallResult = true };
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zip, installHost);
+            MakeRelease("plug-a", "game-1", "1.0.0", zip), zip, installHost);
 
         var uninstallHost = new RecordingScriptHost { ConfirmUninstallResult = true };
         await _engine.UninstallAsync(MakeGameInstall("game-1", "plug-a"), "plug-a", uninstallHost);
@@ -634,7 +634,7 @@ public class InstallerEngineTests : IDisposable
 
         var host = new RecordingScriptHost { ConfirmInstallResult = true };
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
         Assert.Equal(1, host.InstallConfirmCount);
 
         var zipV2 = CreateModWithScripts(
@@ -646,7 +646,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
 
         await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
 
         // Still only one install-confirm — the update path skipped re-asking.
         Assert.Equal(1, host.InstallConfirmCount);
@@ -667,7 +667,7 @@ public class InstallerEngineTests : IDisposable
 
         var host = new RecordingScriptHost { ConfirmInstallResult = true };
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
         var hooksAfterInstall = host.StartingHooks.Count(h => h == "Pre-install");
         Assert.Equal(1, hooksAfterInstall);
 
@@ -680,7 +680,7 @@ public class InstallerEngineTests : IDisposable
             actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } });
 
         await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
 
         // Still only the original first-install pre-install run — update path didn't fire it.
         Assert.Equal(1, host.StartingHooks.Count(h => h == "Pre-install"));
@@ -701,7 +701,7 @@ public class InstallerEngineTests : IDisposable
 
         var host = new RecordingScriptHost { ConfirmInstallResult = true };
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zipV1, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
 
         var zipV2 = CreateModWithScripts(
             "plug-a", "game-1", "1.1.0",
@@ -713,7 +713,7 @@ public class InstallerEngineTests : IDisposable
             preInstallRunOnUpdate: true);
 
         await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.1.0"), zipV2, host);
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
 
         // Both install and update fired the pre-install hook.
         Assert.Equal(2, host.StartingHooks.Count(h => h == "Pre-install"));
@@ -742,7 +742,7 @@ public class InstallerEngineTests : IDisposable
 
         var host = new RecordingScriptHost { ConfirmInstallResult = true };
         await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
-            MakeRelease("plug-a", "game-1", "1.0.0"), zip, host);
+            MakeRelease("plug-a", "game-1", "1.0.0", zip), zip, host);
 
         // Marker must exist in the game folder, proving the script's CWD was the game folder.
         var markerPath = Path.Combine(_gameDir, markerName);
@@ -769,7 +769,7 @@ public class InstallerEngineTests : IDisposable
         }
 
         await Assert.ThrowsAsync<FileNotFoundException>(() =>
-            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0"), zipPath));
+            _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"), MakeRelease("plug-a", "game-1", "1.0.0", zipPath), zipPath));
     }
 
     private GameInstall MakeGameInstall(string gameId, string pluginId) =>
@@ -781,7 +781,7 @@ public class InstallerEngineTests : IDisposable
             IsValid = true
         };
 
-    private static ModRelease MakeRelease(string pluginId, string gameId, string version) =>
+    private static ModRelease MakeRelease(string pluginId, string gameId, string version, string zipPath) =>
         new()
         {
             GameId = gameId,
@@ -789,8 +789,14 @@ public class InstallerEngineTests : IDisposable
             Version = version,
             Channel = "stable",
             PackageUrl = new Uri("https://example.com/pkg.zip"),
-            Sha256 = "00"
+            Sha256 = ComputeZipSha(zipPath)
         };
+
+    private static string ComputeZipSha(string zipPath)
+    {
+        using var fs = File.OpenRead(zipPath);
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(fs));
+    }
 
     /// <summary>
     /// Creates a mod ZIP with manifest.json + files/ folder. <paramref name="files"/> are placed under files/.

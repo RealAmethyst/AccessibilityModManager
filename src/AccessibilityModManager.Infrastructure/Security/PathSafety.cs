@@ -137,6 +137,28 @@ public static class PathSafety
     }
 
     /// <summary>
+    /// Validates that an identifier (plugin id, game id, dependency id) is one safe path segment:
+    /// letters, digits, dash, dot, underscore — nothing that becomes a separator, a root, or a
+    /// traversal when the id is used as a folder name. Ids come from unsigned indexes and the
+    /// signed registry alike; values like <c>author\plugin</c> would nest folders the receipt
+    /// enumeration then misreads. Returns the trimmed id; throws with a clear message otherwise.
+    /// </summary>
+    public static string EnsureSafeId(string? value, string description)
+    {
+        // Deliberately NO trimming: callers persist the original value, so a padded id that
+        // "passes after trim" would still reach dictionaries and folder names with whitespace
+        // in it. Whitespace fails the charset check like any other unsafe character.
+        if (string.IsNullOrEmpty(value) || value == "." || value == ".." ||
+            !value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.' or '_'))
+        {
+            throw new InvalidOperationException(
+                $"{description} '{value}' must use only letters, digits, dashes, dots, and underscores " +
+                "(no spaces).");
+        }
+        return value;
+    }
+
+    /// <summary>
     /// Non-throwing <see cref="NormalizeRelativeDir"/>. False (with the original value echoed back)
     /// when the value is absolute or contains traversal — callers that can't surface an exception
     /// keep the raw value and let the manager-side check produce the error.

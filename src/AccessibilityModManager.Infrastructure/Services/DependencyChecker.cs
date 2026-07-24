@@ -56,25 +56,21 @@ public sealed class DependencyChecker : IDependencyChecker
         return Task.FromResult(results);
     }
 
-    public Task FixAsync(Dependency dep, CancellationToken ct = default)
+    public Task<bool> FixAsync(Dependency dep, CancellationToken ct = default)
     {
         _logger.Information("Fixing dependency {DepId}", dep.Id);
 
-        if (!string.IsNullOrEmpty(dep.Fix?.DownloadUrl))
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = dep.Fix.DownloadUrl,
-                UseShellExecute = true
-            });
-            _logger.Information("Opened download URL for {DepId}: {Url}", dep.Id, dep.Fix.DownloadUrl);
-        }
-        else
+        if (string.IsNullOrEmpty(dep.Fix?.DownloadUrl))
         {
             _logger.Warning("No fix URL available for dependency {DepId}", dep.Id);
+            return Task.FromResult(false);
         }
 
-        return Task.CompletedTask;
+        // The URL comes from the unsigned plugin index — same rule as every other author link:
+        // only ever hand https URLs to the shell, never file:/custom-scheme values that could
+        // trigger local actions (the one spot the 1.12.1 link sweep missed).
+        var opened = ExternalLink.TryOpen(dep.Fix.DownloadUrl, _logger);
+        return Task.FromResult(opened);
     }
 
     private DependencyStatus CheckSystemDependency(Dependency dep)

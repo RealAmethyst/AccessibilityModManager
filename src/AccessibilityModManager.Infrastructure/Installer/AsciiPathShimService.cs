@@ -25,11 +25,20 @@ public sealed class AsciiPathShimService : IAsciiPathShimService
 
     public string GetJunctionPath(AsciiPathShim shim, string realInstallPath)
     {
+        // The junction name comes from the unsigned plugin index. A rooted or
+        // separator-containing value would make Path.Combine discard the drive root and aim the
+        // junction anywhere — require a single ASCII folder name (ASCII being the shim's entire
+        // reason to exist).
+        var name = Security.PathSafety.EnsureLeafFileName(shim.JunctionName, "AsciiPathShim junction name");
+        if (name.Any(c => c > 127))
+            throw new InvalidOperationException(
+                $"AsciiPathShim junction name '{name}' must contain only ASCII characters.");
+
         var root = Path.GetPathRoot(Path.GetFullPath(realInstallPath));
         if (string.IsNullOrEmpty(root))
             throw new InvalidOperationException(
                 $"Can't determine the drive of '{realInstallPath}' to place the ASCII junction.");
-        return Path.Combine(root, shim.JunctionName);
+        return Path.Combine(root, name);
     }
 
     public bool JunctionPathExists(string junctionPath) => Directory.Exists(junctionPath);

@@ -5,6 +5,7 @@ using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Installer;
 using AccessibilityModManager.Infrastructure.Patreon;
+using AccessibilityModManager.Infrastructure.Security;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
@@ -290,7 +291,8 @@ public partial class GameDetailsViewModel : ObservableObject
                 var depStatuses = await _dependencyChecker.CheckAsync(_gameInstall);
                 foreach (var ds in depStatuses)
                 {
-                    Dependencies.Add(new DependencyItemViewModel(ds, _dependencyChecker, _logger));
+                    Dependencies.Add(new DependencyItemViewModel(ds, _dependencyChecker, _logger,
+                        msg => StatusMessage = msg));
                 }
             }
 
@@ -763,16 +765,17 @@ public partial class GameDetailsViewModel : ObservableObject
         if (!await EnsureInstallPathReadyAsync(ct))
             return;
 
-        // Patreon-gated pre-flight. The path divides four ways:
+        // Patreon-gated pre-flight. The path divides three ways (the old "auto-download from
+        // Patreon's CDN" leg was removed in the round-2 audit — Amethyst doesn't use Patreon's
+        // site directly for files any more, and it attached the bearer token to API-supplied
+        // URLs without a host check):
         // 1. Creator of the campaign — API refuses to return a download URL for own posts;
         //    file picker (creator's own local copy).
         // 2. Patron + author has a download server (Patreon.ServerUrl set) — manager streams
         //    from the author's server with the patron's bearer token; the server validates
         //    entitlement against Patreon API and serves the file. The clean happy path.
-        // 3. Patron + no server URL but Patreon API still returns a download URL — legacy
-        //    auto-download from Patreon's CDN. Largely dead in practice but still possible.
-        // 4. Patron + no server URL + no API URL — file picker fallback (open the post in
-        //    their browser, ask them to grab the file manually).
+        // 3. Patron + no server URL — manual path: open the post in their browser, ask them
+        //    to grab the file, then pick it (SHA256 still gates correctness).
         string? localFilePath = null;
         var useAuthorServer = false;
         if (release.Patreon != null)
@@ -796,29 +799,18 @@ public partial class GameDetailsViewModel : ObservableObject
                     return;
                 }
 
-                if (!string.IsNullOrEmpty(release.Patreon.ServerUrl))
+                if (!string.IsNullOrWhiteSpace(release.Patreon.ServerUrl))
                 {
                     // Author hosts the file themselves; manager will stream from there with
-                    // the patron's bearer token. Skip the Patreon-API attachment probe — the
-                    // author's server does its own entitlement check via Patreon's API.
+                    // the patron's bearer token. The author's server does its own entitlement
+                    // check via Patreon's API. Whitespace counts as absent — the fetch-time
+                    // validation treats it that way, and routing must agree.
                     useAuthorServer = true;
                 }
                 else
                 {
-                    // Probe the Patreon API: does it have a download URL for us, or do we
-                    // need a manual download path? Check happens before the progress dialog
-                    // so we can talk to the user without dialog-stacking weirdness.
-                    try
-                    {
-                        var attachment = await _patreon.TryResolveAttachmentAsync(release.Patreon, ct);
-                        if (attachment is null || attachment.DownloadUrl is null)
-                            needFilePicker = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.Warning(ex, "Patreon attachment probe failed; falling back to manual download");
-                        needFilePicker = true;
-                    }
+                    // No author server: the manual browser-download path is the only one left.
+                    needFilePicker = true;
                 }
             }
 
@@ -827,27 +819,24 @@ public partial class GameDetailsViewModel : ObservableObject
                 if (!isCreator)
                 {
                     // Open the post in the patron's browser so they can grab the file from
-                    // Patreon's web UI — that's the only path that actually works while the
-                    // public API doesn't return signed URLs.
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName = $"https://www.patreon.com/posts/{release.Patreon.PostId}",
-                            UseShellExecute = true
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.Warning(ex, "Couldn't open Patreon post in browser");
-                    }
+                    // Patreon's web UI — and be HONEST about whether that worked. Telling a
+                    // blind user "we've opened the post" when the browser never launched leaves
+                    // them stranded in a file picker with nothing to pick.
+                    var postUrl = $"https://www.patreon.com/posts/{release.Patreon.PostId}";
+                    var browserOpened = ExternalLink.TryOpen(postUrl, _logger);
 
                     var fileName = release.Patreon.AttachmentFileName ?? "the wrapped ZIP";
                     _showInfoDialog(
                         "Manual download needed",
-                        $"Patreon's current API doesn't hand out direct download links for tier-locked posts.\n\n" +
-                        $"We've opened the post in your browser. Download '{fileName}' from there, then pick it in the next dialog. " +
-                        $"The manager verifies the SHA256 to make sure it's the right file before installing.");
+                        browserOpened
+                            ? $"Patreon doesn't hand out direct download links for tier-locked posts.\n\n" +
+                              $"We've opened the post in your browser. Download '{fileName}' from there, then pick it in the next dialog. " +
+                              $"The manager verifies the SHA256 to make sure it's the right file before installing."
+                            : $"Patreon doesn't hand out direct download links for tier-locked posts, and the post " +
+                              $"couldn't be opened in your browser automatically.\n\n" +
+                              $"Open this address yourself: {postUrl}\n\n" +
+                              $"Download '{fileName}' from there, then pick it in the next dialog. " +
+                              $"The manager verifies the SHA256 to make sure it's the right file before installing.");
                 }
 
                 var suggested = release.Patreon.AttachmentFileName ?? $"{release.PluginId}-{release.Version}.zip";
@@ -904,17 +893,10 @@ public partial class GameDetailsViewModel : ObservableObject
                             release.Patreon.ServerUrl!, tempZip, progress, innerCt);
                         downloadedFile = tempZip;
                     }
-                    else if (release.Patreon != null)
-                    {
-                        // Legacy auto-download path: only reached when the entitlement
-                        // re-check still passes AND the probe found a real DownloadUrl.
-                        // Stays alive in case Patreon ever exposes post attachments via
-                        // the API again.
-                        await _patreon.DownloadGatedReleaseAsync(release.Patreon, tempZip, progress, innerCt);
-                        downloadedFile = tempZip;
-                    }
                     else
                     {
+                        // Every gated case was resolved above (creator picker, author server,
+                        // or manual pick) — reaching here means a plain public release.
                         downloadedFile = await _repoClient.DownloadPackageAsync(
                             release.PackageUrl!, tempZip, progress, innerCt);
                     }
@@ -1093,7 +1075,8 @@ public partial class GameDetailsViewModel : ObservableObject
                 var depStatuses = await _dependencyChecker.CheckAsync(_gameInstall, ct);
                 foreach (var ds in depStatuses)
                 {
-                    Dependencies.Add(new DependencyItemViewModel(ds, _dependencyChecker, _logger));
+                    Dependencies.Add(new DependencyItemViewModel(ds, _dependencyChecker, _logger,
+                        msg => StatusMessage = msg));
                 }
             }
 
@@ -1228,6 +1211,7 @@ public partial class DependencyItemViewModel : ObservableObject
 {
     private readonly IDependencyChecker _checker;
     private readonly ILogger _logger;
+    private readonly Action<string>? _reportStatus;
 
     public DependencyStatus Status { get; }
     public string Name => Status.Dependency.Id;
@@ -1250,11 +1234,14 @@ public partial class DependencyItemViewModel : ObservableObject
     /// </summary>
     public string AnnouncementText => $"{Name}, {StatusText}";
 
-    public DependencyItemViewModel(DependencyStatus status, IDependencyChecker checker, ILogger logger)
+    public DependencyItemViewModel(
+        DependencyStatus status, IDependencyChecker checker, ILogger logger,
+        Action<string>? reportStatus = null)
     {
         Status = status;
         _checker = checker;
         _logger = logger;
+        _reportStatus = reportStatus;
     }
 
     public override string ToString() => AnnouncementText;
@@ -1264,11 +1251,16 @@ public partial class DependencyItemViewModel : ObservableObject
     {
         try
         {
-            await _checker.FixAsync(Status.Dependency, ct);
+            var opened = await _checker.FixAsync(Status.Dependency, ct);
+            _reportStatus?.Invoke(opened
+                ? $"Opened the download page for {Name} in your browser."
+                : $"Couldn't open a download page for {Name} — it may have no safe https link, or no browser responded. " +
+                  "Check the mod's page for install instructions.");
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to fix dependency {DepId}", Name);
+            _reportStatus?.Invoke($"Couldn't open the download page for {Name}: {ex.Message}");
         }
     }
 }

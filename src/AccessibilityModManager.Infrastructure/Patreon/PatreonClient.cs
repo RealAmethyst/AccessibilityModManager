@@ -198,35 +198,7 @@ public sealed class PatreonClient
     }
 
     /// <summary>
-    /// Manager path: fetch a tier-locked Patreon post and pull out the FIRST attachment's
-    /// download URL + tier requirements. Returns null when the post can't be read (404, not
-    /// entitled, no attachment found). Use <see cref="FetchPostAttachmentsAsync"/> when the
-    /// post may have multiple attachments and you need to pick by name.
-    /// </summary>
-    public async Task<PatreonPostAttachment?> FetchPostAttachmentAsync(
-        PatreonAccount account, string postId, CancellationToken ct)
-    {
-        var attachments = await FetchPostAttachmentsAsync(account, postId, ct);
-        return attachments.Count == 0 ? null : attachments[0];
-    }
-
-    /// <summary>
-    /// Manager / AuthorTool path: fetch ALL attachments on a Patreon post. Used for the
-    /// "one post per game, many files" pattern where the manager filters by filename and the
-    /// AuthorTool renders a dropdown so the author can pick which file corresponds to a
-    /// release. Returns an empty list when the post can't be read or has no attachments.
-    /// The order matches Patreon's <c>included</c> array, which is the upload order shown
-    /// to the user on patreon.com.
-    /// </summary>
-    public async Task<IReadOnlyList<PatreonPostAttachment>> FetchPostAttachmentsAsync(
-        PatreonAccount account, string postId, CancellationToken ct)
-    {
-        var (attachments, _) = await FetchPostAttachmentsWithRawAsync(account, postId, ct);
-        return attachments;
-    }
-
-    /// <summary>
-    /// Variant of <see cref="FetchPostAttachmentsAsync"/> that also returns the raw response
+    /// AuthorTool path: fetch ALL attachments on a Patreon post, plus the raw response
     /// JSON so callers can show diagnostic info when parsing finds zero attachments — useful
     /// while we're still figuring out which include parameter Patreon's v2 API expects.
     /// </summary>
@@ -244,43 +216,6 @@ public sealed class PatreonClient
         var json = await GetJsonAsync(account, url, ct);
         var parsed = ParsePostAttachments(json, postId);
         return (parsed, json);
-    }
-
-    /// <summary>
-    /// Stream a Patreon-hosted attachment to disk with the user's bearer token. Reports
-    /// progress as bytes downloaded / total bytes.
-    /// </summary>
-    public async Task DownloadAttachmentAsync(
-        PatreonAccount account, Uri attachmentUrl, string destPath,
-        IProgress<ProgressInfo>? progress, CancellationToken ct)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Get, attachmentUrl);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", account.AccessToken);
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        resp.EnsureSuccessStatusCode();
-
-        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-        var total = resp.Content.Headers.ContentLength;
-        long downloaded = 0;
-
-        await using var dest = File.Create(destPath);
-        await using var src = await resp.Content.ReadAsStreamAsync(ct);
-        var buffer = new byte[81920];
-        int n;
-        while ((n = await src.ReadAsync(buffer, ct)) > 0)
-        {
-            await dest.WriteAsync(buffer.AsMemory(0, n), ct);
-            downloaded += n;
-            if (progress != null && total is > 0)
-            {
-                progress.Report(new ProgressInfo
-                {
-                    Percentage = (double)downloaded / total.Value * 100,
-                    StatusText = $"Downloading from Patreon... {downloaded / 1024:N0} / {total.Value / 1024:N0} KB",
-                    StepDescription = "Downloading package"
-                });
-            }
-        }
     }
 
     // -------- Plumbing --------

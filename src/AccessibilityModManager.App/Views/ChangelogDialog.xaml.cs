@@ -1,6 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
-using AccessibilityModManager.App.Services;
+using AccessibilityModManager.Infrastructure.Security;
 
 namespace AccessibilityModManager.App.Views;
 

@@ -186,6 +186,11 @@ public sealed partial class GameItemViewModel : ObservableObject
 
     public void WriteBackTo(PluginRepoIndex index)
     {
+        // Game ids become folder names on every user's machine — block unsafe ones at save time
+        // with the same shared rule the manager enforces on fetch.
+        AccessibilityModManager.Infrastructure.Security.PathSafety.EnsureSafeId(
+            GameId, $"Game id for \"{DisplayName}\"");
+
         var def = index.Games.FirstOrDefault(g => g.GameId == GameId);
         if (def == null) return;
         var newDef = new GameDefinition
@@ -236,9 +241,19 @@ public sealed partial class GameItemViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(JunctionName) || string.IsNullOrWhiteSpace(JunctionReason))
             return null;
 
+        // Same rule the manager enforces at junction-creation time: a single ASCII folder name,
+        // nothing that could aim the junction at another path. Caught at save so it can never
+        // be published.
+        var name = AccessibilityModManager.Infrastructure.Security.PathSafety.EnsureLeafFileName(
+            JunctionName, $"Folder link name for \"{DisplayName}\"");
+        if (name.Any(c => c > 127))
+            throw new InvalidOperationException(
+                $"Folder link name for \"{DisplayName}\" must contain only ASCII characters — " +
+                "that's the whole point of the link.");
+
         return new AsciiPathShim
         {
-            JunctionName = JunctionName!.Trim(),
+            JunctionName = name,
             Reason = JunctionReason!.Trim()
         };
     }

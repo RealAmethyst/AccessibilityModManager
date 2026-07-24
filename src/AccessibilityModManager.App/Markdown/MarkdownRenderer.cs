@@ -1,7 +1,7 @@
 using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Media;
-using AccessibilityModManager.App.Services;
+using AccessibilityModManager.Infrastructure.Security;
 using Markdig;
 using Markdig.Extensions.Tables;
 using Markdig.Syntax.Inlines;

@@ -19,12 +19,23 @@ public sealed class SafeZipExtractor
 
     public async Task ExtractAsync(string zipPath, string targetDirectory, CancellationToken ct = default)
     {
+        await using var stream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        await ExtractAsync(stream, targetDirectory, ct, sourceLabel: zipPath);
+    }
+
+    /// <summary>
+    /// Stream overload for callers that verified the archive's bytes and must extract those
+    /// EXACT bytes — re-opening by path after a hash check would allow a swap in between.
+    /// </summary>
+    public async Task ExtractAsync(Stream zipStream, string targetDirectory, CancellationToken ct = default,
+        string sourceLabel = "(stream)")
+    {
         var fullTargetPath = Path.GetFullPath(targetDirectory);
         Directory.CreateDirectory(fullTargetPath);
 
-        _logger.Information("Extracting {ZipPath} to {TargetDir}", zipPath, fullTargetPath);
+        _logger.Information("Extracting {ZipPath} to {TargetDir}", sourceLabel, fullTargetPath);
 
-        using var archive = ZipFile.OpenRead(zipPath);
+        using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
 
         foreach (var entry in archive.Entries)
         {

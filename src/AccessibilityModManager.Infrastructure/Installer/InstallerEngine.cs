@@ -546,9 +546,18 @@ public sealed class InstallerEngine : IInstallerEngine
         string? backupFolder = null;
         var allChanges = new List<FileChange>();
 
+        var stagedPackagePath = tempDir + "_pkg.zip";
         try
         {
-            await _zipExtractor.ExtractAsync(packageZipPath, tempDir, ct);
+            // The SHA256 gate is intrinsic to the engine, not a caller courtesy: whatever
+            // produced this file (download, author-server stream, hand-picked local copy), it
+            // must match the release the user chose. The package is hashed WHILE being copied
+            // into a private staging file held with an exclusive handle, and extraction reads
+            // from that SAME handle — no path is ever re-opened after verification.
+            await using (var staged = await HashAndStagePackageAsync(packageZipPath, stagedPackagePath, release, ct))
+            {
+                await _zipExtractor.ExtractAsync(staged, tempDir, ct, sourceLabel: stagedPackagePath);
+            }
 
             var manifestPath = Path.Combine(tempDir, "manifest.json");
             if (!File.Exists(manifestPath))
@@ -729,6 +738,7 @@ public sealed class InstallerEngine : IInstallerEngine
         }
         finally
         {
+            try { if (File.Exists(stagedPackagePath)) File.Delete(stagedPackagePath); } catch { /* best effort */ }
             if (Directory.Exists(tempDir))
             {
                 try
@@ -817,7 +827,8 @@ public sealed class InstallerEngine : IInstallerEngine
     /// script to and, optionally, where we stashed any pre-existing file at that path so we
     /// can restore it afterwards.
     /// </summary>
-    private sealed record GameFolderRunState(string GameFolderScriptPath, string? BackupOfPreexistingFile);
+    private sealed record GameFolderRunState(
+        string GameFolderScriptPath, string? BackupOfPreexistingFile, FileStream? WriteGuard = null);
 
     /// <summary>
     /// Copies the staging-area script into the game folder so it runs with the game folder
@@ -849,6 +860,54 @@ public sealed class InstallerEngine : IInstallerEngine
     }
 
     /// <summary>
+    /// <see cref="PrepareGameFolderRun"/>, but sourcing the script bytes from an already-open
+    /// (verified, write-denied) stream instead of re-opening a path — used by the uninstall hook
+    /// so the copy is guaranteed to be the exact bytes that were hashed and consented to.
+    /// </summary>
+    private async Task<GameFolderRunState> PrepareGameFolderRunFromStreamAsync(
+        Stream verifiedSource, string basename, string gameFolder, string hookLabel, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(basename))
+            throw new InvalidOperationException(
+                $"{hookLabel}: cached script has no filename — can't copy to game folder.");
+
+        var targetPath = Path.Combine(gameFolder, basename);
+        string? backupPath = null;
+        if (File.Exists(targetPath))
+        {
+            backupPath = Path.Combine(Path.GetTempPath(),
+                $"amm-script-backup-{Guid.NewGuid():N}-{basename}");
+            File.Copy(targetPath, backupPath, overwrite: true);
+            _logger.Debug("{Hook}: stashed existing {Target} to {Backup}", hookLabel, targetPath, backupPath);
+        }
+
+        // The copy's handle doubles as a write guard (FileShare.Read: the script runner can read
+        // it, nothing can rewrite it before/while it runs). A failed or cancelled copy restores
+        // the stash and removes the partial file instead of leaving both behind.
+        var guard = new FileStream(targetPath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read);
+        try
+        {
+            await verifiedSource.CopyToAsync(guard, ct);
+            await guard.FlushAsync(ct);
+        }
+        catch
+        {
+            await guard.DisposeAsync();
+            try { File.Delete(targetPath); } catch { /* best effort */ }
+            if (backupPath != null)
+            {
+                try { File.Copy(backupPath, targetPath, overwrite: true); File.Delete(backupPath); }
+                catch (Exception ex) { _logger.Warning(ex, "{Hook}: couldn't restore stashed file after failed copy", hookLabel); }
+            }
+            throw;
+        }
+
+        _logger.Information("{Hook}: copied verified script to game folder for run-from-game-folder mode: {Target}",
+            hookLabel, targetPath);
+        return new GameFolderRunState(targetPath, backupPath, guard);
+    }
+
+    /// <summary>
     /// Removes the in-game-folder script copy after the run, then restores the file we
     /// stashed in <see cref="PrepareGameFolderRun"/>. No-op when the script's
     /// <see cref="LifecycleScript.InstallToGameFolder"/> is true — that flag means the user
@@ -857,6 +916,9 @@ public sealed class InstallerEngine : IInstallerEngine
     private void CleanupGameFolderRun(GameFolderRunState? state, LifecycleScript script)
     {
         if (state is null) return;
+
+        // Release the write guard before touching the file — deletes and restores below need it.
+        try { state.WriteGuard?.Dispose(); } catch { /* best effort */ }
 
         if (script.InstallToGameFolder)
         {
@@ -893,27 +955,47 @@ public sealed class InstallerEngine : IInstallerEngine
     {
         if (receipt.PostUninstall is null || string.IsNullOrEmpty(receipt.CachedPostUninstallExecutable))
             return;
-        if (!File.Exists(receipt.CachedPostUninstallExecutable))
+
+        // A legacy cache with NO recorded hash is refused outright: there's no way to prove it's
+        // the script the user consented to (the audit closed the old run-unverified grace path).
+        if (receipt.CachedPostUninstallSha256 is not { Length: > 0 } expectedSha)
+        {
+            _logger.Warning(
+                "Cached post-uninstall script for {PluginId}/{GameId} predates hash recording — refusing to run it. Uninstall continues.",
+                receipt.PluginId, receipt.GameId);
+            return;
+        }
+
+        // Integrity: hold a write-denying handle on the cached script from hashing through the
+        // consent prompt and the run itself. Hashing by path and re-opening later would let the
+        // file be swapped while the user reads the consent dialog — the dialog describes the
+        // ORIGINAL script, and only those exact bytes may run.
+        FileStream scriptGuard;
+        try
+        {
+            scriptGuard = new FileStream(receipt.CachedPostUninstallExecutable,
+                FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
+        catch (FileNotFoundException)
         {
             _logger.Warning("Cached post-uninstall script missing at {Path}; skipping",
                 receipt.CachedPostUninstallExecutable);
             return;
         }
-
-        // Integrity: the cached script must still hash to what we recorded at install. If it was
-        // swapped on disk, refuse to run it — the consent dialog describes the ORIGINAL script, not a
-        // replacement. (Older receipts predate the recorded hash and skip this check.)
-        if (receipt.CachedPostUninstallSha256 is { Length: > 0 } expectedSha)
+        catch (IOException ex)
         {
-            var actualSha = Convert.ToHexStringLower(
-                SHA256.HashData(await File.ReadAllBytesAsync(receipt.CachedPostUninstallExecutable, ct)));
-            if (!string.Equals(actualSha, expectedSha, StringComparison.Ordinal))
-            {
-                _logger.Error(
-                    "Cached post-uninstall script for {PluginId}/{GameId} does not match its recorded hash — refusing to run it. Uninstall continues.",
-                    receipt.PluginId, receipt.GameId);
-                return;
-            }
+            _logger.Warning(ex, "Couldn't open the cached post-uninstall script exclusively; refusing to run it. Uninstall continues.");
+            return;
+        }
+        await using var _ = scriptGuard;
+
+        var actualSha = Convert.ToHexStringLower(await SHA256.HashDataAsync(scriptGuard, ct));
+        if (!string.Equals(actualSha, expectedSha, StringComparison.Ordinal))
+        {
+            _logger.Error(
+                "Cached post-uninstall script for {PluginId}/{GameId} does not match its recorded hash — refusing to run it. Uninstall continues.",
+                receipt.PluginId, receipt.GameId);
+            return;
         }
 
         // Consent is mandatory for running author code. With no script host to ask (e.g. a
@@ -952,15 +1034,18 @@ public sealed class InstallerEngine : IInstallerEngine
         scriptHost.OnScriptStarting("Post-uninstall", Path.GetFileName(receipt.CachedPostUninstallExecutable));
 
         // Same RunFromGameFolder support as the install hooks — but here the source is the
-        // cached executable under the receipt dir, not the staging dir. Cleanup always
-        // removes the in-game-folder copy: at uninstall the rollback is about to run anyway,
-        // and InstallToGameFolder doesn't apply post-uninstall (the mod is going away).
+        // cached executable under the receipt dir, not the staging dir, and the copy is made
+        // from the VERIFIED held handle (a fresh by-path copy could pick up swapped bytes).
+        // Cleanup always removes the in-game-folder copy: at uninstall the rollback is about to
+        // run anyway, and InstallToGameFolder doesn't apply post-uninstall (the mod is going away).
         GameFolderRunState? gameFolderRun = null;
         var scriptAbsolute = receipt.CachedPostUninstallExecutable;
         if (receipt.PostUninstall.RunFromGameFolder)
         {
-            gameFolderRun = PrepareGameFolderRun(
-                receipt.CachedPostUninstallExecutable, receipt.PostUninstall, game.InstallPath, "Post-uninstall");
+            scriptGuard.Position = 0;
+            gameFolderRun = await PrepareGameFolderRunFromStreamAsync(
+                scriptGuard, Path.GetFileName(receipt.CachedPostUninstallExecutable),
+                game.InstallPath, "Post-uninstall", ct);
             scriptAbsolute = gameFolderRun.GameFolderScriptPath;
         }
 
@@ -1017,11 +1102,12 @@ public sealed class InstallerEngine : IInstallerEngine
         var fileName = Path.GetFileName(script.Executable);
         var cachedPath = Path.Combine(cacheDir, fileName);
 
+        // Read once, write and hash the SAME bytes — copying by path and re-reading for the hash
+        // would let the recorded hash describe different bytes than the cached file.
         var sourcePath = Path.Combine(stagingDir, script.Executable);
-        File.Copy(sourcePath, cachedPath, overwrite: true);
-
-        // Record the hash so uninstall can confirm the cached file wasn't swapped before running it.
-        var sha = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(cachedPath)));
+        var scriptBytes = File.ReadAllBytes(sourcePath);
+        File.WriteAllBytes(cachedPath, scriptBytes);
+        var sha = Convert.ToHexStringLower(SHA256.HashData(scriptBytes));
 
         _logger.Information("Cached post-uninstall script to {Path}", cachedPath);
         return (cachedPath, sha);
@@ -1085,6 +1171,54 @@ public sealed class InstallerEngine : IInstallerEngine
         catch (Exception ex)
         {
             _logger.Warning(ex, "Couldn't remove backup folder {Folder}", backupFolder);
+        }
+    }
+
+    /// <summary>
+    /// Copies the package into <paramref name="stagedPath"/> while hashing the SAME bytes being
+    /// copied, and returns the still-open exclusive handle (FileShare.None) positioned at zero.
+    /// The caller extracts from that handle, so the verified bytes can never be swapped between
+    /// verification and extraction. Throws on a hash mismatch after deleting the staged copy.
+    /// </summary>
+    private static async Task<FileStream> HashAndStagePackageAsync(
+        string packageZipPath, string stagedPath, ModRelease release, CancellationToken ct)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(stagedPath)!);
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        var staged = new FileStream(
+            stagedPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 81920, useAsync: true);
+        try
+        {
+            await using (var source = new FileStream(
+                packageZipPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true))
+            {
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await source.ReadAsync(buffer, ct)) > 0)
+                {
+                    hasher.AppendData(buffer, 0, read);
+                    await staged.WriteAsync(buffer.AsMemory(0, read), ct);
+                }
+            }
+            await staged.FlushAsync(ct);
+
+            var actual = Convert.ToHexStringLower(hasher.GetHashAndReset());
+            if (!string.Equals(actual, release.Sha256?.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Package SHA256 mismatch for {release.PluginId}/{release.GameId} v{release.Version}: expected " +
+                    $"{release.Sha256}, got {actual}. The file is not the published release — install aborted.");
+            }
+
+            staged.Position = 0;
+            return staged;
+        }
+        catch
+        {
+            await staged.DisposeAsync();
+            try { File.Delete(stagedPath); } catch { /* best effort */ }
+            throw;
         }
     }
 
