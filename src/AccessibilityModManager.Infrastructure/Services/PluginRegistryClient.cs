@@ -40,40 +40,76 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
             "AccessibilityModManager");
     }
 
+    /// <summary>
+    /// How many times to re-fetch the registry pair when the signature doesn't match its JSON.
+    /// The two files are switched live by back-to-back renames on the server, so a request landing
+    /// in the gap between them gets a new JSON with the previous signature — a mismatch that means
+    /// "you caught a publish mid-flight", not "someone tampered with this". Re-fetching a moment
+    /// later gets a consistent pair. Tampering fails all three attempts and still refuses, so this
+    /// costs nothing in trust: no unverified content is ever accepted, only re-requested.
+    /// </summary>
+    private const int SignatureMismatchRetries = 3;
+
     public async Task<Fetched<PluginRegistry>> FetchRegistryAsync(Uri registryUrl, CancellationToken ct = default)
     {
         UrlValidator.RequireHttps(registryUrl, "plugin registry URL");
 
         _logger.Information("Fetching plugin registry from {Url}", registryUrl);
 
-        string json;
-        string signatureBase64;
-        try
+        string json = "";
+        string signatureBase64 = "";
+        var sawSignatureMismatch = false;
+        for (var attempt = 1; ; attempt++)
         {
-            var response = await SendNoCacheAsync(registryUrl, ct);
-            response.EnsureSuccessStatusCode();
+            try
+            {
+                var response = await SendNoCacheAsync(registryUrl, ct);
+                response.EnsureSuccessStatusCode();
 
-            json = await response.Content.ReadAsStringAsync(ct);
+                json = await response.Content.ReadAsStringAsync(ct);
 
-            var sigUrl = new Uri(registryUrl.AbsoluteUri + ".sig");
-            _logger.Information("Fetching registry signature from {Url}", sigUrl);
+                var sigUrl = new Uri(registryUrl.AbsoluteUri + ".sig");
+                _logger.Information("Fetching registry signature from {Url}", sigUrl);
 
-            var sigResponse = await SendNoCacheAsync(sigUrl, ct);
-            sigResponse.EnsureSuccessStatusCode();
+                var sigResponse = await SendNoCacheAsync(sigUrl, ct);
+                sigResponse.EnsureSuccessStatusCode();
 
-            signatureBase64 = (await sigResponse.Content.ReadAsStringAsync(ct)).Trim();
+                signatureBase64 = (await sigResponse.Content.ReadAsStringAsync(ct)).Trim();
+            }
+            catch (Exception ex) when (IsNetworkFailure(ex, ct))
+            {
+                // Offline (or the catalog host is down): fall back to the last registry this machine
+                // ACCEPTED. Only network-level failures take this path — a bad signature, a failed
+                // validation, or a replay rejection is a trust decision and must surface, never be
+                // papered over with a cached copy. (Non-success HTTP statuses count as unreachable
+                // on purpose: the host being misconfigured must not blank the catalog, and an
+                // attacker who can force a status could just as easily block the connection.)
+                //
+                // Unless we already saw the live pair fail its signature: from that point on, a
+                // network failure must not quietly become a cached success, or a genuine trust
+                // failure would be reported as a healthy offline catalog.
+                if (sawSignatureMismatch)
+                {
+                    _logger.Error(ex, "Registry signature didn't match, and the retry couldn't reach the server");
+                    throw new InvalidOperationException(
+                        "The plugin registry's signature didn't match its contents, and it couldn't be " +
+                        "re-read to check whether that was a publish in progress.", ex);
+                }
+                return await LoadCachedRegistryAsync(registryUrl, ex);
+            }
+
+            if (_signatureVerifier.Verify(json, signatureBase64)) break;
+            sawSignatureMismatch = true;
+            if (attempt >= SignatureMismatchRetries) break;
+
+            _logger.Warning(
+                "Registry signature didn't match its JSON (attempt {Attempt} of {Max}) — re-fetching in case " +
+                "the pair was caught mid-publish", attempt, SignatureMismatchRetries);
+            await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), ct);
         }
-        catch (Exception ex) when (IsNetworkFailure(ex, ct))
-        {
-            // Offline (or the catalog host is down): fall back to the last registry this machine
-            // ACCEPTED. Only network-level failures take this path — a bad signature, a failed
-            // validation, or a replay rejection is a trust decision and must surface, never be
-            // papered over with a cached copy. (Non-success HTTP statuses count as unreachable
-            // on purpose: the host being misconfigured must not blank the catalog, and an
-            // attacker who can force a status could just as easily block the connection.)
-            return await LoadCachedRegistryAsync(registryUrl, ex);
-        }
 
+        // Whatever the retries produced still goes through the one acceptance gate below, which
+        // verifies the signature again and refuses on mismatch.
         var registry = await ValidateAndAcceptAsync(json, signatureBase64, fromCache: false);
         await SaveRegistryCacheAsync(registry.RegistryVersion, json, signatureBase64, registryUrl);
 

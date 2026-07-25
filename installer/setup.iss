@@ -60,13 +60,11 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 // — no Exec, no cmd, no findstr. The earlier shell-out pattern (`cmd /c dotnet
 // --list-runtimes | findstr ...`) tripped Defender's ML classifier, which flags installers
 // that do command-output piping + keyword scanning as credential-stealer-shaped.
-function IsDotNetInstalled(): Boolean;
+function HasRuntimeUnder(RuntimeRoot: String): Boolean;
 var
-  RuntimeRoot: String;
   FindRec: TFindRec;
 begin
   Result := False;
-  RuntimeRoot := ExpandConstant('{commonpf64}\dotnet\shared\Microsoft.WindowsDesktop.App');
   if not DirExists(RuntimeRoot) then exit;
 
   if FindFirst(RuntimeRoot + '\{#DotNetVersion}.*', FindRec) then
@@ -83,6 +81,49 @@ begin
       FindClose(FindRec);
     end;
   end;
+end;
+
+// Mirrors how the published win-x64 apphost actually finds its runtime, because agreeing with
+// the app is the only thing that matters here: DOTNET_ROOT_X64 wins, then DOTNET_ROOT, then the
+// default x64 location. When an override IS set it decides the answer outright — the app will
+// look there and nowhere else, so finding a runtime somewhere else would be a false pass.
+//
+// Deliberately NOT accepted: a 32-bit runtime (this app is x64 and cannot use it), and a bare
+// %LOCALAPPDATA% copy that no environment variable points at (the apphost won't discover it).
+// Checking only Program Files was the original bug — it failed people whose runtime lives
+// somewhere legitimate — but being over-generous is its own failure: setup approves, then the
+// app won't start (audit finding 41).
+function IsDotNetInstalled(): Boolean;
+var
+  Root: String;
+begin
+  Root := ExpandConstant('{%DOTNET_ROOT_X64}');
+  if Root = '' then
+    Root := ExpandConstant('{%DOTNET_ROOT}');
+
+  if Root <> '' then
+  begin
+    Result := HasRuntimeUnder(RemoveBackslashUnlessRoot(Root) + '\shared\Microsoft.WindowsDesktop.App');
+    exit;
+  end;
+
+  // No override, so the apphost consults the REGISTERED x64 install location before falling back
+  // to a default path. Skipping this rejected anyone who installed the runtime somewhere other
+  // than Program Files through the normal installer.
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+       'SOFTWARE\dotnet\Setup\InstalledVersions\x64', 'InstallLocation', Root) and (Root <> '') then
+  begin
+    Result := HasRuntimeUnder(RemoveBackslashUnlessRoot(Root) + '\shared\Microsoft.WindowsDesktop.App');
+    if Result then exit;
+  end;
+
+  Result := HasRuntimeUnder(ExpandConstant('{commonpf64}\dotnet\shared\Microsoft.WindowsDesktop.App'));
+  if Result then exit;
+
+  // Arm64 Windows runs this x64 build through emulation, and there the x64 runtime lives in an
+  // x64 subfolder rather than the native root. ArchitecturesInstallIn64BitMode is x64compatible,
+  // which includes Arm64, so setup can legitimately land there.
+  Result := HasRuntimeUnder(ExpandConstant('{commonpf64}\dotnet\x64\shared\Microsoft.WindowsDesktop.App'));
 end;
 
 function InitializeSetup(): Boolean;
@@ -111,9 +152,19 @@ begin
     AppDataPath := ExpandConstant('{localappdata}\AccessibilityModManager');
     if DirExists(AppDataPath) then
     begin
+      // The receipts are the ONLY record of which files each mod put in a game folder and which
+      // backup belongs to which change. Removing them doesn't uninstall those mods — it makes
+      // them unremovable, because nothing is left that knows what to take out. The backups
+      // themselves live in each GAME folder and are not touched here; they simply become
+      // orphaned. Say exactly that: a data-wipe prompt that overstates OR understates what it
+      // does is how someone ends up with a modded game and no way back (audit finding 41).
       if MsgBox('Also remove all settings, plugin states, install receipts, and logs?' + #13#10 + #13#10 +
+               'Important: if you still have mods installed in any game, uninstall them FIRST.' + #13#10 +
+               'This data includes the record of what each mod changed and where its backups are.' + #13#10 +
+               'Without it, the manager can no longer remove those mods or restore your original' + #13#10 +
+               'files. The backup folders stay in your game folders, but nothing can use them.' + #13#10 + #13#10 +
                'Choose No to keep this data so a future reinstall picks up where you left off.' + #13#10 +
-               'Choose Yes to fully remove every trace of the application.',
+               'Choose Yes to remove the application''s own data.',
                mbConfirmation, MB_YESNO) = IDYES then
       begin
         DelTree(AppDataPath, True, True, True);

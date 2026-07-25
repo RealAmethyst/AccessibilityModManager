@@ -73,7 +73,7 @@ public sealed class PatreonAuthorService
     {
         if (_account != null)
             await _client.RevokeAsync(_account, ct);
-        try { if (File.Exists(TokenFile)) File.Delete(TokenFile); } catch { }
+        ClearTokenFile();
         _account = null;
         _ownCampaign = null;
         StateChanged?.Invoke();
@@ -157,9 +157,22 @@ public sealed class PatreonAuthorService
         return idCandidate.All(char.IsDigit) ? idCandidate : null;
     }
 
+    /// <summary>Sign-out marker; see <see cref="ClearTokenFile"/>.</summary>
+    private static string TombstoneFile => TokenFile + ".signedout";
+
     private PatreonAccount? LoadFromDisk()
     {
         if (!File.Exists(TokenFile)) return null;
+
+        if (File.Exists(TombstoneFile))
+        {
+            _logger.Information("Ignoring a stored Patreon token — it was signed out but couldn't be removed");
+            // Tombstone last, and only if the token actually went: dropping the marker while the
+            // token survives would sign the author back in on the next launch.
+            if (TryDelete(TokenFile)) TryDelete(TombstoneFile);
+            return null;
+        }
+
         try
         {
             var bytes = File.ReadAllBytes(TokenFile);
@@ -174,11 +187,63 @@ public sealed class PatreonAuthorService
         }
     }
 
+    /// <summary>
+    /// Makes the stored session unusable, in order of preference: overwrite it (undecryptable
+    /// bytes load as signed-out), delete it, or failing both leave a marker that LoadFromDisk
+    /// honours. A plain swallowed delete used to leave a working token behind when the file was
+    /// locked, silently signing the author back in next launch (audit finding 36).
+    /// </summary>
+    private void ClearTokenFile()
+    {
+        if (!File.Exists(TokenFile)) return;
+
+        var neutralized = false;
+        try
+        {
+            File.WriteAllBytes(TokenFile, "signed-out"u8.ToArray());
+            neutralized = true;
+        }
+        catch (Exception ex) { _logger.Warning(ex, "Couldn't overwrite patreon-author.dat"); }
+
+        try
+        {
+            File.Delete(TokenFile);
+            TryDelete(TombstoneFile);
+            return;
+        }
+        catch (Exception ex) { _logger.Warning(ex, "Couldn't delete patreon-author.dat"); }
+
+        if (neutralized) return;
+
+        try { File.WriteAllBytes(TombstoneFile, "signed-out"u8.ToArray()); }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "SIGN-OUT INCOMPLETE: patreon-author.dat may still load on the next launch");
+        }
+    }
+
+    private bool TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug(ex, "Couldn't delete {Path}", path);
+            return false;
+        }
+    }
+
     private void SaveToDisk(PatreonAccount account)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(TokenFile)!);
         var json = JsonSerializer.SerializeToUtf8Bytes(account, JsonOptions);
         var encrypted = ProtectedData.Protect(json, Entropy, DataProtectionScope.CurrentUser);
         File.WriteAllBytes(TokenFile, encrypted);
+        // AFTER the new token is safely on disk. Clearing the marker first would, if this write
+        // then failed, un-protect the OLD token sitting in that file.
+        TryDelete(TombstoneFile);
     }
 }

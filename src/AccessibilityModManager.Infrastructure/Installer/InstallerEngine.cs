@@ -1295,9 +1295,16 @@ public sealed class InstallerEngine : IInstallerEngine
         manifest.PostUninstall is not null;
 
     /// <summary>
-    /// A stable hash over the manifest's lifecycle scripts (each script's bytes + its behavior flags),
-    /// or null if none are declared. Recorded in the receipt so an update can tell whether the user is
-    /// looking at the same scripts they already agreed to, or a new/changed one that needs a re-notice.
+    /// A stable hash over the manifest's lifecycle scripts, or null if none are declared. Recorded
+    /// in the receipt so an update can tell whether the user is looking at the same scripts they
+    /// already agreed to, or a new or changed one that needs a fresh notice.
+    /// <para>
+    /// It covers everything the consent dialog puts in front of the user — not just the script's
+    /// bytes and behaviour flags, but the What / Why / Modifies text as well (audit finding 42).
+    /// Those three lines ARE the consent: an update that left the script byte-identical while
+    /// rewriting its description could otherwise change what the user was told it does without
+    /// ever asking them again.
+    /// </para>
     /// </summary>
     private static string? ComputeScriptsFingerprint(Manifest manifest, string stagingDir)
     {
@@ -1317,8 +1324,22 @@ public sealed class InstallerEngine : IInstallerEngine
               .Append("|onUpdate=").Append(s.RunOnUpdate)
               .Append("|fatal=").Append(s.FailureFatal)
               .Append("|fromGame=").Append(s.RunFromGameFolder)
-              .Append("|toGame=").Append(s.InstallToGameFolder)
-              .Append('\n');
+              .Append("|toGame=").Append(s.InstallToGameFolder);
+
+            // Length-prefixed, because these three are free text the author controls. Appending
+            // them with plain delimiters would let a description carrying "|why=" shuffle content
+            // between fields and land on the same bytes — which is precisely the re-consent this
+            // fingerprint exists to force. A length can't be forged by the content it measures.
+            AppendCounted(sb, "what", s.What);
+            AppendCounted(sb, "why", s.Why);
+            AppendCounted(sb, "modifies", s.Modifies);
+            sb.Append('\n');
+        }
+
+        static void AppendCounted(StringBuilder sb, string field, string? value)
+        {
+            var text = value ?? "";
+            sb.Append('|').Append(field).Append(':').Append(text.Length).Append(':').Append(text);
         }
 
         Add("pre", manifest.PreInstall);

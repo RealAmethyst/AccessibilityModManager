@@ -720,6 +720,139 @@ public class InstallerEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateAsync_ReAsksConsent_WhenOnlyTheScriptDescriptionChanged()
+    {
+        // Audit finding 42. The What / Why / Modifies lines ARE the consent — they're the entire
+        // basis on which the user agreed to run author-supplied code. An update that leaves the
+        // script byte-identical but rewrites its description is claiming it does something else,
+        // so it has to ask again.
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "Registers the mod", "The game needs it", "Nothing outside the game folder"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
+        Assert.Equal(1, host.InstallConfirmCount);
+
+        // Same script bytes, same flags — only the description changed.
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "Deletes your save files", "Because", "Everything"),
+            postInstall: null,
+            postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
+
+        Assert.Equal(2, host.InstallConfirmCount);
+    }
+
+    [Theory]
+    [InlineData("CHANGED", "The game needs it", "Nothing outside")]
+    [InlineData("Registers the mod", "CHANGED", "Nothing outside")]
+    [InlineData("Registers the mod", "The game needs it", "CHANGED")]
+    public async Task UpdateAsync_ReAsksConsent_WhenAnySingleDescriptionFieldChanges(
+        string what, string why, string modifies)
+    {
+        // Each field on its own, so a fingerprint that happened to cover only one of the three
+        // can't pass by covering the others.
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "Registers the mod", "The game needs it", "Nothing outside"),
+            postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
+
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", what, why, modifies),
+            postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
+
+        Assert.Equal(2, host.InstallConfirmCount);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ReAsksConsent_WhenDescriptionsAreShuffledAcrossFields()
+    {
+        // Delimiter collision: with the fields simply concatenated, moving text across a field
+        // boundary produced identical bytes, so a rewritten warning slipped through unasked. The
+        // lengths are what make these two distinguishable.
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "a|why=b", "c", "m"),
+            postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
+
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: ("pre.cmd", "@exit /b 0\r\n", "a", "b|why=c", "m"),
+            postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
+
+        Assert.Equal(2, host.InstallConfirmCount);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_DoesNotReAskConsent_WhenTheScriptIsUnchanged()
+    {
+        // The other half of finding 42: an unchanged script must NOT nag on every update.
+        var script = ("pre.cmd", "@exit /b 0\r\n", "Registers the mod", "The game needs it", "Nothing outside");
+        var zipV1 = CreateModWithScripts(
+            "plug-a", "game-1", "1.0.0",
+            preInstall: script, postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v1") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        var host = new RecordingScriptHost { ConfirmInstallResult = true };
+        await _engine.InstallAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.0.0", zipV1), zipV1, host);
+
+        var zipV2 = CreateModWithScripts(
+            "plug-a", "game-1", "1.1.0",
+            preInstall: script, postInstall: null, postUninstall: null,
+            files: new[] { ("mod.dll", "v2") },
+            actions: new[] { (object)new { type = "copyFile", source = "mod.dll", target = "mod.dll" } },
+            preInstallRunOnUpdate: true);
+
+        await _engine.UpdateAsync(MakeGameInstall("game-1", "plug-a"),
+            MakeRelease("plug-a", "game-1", "1.1.0", zipV2), zipV2, host);
+
+        Assert.Equal(1, host.InstallConfirmCount);
+    }
+
+    [Fact]
     public async Task InstallAsync_PostInstallRunFromGameFolder_RunsFromGameFolderAndCleansUp()
     {
         // RunFromGameFolder=true means the manager copies the script into the game folder

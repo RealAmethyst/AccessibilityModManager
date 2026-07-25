@@ -24,6 +24,15 @@ public sealed class PatreonService
     private PatreonAccount? _currentAccount;
     private HashSet<string> _ownedCampaignIds = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Bumped by every sign-out. Network calls capture it before awaiting and refuse to commit
+    /// their result if it moved while they were in flight. Startup's session load is
+    /// fire-and-forget, so without this a response that landed just after the user signed out
+    /// would put the account back in memory AND write the token back to disk — undoing the
+    /// sign-out, and surviving a restart.
+    /// </summary>
+    private int _sessionGeneration;
+
     public PatreonService(
         PatreonClient client,
         IPatreonAccountStore store,
@@ -66,8 +75,15 @@ public sealed class PatreonService
     /// </summary>
     public async Task LoadAsync()
     {
-        _currentAccount = await _store.LoadAsync();
-        if (_currentAccount == null) return;
+        // Captured before the first await, so a sign-out at any point during startup is seen —
+        // including one landing between loading the token and using it.
+        var generation = _sessionGeneration;
+
+        // Into a local first: assigning straight to the field would re-populate it (and so report
+        // the user as signed in) if a sign-out happened while the store was being read.
+        var loaded = await _store.LoadAsync();
+        if (loaded == null || generation != _sessionGeneration) return;
+        _currentAccount = loaded;
 
         _logger.Information("Loaded Patreon session for user {UserId}", _currentAccount.UserId);
 
@@ -81,12 +97,18 @@ public sealed class PatreonService
             // token is rejected). Inline the happy path so the failure case still signs out
             // cleanly via SignOutAsync but the success case fires SignInStateChanged exactly
             // once at the end.
-            await EnsureFreshTokenAsync(CancellationToken.None);
-            var (updated, memberships) = await _client.FetchIdentityAndMembershipsAsync(
-                _currentAccount, CancellationToken.None);
-            _currentAccount = updated;
-            await _store.SaveAsync(updated);
+            if (generation != _sessionGeneration || _currentAccount == null) return;
+
+            var (updated, memberships) = await FetchIdentityWithOneRetryAsync(
+                generation, CancellationToken.None);
+            if (!await TryCommitAccountAsync(generation, updated)) return;
             _cache.Set(memberships);
+
+            // Ownership is fetched again HERE, after the identity call has settled on a usable
+            // token. The earlier attempt above can 401 on a stale token and quietly clear the
+            // owned-campaign set, and a creator with no ownership recorded sees their own gated
+            // releases treated as a patron's — hidden — until they refresh by hand.
+            await RefreshOwnedCampaignsAsync(CancellationToken.None);
         }
         catch (PatreonUnauthorizedException)
         {
@@ -127,14 +149,17 @@ public sealed class PatreonService
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "Couldn't fetch owned campaigns (likely missing scope)");
-            _ownedCampaignIds.Clear();
+            // Deliberately keeps whatever was known before: a probe that couldn't complete says
+            // nothing about whether this user owns a campaign, and wiping on failure meant one
+            // flaky call made a creator's own gated releases vanish from their view.
+            _logger.Debug(ex, "Couldn't fetch owned campaigns (likely missing scope or a transient error)");
         }
     }
 
     public async Task SignInAsync(CancellationToken ct)
     {
         var account = await _client.SignInAsync(ct);
+        _sessionGeneration++;
         _currentAccount = account;
         await _store.SaveAsync(account);
         _cache.Invalidate();
@@ -144,6 +169,9 @@ public sealed class PatreonService
 
     public async Task SignOutAsync(bool revokeOnPatreon, CancellationToken ct)
     {
+        // Invalidate BEFORE any await: anything already in flight must not be able to commit.
+        _sessionGeneration++;
+
         if (_currentAccount != null && revokeOnPatreon)
         {
             await _client.RevokeAsync(_currentAccount, ct);
@@ -164,10 +192,9 @@ public sealed class PatreonService
         if (_currentAccount == null) return false;
         try
         {
-            await EnsureFreshTokenAsync(ct);
-            var (updated, memberships) = await _client.FetchIdentityAndMembershipsAsync(_currentAccount!, ct);
-            _currentAccount = updated;
-            await _store.SaveAsync(updated);
+            var generation = _sessionGeneration;
+            var (updated, memberships) = await FetchIdentityWithOneRetryAsync(generation, ct);
+            if (!await TryCommitAccountAsync(generation, updated)) return false;
             _cache.Set(memberships);
             await RefreshOwnedCampaignsAsync(ct);
             return true;
@@ -215,7 +242,9 @@ public sealed class PatreonService
         // comes from the (unsigned) plugin index, so an http:// value would leak the token.
         UrlValidator.RequireHttps(serverUrl, "Patreon author download server");
 
-        await EnsureFreshTokenAsync(ct);
+        // A download can be in flight across a sign-out too, and its token refresh must not
+        // resurrect the session any more than startup's can.
+        await EnsureFreshTokenAsync(_sessionGeneration, ct);
 
         using var req = new HttpRequestMessage(HttpMethod.Get, serverUrl);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _currentAccount.AccessToken);
@@ -259,7 +288,73 @@ public sealed class PatreonService
     // API-supplied URLs without a host check. Gated installs now use the creator file picker,
     // the author's download server, or the manual browser-download flow.
 
-    private async Task EnsureFreshTokenAsync(CancellationToken ct)
+    /// <summary>
+    /// Fetches identity + memberships, and if Patreon rejects a token that looked perfectly
+    /// current, spends the refresh token once and tries again before giving up.
+    /// <para>
+    /// <see cref="EnsureFreshTokenAsync"/> only refreshes within five minutes of the recorded
+    /// expiry, so a token invalidated early — a clock that drifted, a session revoked from
+    /// Patreon's side, an expiry we recorded wrong — went straight to a forced sign-out and a
+    /// fresh trip through the browser, when a refresh would very likely have fixed it silently
+    /// (audit finding 36). If the refresh ALSO fails, the 401 propagates and the caller signs out
+    /// exactly as before: this recovers sessions, it never keeps a dead one alive.
+    /// </para>
+    /// </summary>
+    private async Task<(PatreonAccount Account, IReadOnlyList<PatreonMembership> Memberships)>
+        FetchIdentityWithOneRetryAsync(int generation, CancellationToken ct)
+    {
+        await EnsureFreshTokenAsync(generation, ct);
+        try
+        {
+            return await _client.FetchIdentityAndMembershipsAsync(_currentAccount!, ct);
+        }
+        catch (PatreonUnauthorizedException)
+        {
+            _logger.Information(
+                "Patreon rejected a token that wasn't due to expire — refreshing once before signing out");
+
+            PatreonAccount refreshed;
+            try
+            {
+                refreshed = await _client.RefreshAsync(_currentAccount!, ct);
+            }
+            catch (HttpRequestException ex) when (IsAuthorizationFailure(ex))
+            {
+                // The token endpoint answered and said no (a dead or revoked refresh token), which
+                // is an authorization failure however it's dressed up — RefreshAsync surfaces it
+                // as an HttpRequestException via EnsureSuccessStatusCode. Rethrowing it AS an
+                // authorization failure is what makes the caller sign out; leaving it as a generic
+                // HTTP error made startup keep a permanently dead session and told the user they
+                // were signed in. A refresh that fails with no status at all is a network problem,
+                // and is left alone so a flaky connection never costs someone their session.
+                throw new PatreonUnauthorizedException();
+            }
+
+            if (!await TryCommitAccountAsync(generation, refreshed))
+                throw new OperationCanceledException("Signed out while refreshing the Patreon session.");
+            return await _client.FetchIdentityAndMembershipsAsync(_currentAccount!, ct);
+        }
+    }
+
+    /// <summary>
+    /// Assigns and persists a refreshed account, but only if the session it belongs to is still
+    /// the current one. Every commit goes through here: checking at the CALLERS wasn't enough,
+    /// because a refresh completing after a sign-out would already have written the token back to
+    /// disk by the time the caller looked.
+    /// </summary>
+    private async Task<bool> TryCommitAccountAsync(int generation, PatreonAccount account)
+    {
+        if (generation != _sessionGeneration)
+        {
+            _logger.Information("Discarding a Patreon token that arrived after the session ended");
+            return false;
+        }
+        _currentAccount = account;
+        await _store.SaveAsync(account);
+        return true;
+    }
+
+    private async Task EnsureFreshTokenAsync(int generation, CancellationToken ct)
     {
         if (_currentAccount == null) return;
         // Refresh proactively when within 5 minutes of expiry so we don't get caught
@@ -269,8 +364,15 @@ public sealed class PatreonService
         try
         {
             var refreshed = await _client.RefreshAsync(_currentAccount, ct);
-            _currentAccount = refreshed;
-            await _store.SaveAsync(refreshed);
+            await TryCommitAccountAsync(generation, refreshed);
+        }
+        catch (HttpRequestException ex) when (IsAuthorizationFailure(ex))
+        {
+            // Same mapping as the retry path below: the token endpoint answering "no" is an
+            // authorization failure whatever HTTP shape it arrives in, and the caller must sign
+            // out rather than keep a session that can never work again.
+            _logger.Warning(ex, "Patreon refused to refresh the token");
+            throw new PatreonUnauthorizedException();
         }
         catch (Exception ex)
         {
@@ -278,4 +380,14 @@ public sealed class PatreonService
             throw;
         }
     }
+
+    /// <summary>
+    /// Whether a token-endpoint failure means "this session is finished" rather than "try later".
+    /// Only an outright rejection counts: OAuth returns 400 (invalid_grant) for a dead or revoked
+    /// refresh token and 401 for bad client credentials. Rate limits and server errors are
+    /// emphatically NOT authorization failures — treating them as such would sign people out
+    /// every time Patreon had a bad afternoon.
+    /// </summary>
+    private static bool IsAuthorizationFailure(HttpRequestException ex) =>
+        ex.StatusCode is System.Net.HttpStatusCode.BadRequest or System.Net.HttpStatusCode.Unauthorized;
 }

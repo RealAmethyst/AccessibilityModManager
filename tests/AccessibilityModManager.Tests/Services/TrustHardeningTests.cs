@@ -373,6 +373,64 @@ public class TrustHardeningTests : IDisposable
         """;
     }
 
+    [Fact]
+    public async Task Registry_PairCaughtMidPublish_IsRetriedAndAccepted()
+    {
+        // The registry's JSON and signature go live as two back-to-back renames, so a request can
+        // land between them and get the new JSON with the previous signature. That's a publish in
+        // flight, not tampering — the manager re-fetches rather than blanking the whole catalog.
+        var json = MinimalRegistryJson("3");
+        var signature = Convert.ToBase64String(
+            _rsa.SignData(Encoding.UTF8.GetBytes(json), HashAlgorithmName.SHA256, RSASignaturePadding.Pss));
+
+        var sigRequests = 0;
+        var handler = new RouteHandler(url =>
+        {
+            if (!url.Contains(".sig")) return json;
+            // First read catches the old signature still in place; the rename lands after that.
+            return ++sigRequests == 1 ? "c3RhbGUgc2lnbmF0dXJl" : signature;
+        });
+        var verifier = new RegistrySignatureVerifier(_rsa.ExportSubjectPublicKeyInfoPem(), TestLogger.Create());
+        var client = new PluginRegistryClient(new HttpClient(handler), TestLogger.Create(), verifier, _tempRoot);
+
+        var fetched = await client.FetchRegistryAsync(new Uri("https://example.invalid/plugin-registry.json"));
+
+        Assert.Equal("3", fetched.Value.RegistryVersion);
+        Assert.True(sigRequests > 1, "expected the mismatched pair to be re-fetched");
+    }
+
+    [Fact]
+    public async Task Registry_SignatureThatNeverMatches_IsStillRefused()
+    {
+        // The other half: retrying must not become a way in. A pair that stays mismatched is
+        // refused after the attempts run out, exactly as before.
+        var json = MinimalRegistryJson("3");
+        var handler = new RouteHandler(url => url.Contains(".sig") ? "c3RhbGUgc2lnbmF0dXJl" : json);
+        var verifier = new RegistrySignatureVerifier(_rsa.ExportSubjectPublicKeyInfoPem(), TestLogger.Create());
+        var client = new PluginRegistryClient(new HttpClient(handler), TestLogger.Create(), verifier, _tempRoot);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.FetchRegistryAsync(new Uri("https://example.invalid/plugin-registry.json")));
+    }
+
+    private static string MinimalRegistryJson(string version) =>
+        $$"""
+        {
+          "registryVersion": "{{version}}",
+          "updatedAt": "2026-07-25T00:00:00Z",
+          "plugins": [
+            {
+              "id": "plug-a",
+              "name": "Plug A",
+              "author": "A",
+              "description": "d",
+              "repoIndexUrl": "https://example.invalid/index.json",
+              "isBuiltIn": false
+            }
+          ]
+        }
+        """;
+
     private sealed class RouteHandler : HttpMessageHandler
     {
         private readonly Func<string, string> _respond;

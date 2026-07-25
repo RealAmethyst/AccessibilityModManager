@@ -74,16 +74,70 @@ public sealed class PatreonClient
             _logger.Information("Opening Patreon authorize URL");
             Process.Start(new ProcessStartInfo { FileName = authorizeUri, UseShellExecute = true });
 
-            // Wait for the redirect with the auth code.
-            var contextTask = listener.GetContextAsync();
-            using var cancelReg = ct.Register(() => { try { listener.Stop(); } catch { } });
-            var context = await contextTask;
+            // Wait for OUR redirect. Anything else arriving on this loopback port — a favicon
+            // probe, a browser prefetch, another program, a stray '/?error=' — is answered and
+            // ignored. Taking the first request that arrived meant one of those consumed the
+            // listener, failed the sign-in for want of a code, and left the real callback
+            // knocking on a closed port (audit finding 36). "Ours" means the configured callback
+            // path AND the state we generated, checked before the request is accepted rather
+            // than after, so a wrong-state request can neither end the wait nor be told it
+            // signed in.
+            var expectedPath = new Uri(_options.RedirectUri).AbsolutePath;
 
-            var code = context.Request.QueryString["code"];
-            var returnedState = context.Request.QueryString["state"];
-            var error = context.Request.QueryString["error"];
+            // And it can't wait forever: the user may close the browser or simply walk away, and
+            // an un-cancellable pending sign-in leaves the UI busy and the port held.
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromMinutes(5));
+            using var cancelReg = timeout.Token.Register(() => { try { listener.Stop(); } catch { } });
 
-            // Send a friendly response to the user's browser before tearing down the listener.
+            HttpListenerContext context;
+            string? code, error;
+            while (true)
+            {
+                try
+                {
+                    context = await listener.GetContextAsync();
+                }
+                catch (Exception ex) when (timeout.IsCancellationRequested)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    throw new TimeoutException(
+                        "Patreon sign-in timed out after 5 minutes with no answer from the browser. " +
+                        "Start the sign-in again when you're ready.", ex);
+                }
+
+                code = context.Request.QueryString["code"];
+                error = context.Request.QueryString["error"];
+                var returnedState = context.Request.QueryString["state"];
+                var path = context.Request.Url?.AbsolutePath ?? "/";
+
+                // Ordinal, and the value must be non-EMPTY, not merely present: "?code=" passed a
+                // null check, ended the wait, and got shown the "Signed in." page moments before
+                // being rejected for having no code. A malformed callback now keeps waiting like
+                // any other stray request.
+                var isOurCallback =
+                    string.Equals(path, expectedPath, StringComparison.Ordinal) &&
+                    (!string.IsNullOrEmpty(code) || !string.IsNullOrEmpty(error)) &&
+                    returnedState == state;
+
+                if (isOurCallback) break;
+
+                _logger.Debug("Ignoring a request to the OAuth callback port that isn't our redirect: {Path}",
+                    context.Request.Url?.PathAndQuery);
+                try
+                {
+                    context.Response.StatusCode = 404;
+                    context.Response.Close();
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug(ex, "Couldn't answer a stray callback-port request");
+                }
+            }
+
+            // The loop above already established this is our callback with our state, so the page
+            // the user is shown now matches what actually happened — no more telling a browser
+            // "Signed in." moments before the sign-in is rejected.
             var responseHtml = error == null
                 ? "<html><body><h1>Signed in.</h1><p>You can close this tab and return to the app.</p></body></html>"
                 : $"<html><body><h1>Sign-in failed.</h1><p>{WebUtility.HtmlEncode(error)}</p></body></html>";
@@ -97,8 +151,6 @@ public sealed class PatreonClient
                 throw new InvalidOperationException($"Patreon sign-in failed: {error}");
             if (string.IsNullOrEmpty(code))
                 throw new InvalidOperationException("Patreon redirect did not include an authorization code.");
-            if (returnedState != state)
-                throw new InvalidOperationException("OAuth state mismatch — possible CSRF.");
 
             // Exchange the code for tokens (PKCE: send the verifier as proof).
             var account = await ExchangeCodeForTokenAsync(code, verifier, ct);
