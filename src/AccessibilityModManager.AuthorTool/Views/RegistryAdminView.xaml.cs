@@ -11,8 +11,8 @@ public partial class RegistryAdminView : UserControl
     public RegistryAdminView()
     {
         InitializeComponent();
-        // Issues list is the primary work surface — open requests waiting to be processed.
-        Loaded += (_, _) => IssuesList.Focus();
+        // The JSON is the work surface now that listing requests no longer arrive as issues.
+        Loaded += (_, _) => RegistryJsonBox.Focus();
     }
 
     private void Sign_Click(object sender, RoutedEventArgs e)

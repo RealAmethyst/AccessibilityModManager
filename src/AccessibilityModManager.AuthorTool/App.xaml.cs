@@ -43,7 +43,6 @@ public partial class App : Application
         services.AddSingleton<GitHubService>();
         services.AddSingleton<ManifestBuilderService>();
         services.AddSingleton<RegistryMembershipChecker>();
-        services.AddSingleton<IndexValidator>();
         services.AddSingleton<PatreonAuthorService>();
         services.AddSingleton<ServerUploadService>();
 
@@ -94,7 +93,6 @@ public partial class App : Application
             sp.GetRequiredService<GitHubService>(),
             sp.GetRequiredService<GitService>(),
             sp.GetRequiredService<ServerUploadService>(),
-            sp.GetRequiredService<IndexValidator>(),
             sp.GetRequiredService<ILogger>(),
             ShowInfoDialog,
             ConfirmDialog,

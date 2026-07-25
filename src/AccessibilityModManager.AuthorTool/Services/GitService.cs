@@ -103,31 +103,4 @@ public sealed class GitService
         return result.Success ? result.Stdout.Trim() : null;
     }
 
-    public async Task<ProcessResult> CheckoutNewBranchAsync(string folder, string branchName, CancellationToken ct = default)
-    {
-        _logger.Information("git checkout -b {Branch} in {Folder}", branchName, folder);
-        return await ProcessRunner.RunAsync("git",
-            new[] { "checkout", "-b", branchName }, folder, ct);
-    }
-
-    public async Task<ProcessResult> CheckoutAsync(string folder, string branchName, CancellationToken ct = default)
-    {
-        _logger.Information("git checkout {Branch} in {Folder}", branchName, folder);
-        return await ProcessRunner.RunAsync("git",
-            new[] { "checkout", branchName }, folder, ct);
-    }
-
-    public async Task<ProcessResult> PushNewBranchAsync(string folder, string branchName, CancellationToken ct = default)
-    {
-        _logger.Information("git push -u origin {Branch} in {Folder}", branchName, folder);
-        return await ProcessRunner.RunAsync("git",
-            new[] { "push", "-u", "origin", branchName }, folder, ct);
-    }
-
-    public async Task<ProcessResult> DeleteLocalBranchAsync(string folder, string branchName, bool force = false, CancellationToken ct = default)
-    {
-        _logger.Information("git branch -D {Branch} in {Folder}", branchName, folder);
-        return await ProcessRunner.RunAsync("git",
-            new[] { "branch", force ? "-D" : "-d", branchName }, folder, ct);
-    }
 }

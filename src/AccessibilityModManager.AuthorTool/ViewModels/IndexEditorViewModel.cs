@@ -400,8 +400,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             }
             else
             {
-                RegistryStatusText = $"Plugin id '{_index.PluginId}' is not in the public registry yet. " +
-                                     "Click \"Request listing\" to open a pre-filled GitHub issue on the registry repo.";
+                RegistryStatusText = $"Plugin id '{_index.PluginId}' is not in the public registry yet — add it from the registry admin screen.";
                 IsListedInRegistry = false;
             }
         }
@@ -421,32 +420,6 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private async Task RecheckRegistryMembershipAsync()
     {
         await CheckRegistryMembershipAsync();
-    }
-
-    [RelayCommand]
-    private void RequestRegistryListing()
-    {
-        var gitHubRepo = _configService.GetRecent(_projectPath)?.GitHubRepo;
-        var url = RegistryMembershipChecker.BuildFeatureRequestUrl(
-            _index.PluginId,
-            _index.Author?.DisplayName,
-            gitHubRepo,
-            _index.Author?.Bio);
-
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Failed to open registry feature-request URL");
-            _showInfoDialog("Could not open browser",
-                $"Open this URL manually:\n\n{url}\n\n{ex.Message}");
-        }
     }
 
     private async Task LoadGitHubReposAsync()

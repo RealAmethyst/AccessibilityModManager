@@ -10,8 +10,6 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -65,89 +63,8 @@
                     Margin="8,8,0,0"/>
         </Grid>
 
-        <!-- Issues -->
-        <DockPanel Grid.Row="2" LastChildFill="False" Margin="0,8,0,4">
-            <Button DockPanel.Dock="Right"
-                    Content="Refresh issues"
-                    Command="{Binding RefreshIssuesCommand}"
-                    AutomationProperties.Name="Refresh registry issue list"/>
-            <TextBlock Text="Open issues on the registry repo"
-                       FontSize="16" FontWeight="SemiBold"
-                       AutomationProperties.HeadingLevel="Level2"
-                       VerticalAlignment="Center"/>
-        </DockPanel>
-
-        <ListBox Grid.Row="3"
-                 x:Name="IssuesList"
-                 ItemsSource="{Binding Issues}"
-                 SelectedItem="{Binding SelectedIssue}"
-                 AutomationProperties.Name="Open issues on the registry repo"
-                 MinHeight="120"
-                 MaxHeight="240"
-                 Margin="0,0,0,8">
-            <ListBox.ItemContainerStyle>
-                <Style TargetType="ListBoxItem">
-                    <Setter Property="AutomationProperties.Name">
-                        <Setter.Value>
-                            <MultiBinding StringFormat="{}{0}, {1}, {2}">
-                                <Binding Path="DisplayTitle"/>
-                                <Binding Path="DisplaySubtitle"/>
-                                <Binding Path="ParseStatusText"/>
-                            </MultiBinding>
-                        </Setter.Value>
-                    </Setter>
-                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                </Style>
-            </ListBox.ItemContainerStyle>
-            <ListBox.ItemTemplate>
-                <DataTemplate>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Grid.Column="0">
-                            <Run Text="{Binding DisplayTitle, Mode=OneWay}" FontWeight="SemiBold"/>
-                        </TextBlock>
-                        <TextBlock Grid.Row="1" Grid.Column="0"
-                                   Text="{Binding DisplaySubtitle}"
-                                   FontSize="11" Foreground="#888"/>
-                        <TextBlock Grid.Row="2" Grid.Column="0"
-                                   FontSize="11" TextWrapping="Wrap">
-                            <Run Text="{Binding ParseStatusText, Mode=OneWay}" Foreground="#444"/>
-                            <LineBreak/>
-                            <Run Text="{Binding ValidationStatusText, Mode=OneWay}" Foreground="#666"/>
-                        </TextBlock>
-                        <StackPanel Grid.Row="0" Grid.RowSpan="3" Grid.Column="1"
-                                    Orientation="Horizontal" VerticalAlignment="Top">
-                            <Button Content="Accept and merge"
-                                    Command="{Binding DataContext.AcceptAndMergeCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                    CommandParameter="{Binding}"
-                                    IsEnabled="{Binding CanAccept}"
-                                    AutomationProperties.Name="Accept this issue and merge into the registry"
-                                    Margin="0,0,4,0"/>
-                            <Button Content="Close (re-submit)"
-                                    Command="{Binding DataContext.RejectUnparseableCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                    CommandParameter="{Binding}"
-                                    AutomationProperties.Name="Close issue with re-submit comment"
-                                    Margin="0,0,4,0"/>
-                            <Button Content="Open"
-                                    Command="{Binding DataContext.OpenIssueCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                    CommandParameter="{Binding}"
-                                    AutomationProperties.Name="Open this issue in browser"/>
-                        </StackPanel>
-                    </Grid>
-                </DataTemplate>
-            </ListBox.ItemTemplate>
-        </ListBox>
-
         <!-- JSON editor -->
-        <Grid Grid.Row="4">
+        <Grid Grid.Row="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -212,6 +129,7 @@
             </Grid>
 
             <TextBox Grid.Row="2"
+                     x:Name="RegistryJsonBox"
                      Text="{Binding RegistryJsonContent, UpdateSourceTrigger=PropertyChanged}"
                      AcceptsReturn="True"
                      AcceptsTab="False"
@@ -225,7 +143,7 @@
         </Grid>
 
         <!-- Password + actions -->
-        <Grid Grid.Row="5" Margin="0,12,0,0">
+        <Grid Grid.Row="3" Margin="0,12,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="160"/>
                 <ColumnDefinition Width="*"/>
@@ -236,7 +154,7 @@
                          AutomationProperties.Name="Private key password"/>
         </Grid>
 
-        <DockPanel Grid.Row="6" Margin="0,12,0,0">
+        <DockPanel Grid.Row="4" Margin="0,12,0,0">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                 <Button Content="Sign"
                         Click="Sign_Click"

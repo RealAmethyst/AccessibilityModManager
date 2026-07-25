@@ -73,11 +73,6 @@
                 Visibility="{Binding RegistryCheckCompleted, Converter={StaticResource BoolToVisConverter}}">
             <DockPanel LastChildFill="True">
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                    <Button Content="Request listing"
-                            Command="{Binding RequestRegistryListingCommand}"
-                            AutomationProperties.Name="Open a feature request to add this plugin to the public registry"
-                            Margin="0,0,8,0"
-                            Visibility="{Binding IsListedInRegistry, Converter={StaticResource NullableFalseToVisConverter}}"/>
                     <Button Content="Recheck"
                             Command="{Binding RecheckRegistryMembershipCommand}"
                             AutomationProperties.Name="Re-check registry membership"/>
