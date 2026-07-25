@@ -237,7 +237,7 @@ public class OfflineCacheTests : IDisposable
                 "version": "1.0.0",
                 "channel": "stable",
                 "packageUrl": "https://example.invalid/pkg.zip",
-                "sha256": "00"
+                "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
               }
             ]
           }

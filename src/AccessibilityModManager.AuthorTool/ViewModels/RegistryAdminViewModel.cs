@@ -29,7 +29,11 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
     private readonly AuthorConfigService _configService;
     private readonly GitHubService _gitHubService;
     private readonly GitService _gitService;
+    private readonly ServerUploadService _serverUploadService;
     private readonly IndexValidator _indexValidator;
+
+    /// <summary>Live-catalog fetches (pre-publish comparison, post-publish verification).</summary>
+    private static readonly System.Net.Http.HttpClient CatalogHttp = new();
     private readonly ILogger _logger;
     private readonly Action<string, string> _showInfoDialog;
     private readonly Func<string, string, bool> _confirmDialog;
@@ -76,6 +80,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         AuthorConfigService configService,
         GitHubService gitHubService,
         GitService gitService,
+        ServerUploadService serverUploadService,
         IndexValidator indexValidator,
         ILogger logger,
         Action<string, string> showInfoDialog,
@@ -87,6 +92,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         _configService = configService;
         _gitHubService = gitHubService;
         _gitService = gitService;
+        _serverUploadService = serverUploadService;
         _indexValidator = indexValidator;
         _logger = logger;
         _showInfoDialog = showInfoDialog;
@@ -445,6 +451,160 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
                 HasUnsavedJsonChanges = true;
             }
         }
+
+        SyncFieldsFromJson();
+    }
+
+    // ---- Quick fields over the raw JSON (the outage lesson: editing the index URL meant
+    // hand-editing a JSON blob in a screen reader; these are real, labeled fields for the
+    // values that actually get edited. They read from and write into RegistryJsonContent, so
+    // Save / Sign / Publish stay exactly as they are.) ----
+
+    [ObservableProperty]
+    private string? _fieldRegistryVersion;
+
+    public System.Collections.ObjectModel.ObservableCollection<string> PluginIds { get; } = [];
+
+    [ObservableProperty]
+    private string? _selectedPluginId;
+
+    [ObservableProperty]
+    private string? _fieldRepoIndexUrl;
+
+    [ObservableProperty]
+    private string? _fieldWebsite;
+
+    /// <summary>Guards against feedback while fields and JSON update each other.</summary>
+    private bool _syncingFields;
+
+    private void SyncFieldsFromJson()
+    {
+        if (_syncingFields) return;
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = string.IsNullOrWhiteSpace(RegistryJsonContent)
+                ? null
+                : System.Text.Json.Nodes.JsonNode.Parse(RegistryJsonContent);
+        }
+        catch
+        {
+            return; // mid-edit invalid JSON — fields keep their last values until it parses again
+        }
+        if (root is null) return;
+
+        _syncingFields = true;
+        try
+        {
+            FieldRegistryVersion = root["registryVersion"]?.GetValue<string>();
+
+            var ids = new List<string>();
+            if (root["plugins"] is System.Text.Json.Nodes.JsonArray plugins)
+            {
+                foreach (var p in plugins)
+                {
+                    if (p?["id"]?.GetValue<string>() is { Length: > 0 } id)
+                        ids.Add(id);
+                }
+            }
+            if (!ids.SequenceEqual(PluginIds, StringComparer.Ordinal))
+            {
+                PluginIds.Clear();
+                foreach (var id in ids) PluginIds.Add(id);
+            }
+            if (SelectedPluginId is null || !ids.Contains(SelectedPluginId, StringComparer.Ordinal))
+                SelectedPluginId = ids.FirstOrDefault();
+
+            var plugin = FindPluginNode(root, SelectedPluginId);
+            FieldRepoIndexUrl = plugin?["repoIndexUrl"]?.GetValue<string>();
+            FieldWebsite = plugin?["website"]?.GetValue<string>();
+        }
+        finally
+        {
+            _syncingFields = false;
+        }
+    }
+
+    private static System.Text.Json.Nodes.JsonNode? FindPluginNode(
+        System.Text.Json.Nodes.JsonNode root, string? pluginId)
+    {
+        if (pluginId is null || root["plugins"] is not System.Text.Json.Nodes.JsonArray plugins)
+            return null;
+        return plugins.FirstOrDefault(p =>
+            string.Equals(p?["id"]?.GetValue<string>(), pluginId, StringComparison.Ordinal));
+    }
+
+    partial void OnSelectedPluginIdChanged(string? value)
+    {
+        if (_syncingFields) return;
+        // Selection changes just re-point the fields; nothing is written.
+        SyncFieldsFromJson();
+    }
+
+    partial void OnFieldRegistryVersionChanged(string? value) => ApplyFieldsToJson();
+    partial void OnFieldRepoIndexUrlChanged(string? value) => ApplyFieldsToJson();
+    partial void OnFieldWebsiteChanged(string? value) => ApplyFieldsToJson();
+
+    private void ApplyFieldsToJson()
+    {
+        if (_syncingFields) return;
+        if (string.IsNullOrWhiteSpace(RegistryJsonContent)) return;
+
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(RegistryJsonContent);
+        }
+        catch
+        {
+            StatusMessage = "The JSON box has a syntax error — fix it before the fields can apply.";
+            return;
+        }
+        if (root is null) return;
+
+        // The version must never be emptied; a non-https or empty index URL must never reach
+        // the JSON (the manager would refuse the whole registry). While a URL is mid-typing
+        // the apply simply waits — the field keeps the text, the JSON keeps its last value.
+        if (!string.IsNullOrWhiteSpace(FieldRegistryVersion))
+            root["registryVersion"] = FieldRegistryVersion.Trim();
+
+        var plugin = FindPluginNode(root, SelectedPluginId);
+        if (plugin is not null)
+        {
+            var url = FieldRepoIndexUrl?.Trim();
+            if (!string.IsNullOrWhiteSpace(url) &&
+                Uri.TryCreate(url, UriKind.Absolute, out var parsed) &&
+                parsed.Scheme == Uri.UriSchemeHttps)
+            {
+                plugin["repoIndexUrl"] = url;
+            }
+
+            var website = FieldWebsite?.Trim();
+            if (string.IsNullOrWhiteSpace(website))
+            {
+                plugin.AsObject().Remove("website");
+            }
+            else if (Uri.TryCreate(website, UriKind.Absolute, out var siteParsed) &&
+                     siteParsed.Scheme == Uri.UriSchemeHttps)
+            {
+                plugin["website"] = website;
+            }
+        }
+
+        // The guard stops the changed-handler from re-syncing the fields mid-typing; its
+        // dirty-check still runs, which is exactly right.
+        _syncingFields = true;
+        try
+        {
+            RegistryJsonContent = root.ToJsonString(new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+        }
+        finally
+        {
+            _syncingFields = false;
+        }
     }
 
     [RelayCommand]
@@ -467,7 +627,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
 
         File.WriteAllText(RegistryJsonPath, RegistryJsonContent);
         HasUnsavedJsonChanges = false;
-        StatusMessage = $"Saved {Path.GetFileName(RegistryJsonPath)}. The .sig is now stale — sign before pushing.";
+        StatusMessage = $"Saved {Path.GetFileName(RegistryJsonPath)}. The signature is now stale — sign it, then publish.";
     }
 
     [RelayCommand]
@@ -520,7 +680,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             var sigPath = RegistryJsonPath + ".sig";
             File.WriteAllText(sigPath, sigBase64);
 
-            StatusMessage = $"Signed. Wrote {Path.GetFileName(sigPath)} ({signature.Length} bytes). Commit + push when ready.";
+            StatusMessage = $"Signed. Wrote {Path.GetFileName(sigPath)} ({signature.Length} bytes). Publish when ready to make it live.";
             _logger.Information("Signed registry {Json} -> {Sig}", RegistryJsonPath, sigPath);
         }
         catch (CryptographicException ex)
@@ -556,13 +716,67 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             return;
         }
 
+        // Finding 8: a .sig that merely EXISTS is not a signed registry. Edit, save, forget to
+        // re-sign, publish — and every manager in the world fails verification and shows an
+        // empty catalog. Verify the signature against the exact on-disk bytes with the same
+        // public key the manager embeds, and refuse to ship a mismatch. The bytes read here are
+        // the ones verified AND the ones parsed for the version below — one read, no window.
+        byte[] registryBytes;
+        byte[] sigFileBytes;
+        try
+        {
+            registryBytes = File.ReadAllBytes(RegistryJsonPath);
+            sigFileBytes = File.ReadAllBytes(sigPath);
+            var sigBase64 = Encoding.UTF8.GetString(sigFileBytes).Trim();
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(RegistryPublicKeyPem);
+            if (!rsa.VerifyData(registryBytes, Convert.FromBase64String(sigBase64),
+                    HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+            {
+                _showInfoDialog("Signature is stale",
+                    "The signature on disk does not match the current registry JSON — the JSON changed " +
+                    "after it was signed (or the signature came from a different key). Publishing it would " +
+                    "break every manager.\n\nClick Sign, then publish again.");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            _showInfoDialog("Can't verify the signature",
+                $"The signature file couldn't be checked against the registry JSON:\n\n{ex.Message}\n\n" +
+                "Sign again, then publish.");
+            return;
+        }
+
+        // The manager accepts or refuses the registry as a whole — one unsafe id or one non-https
+        // link anywhere in it takes the catalog down for everybody, signature and all. So it is
+        // held to the manager's own rules before it goes live, not after.
+        try
+        {
+            var report = AccessibilityModManager.Infrastructure.Services.PluginRegistryValidation
+                .Validate(Encoding.UTF8.GetString(registryBytes));
+            if (!report.IsValid)
+            {
+                _showInfoDialog("Fix the registry before publishing",
+                    "Managers would refuse this whole registry — every plugin would disappear for every " +
+                    "user, even though the signature is valid:\n\n" +
+                    string.Join("\n\n", report.Errors));
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            _showInfoDialog("The registry doesn't validate", ex.Message);
+            return;
+        }
+
         // Replay-guard discipline (audit finding 19): the manager refuses a registry whose
         // content changed without a higher registryVersion, so publishing must enforce the bump
         // HERE — republishing an unchanged-version registry would strand every up-to-date user.
         string registryVersion;
         try
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(RegistryJsonPath));
+            using var doc = System.Text.Json.JsonDocument.Parse(registryBytes);
             registryVersion = doc.RootElement.GetProperty("registryVersion").GetString()
                 ?? throw new InvalidOperationException("registryVersion is null");
         }
@@ -573,43 +787,156 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             return;
         }
 
-        var lastPublished = ReadLastPublishedVersion();
-        if (!string.IsNullOrEmpty(lastPublished) &&
-            VersionComparer.Instance.Compare(registryVersion, lastPublished) <= 0)
+        // A UTF-8 BOM would make the served bytes differ from what this tool signs and saves —
+        // refuse it here rather than let managers refuse the whole registry.
+        if (registryBytes.Length >= 3 &&
+            registryBytes[0] == 0xEF && registryBytes[1] == 0xBB && registryBytes[2] == 0xBF)
         {
-            _showInfoDialog("Version bump needed",
-                $"registryVersion is still {registryVersion}, but {lastPublished} was already published from " +
-                "this machine. Managers refuse a changed registry that doesn't raise its version.\n\n" +
-                "Edit registryVersion in the JSON to a higher value, Save, Sign, and publish again.");
+            _showInfoDialog("File starts with a byte-order mark",
+                "The registry JSON starts with a UTF-8 byte-order mark, which the manager doesn't expect. " +
+                "Open the JSON here, click Save JSON (this tool saves without one), sign, and publish again.");
             return;
         }
 
-        // Tag based on UTC timestamp keeps releases unique without bookkeeping. The manager
-        // fetches /releases/latest/download/... so the tag itself is informational; users
-        // never see it.
-        var tag = $"r-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
-        if (!_confirmDialog("Publish release",
-            $"This runs `gh release create {tag}` on {RegistryMembershipChecker.RegistryRepo} with " +
-            $"plugin-registry.json + plugin-registry.json.sig attached. The manager auto-updates from " +
-            $"the latest release, so users will see the change on their next launch. Proceed?"))
+        var cfg = _configService.GetServerUploadConfig();
+        if (cfg is null)
+        {
+            _showInfoDialog("Server upload not configured",
+                "Publishing sends the registry to your server over SFTP. Set up Server upload " +
+                "settings (host, key, host key fingerprint) first.");
+            return;
+        }
+
+        // What is actually published decides everything below — the local marker is only a
+        // fallback. The public address is the manager's view, so it's asked first; if it can't
+        // be reached, the server itself is asked over SFTP, because "I couldn't read it" and
+        // "there is nothing there" must never be confused: publishing an older version on top of
+        // a newer one strands every manager that already recorded the newer one.
+        var liveJsonBytes = await TryFetchLiveAsync(RegistryMembershipChecker.RegistryUrl);
+        var liveReadFailed = false;
+        if (liveJsonBytes is null)
+        {
+            try
+            {
+                var (remoteJson, _) = await _serverUploadService.ReadPublishedRegistryAsync(cfg, CancellationToken.None);
+                liveJsonBytes = remoteJson;
+                if (remoteJson is not null)
+                    _logger.Information("Public registry unreachable; read the published copy over SFTP instead");
+            }
+            catch (Exception ex)
+            {
+                liveReadFailed = true;
+                _logger.Warning(ex, "Couldn't read the published registry over SFTP either");
+            }
+        }
+
+        if (liveReadFailed)
+        {
+            _showInfoDialog("Can't tell what's currently published",
+                $"Neither the public address nor {cfg.Host} would say what registry is live right now. " +
+                "Publishing blind risks replacing a newer registry with an older one, which every " +
+                "up-to-date manager would then refuse.\n\nFix the connection and try again. Nothing was uploaded.");
+            return;
+        }
+
+        // Byte-identical JSON is NOT proof the catalog is healthy: if the signature rename failed
+        // after the JSON rename, managers are seeing these bytes with the previous signature and
+        // refusing the whole catalog. So the pair is verified before this is called a no-op, and
+        // a broken pair is republished at the same version to repair it.
+        var repairingPair = false;
+        if (liveJsonBytes is not null && liveJsonBytes.AsSpan().SequenceEqual(registryBytes))
+        {
+            var pairProblem = await VerifyLivePairAsync(registryBytes);
+            if (pairProblem is null)
+            {
+                WriteLastPublishedVersion(registryVersion);
+                StatusMessage = $"The live registry is already byte-identical to this v{registryVersion}. Nothing to publish.";
+                return;
+            }
+            repairingPair = true;
+            _logger.Warning("Live registry bytes match but the pair is broken ({Problem}) — republishing to repair", pairProblem);
+        }
+        var liveUnparseable = false;
+        if (!repairingPair && liveJsonBytes is not null)
+        {
+            try
+            {
+                using var liveDoc = System.Text.Json.JsonDocument.Parse(liveJsonBytes);
+                var liveVersion = liveDoc.RootElement.GetProperty("registryVersion").GetString();
+                if (!string.IsNullOrEmpty(liveVersion) &&
+                    VersionComparer.Instance.Compare(registryVersion, liveVersion) <= 0)
+                {
+                    _showInfoDialog("Version bump needed",
+                        $"The LIVE registry is already v{liveVersion}, and this file is v{registryVersion} with " +
+                        "different content. Managers refuse a changed registry that doesn't raise its version.\n\n" +
+                        "Edit registryVersion to a higher value, Save, Sign, and publish again.");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Publishing over an unreadable live registry is allowed — that's how a corrupt
+                // one gets repaired — but it happens with the author's eyes open, because the
+                // version gate that normally prevents a downgrade can't run.
+                liveUnparseable = true;
+                _logger.Warning(ex, "The live registry couldn't be parsed for version comparison");
+            }
+        }
+
+        // The local marker only speaks up when there is genuinely nothing published to compare
+        // against — a fresh catalog on a machine that has published before.
+        if (!repairingPair && liveJsonBytes is null)
+        {
+            var lastPublished = ReadLastPublishedVersion();
+            if (!string.IsNullOrEmpty(lastPublished) &&
+                VersionComparer.Instance.Compare(registryVersion, lastPublished) <= 0)
+            {
+                _showInfoDialog("Version bump needed",
+                    $"registryVersion is still {registryVersion}, but {lastPublished} was already published from " +
+                    "this machine. Managers refuse a changed registry that doesn't raise its version.\n\n" +
+                    "Edit registryVersion in the JSON to a higher value, Save, Sign, and publish again.");
+                return;
+            }
+        }
+
+        var confirmText = repairingPair
+            ? $"The registry published on {cfg.Host} has the right contents but a signature that doesn't " +
+              "match them, so managers are refusing the whole catalog right now. Re-publishing v" +
+              $"{registryVersion} repairs the pair.\n\nRepair it?"
+            : $"This uploads plugin-registry.json v{registryVersion} and its signature to {cfg.Host} and switches " +
+              "them live atomically. Every manager sees the change on its next refresh." +
+              (liveJsonBytes is null
+                  ? "\n\nNote: nothing is published there yet — this is the first publish."
+                  : "") +
+              (liveUnparseable
+                  ? "\n\nWarning: the registry currently published there can't be read as JSON, so its version " +
+                    "couldn't be compared with yours. If what's live is actually NEWER than v" + registryVersion +
+                    ", publishing this would roll managers back and they'd refuse it. Check the file on the " +
+                    "server if you're not sure."
+                  : "") +
+              "\n\nProceed?";
+        if (!_confirmDialog(repairingPair ? "Repair the published registry" : "Publish registry", confirmText))
             return;
 
         IsBusy = true;
         try
         {
-            var result = await _gitHubService.CreateReleaseAsync(
-                RegistryMembershipChecker.RegistryRepo,
-                tag,
-                title: tag,
-                notes: "Registry update.",
-                new[] { RegistryJsonPath, sigPath });
-            if (!result.Success)
+            await _serverUploadService.PublishRegistryPairAsync(cfg, registryBytes, sigFileBytes, CancellationToken.None);
+
+            // Trust nothing until it's proven from the USER'S side: fetch both public files
+            // fresh and verify the signature over the exact served bytes.
+            var verifyError = await VerifyLivePairAsync(registryBytes);
+            if (verifyError != null)
             {
-                _showInfoDialog("Publish failed", result.Combined);
+                _showInfoDialog("Published, but verification failed",
+                    "The registry uploaded and switched live, but reading it back from the public address " +
+                    $"didn't check out: {verifyError}\n\nDo NOT leave this unresolved — managers may be failing. " +
+                    "Publish again; if it persists, check the server.");
                 return;
             }
+
             var markerSaved = WriteLastPublishedVersion(registryVersion);
-            StatusMessage = $"Published release {tag} (registry v{registryVersion}). Live for users on next manager refresh." +
+            StatusMessage = $"Published registry v{registryVersion} and verified it live from the public address." +
                 (markerSaved ? "" : " Warning: couldn't record the published version locally — remember to bump registryVersion yourself before the next publish.");
         }
         catch (Exception ex)
@@ -622,6 +949,76 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             IsBusy = false;
         }
     }
+
+    /// <summary>Cache-busted fetch of a live catalog file; null on any failure.</summary>
+    private static async Task<byte[]?> TryFetchLiveAsync(Uri url)
+    {
+        try
+        {
+            var separator = string.IsNullOrEmpty(url.Query) ? "?" : "&";
+            var busted = new Uri(url.AbsoluteUri + separator + "_=" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            using var resp = await CatalogHttp.GetAsync(busted);
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadAsByteArrayAsync();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// End-to-end proof after publishing: the PUBLIC registry URL serves exactly the uploaded
+    /// bytes and its signature verifies over them with the manager's key. Null when everything
+    /// checks out; otherwise a short description of what didn't.
+    /// </summary>
+    private async Task<string?> VerifyLivePairAsync(byte[] expectedJson)
+    {
+        var json = await TryFetchLiveAsync(RegistryMembershipChecker.RegistryUrl);
+        if (json is null) return "the live registry couldn't be fetched";
+        if (!json.AsSpan().SequenceEqual(expectedJson)) return "the live registry's bytes differ from what was uploaded";
+
+        var sig = await TryFetchLiveAsync(new Uri(RegistryMembershipChecker.RegistryUrl.AbsoluteUri + ".sig"));
+        if (sig is null) return "the live signature couldn't be fetched";
+
+        try
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(RegistryPublicKeyPem);
+            var sigBytes = Convert.FromBase64String(Encoding.UTF8.GetString(sig).Trim());
+            if (!rsa.VerifyData(json, sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+                return "the live signature does not verify over the live bytes";
+        }
+        catch (Exception ex)
+        {
+            return "the live signature couldn't be checked: " + ex.Message;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The registry's PUBLIC verification key — the same PEM the manager embeds
+    /// (App.xaml.cs, GetRegistryPublicKey). Used to prove, before anything ships, that the
+    /// on-disk .sig matches the on-disk JSON. Public keys are safe to embed; only the private
+    /// key is sensitive, and it never leaves the maintainer's chosen key file.
+    /// </summary>
+    private const string RegistryPublicKeyPem = """
+        -----BEGIN PUBLIC KEY-----
+        MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvPTABidJcBN5V4kWommo
+        arlzq5pKHXNXrkFX8HUHjwK+SBiqUzWuZyZOEw5vAv+X6oa3T3g8iF+h+Hu+NHQ+
+        dw/cLy+Vmmlaz3YgBJRKMrEQspySI8cM3+4ZU54YzUCpPNSwi37P5JmC1lJEeRMJ
+        KxXz3Cwots1Zr2jZOn0l39+/9Vu8lQ84mVFd4wWIAfpBvc8FNVfw2p+qsOX3xZCa
+        vhV2Q7YGXgf+N09OfCSB74pU/qBYXDZ+FP2w+2ywCMWOOKmX0t9C4EusZ28QTabj
+        XkzrPyB5lhpMigl9HhvYjmtCjqPR7uzohIpRNLir02po3FRMAuW4sSxp0rkxu6pX
+        huQsHbfgR12aX1/Cv6fR9ez3EH8/ODXrJDANoL8NDuJ0hkfsXPSEn8tv7d7ZV/S5
+        4HpK6I/uwGMhY+YrkOCtj/FKDM+JaxD1PRqLZU/4uGiOG+Z2z4Cv7oA/ZnCW4EBn
+        DI+9Ibfu1Ox+PtrLTr5hxUqiqsJfIYYLaWPJSAgzK4TkzumHp64/2kVmS0bb3xJ+
+        +tytJv054d2PwLgaLLioD0CnRPQhXK1JPKmqUVP3aCIWJIa/1vchqgIXcXUyaQzG
+        ghi2SW1UOrX1iNzJiO6CCkO0ad4V7FnvbMS2uxFpwYQ97/Mwh/iF0BhblcFM5niO
+        OrUeiLZWMTgg4PWc06FFTyECAwEAAQ==
+        -----END PUBLIC KEY-----
+        """;
 
     private static readonly string LastPublishedMarkerPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -709,7 +1106,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
                 return;
             }
 
-            StatusMessage = "Pushed. Remember to publish the registry as a GitHub release so the manager picks it up.";
+            StatusMessage = "Pushed. That's local history only — click Publish to change what managers actually read.";
         }
         catch (Exception ex)
         {

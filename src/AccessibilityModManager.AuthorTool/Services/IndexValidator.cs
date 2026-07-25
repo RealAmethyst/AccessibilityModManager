@@ -18,11 +18,6 @@ public sealed record IndexValidationResult(
 /// </summary>
 public sealed class IndexValidator
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
-
     private readonly HttpClient _httpClient;
     private readonly ILogger _logger;
 
@@ -47,31 +42,44 @@ public sealed class IndexValidator
                     $"index.json fetch returned HTTP {(int)resp.StatusCode}.", 0, 0);
 
             var json = await resp.Content.ReadAsStringAsync(ct);
-            PluginRepoIndex? index;
+
+            // The MANAGER's validation, run strictly: what the green tick approves must be
+            // exactly what every user's manager will accept (audit finding 38 — the old check
+            // here looked at the id and a release count and nothing else). For the author,
+            // even a per-release problem the manager would merely hide is a failure to fix.
+            AccessibilityModManager.Infrastructure.Services.IndexValidationReport report;
             try
             {
-                index = JsonSerializer.Deserialize<PluginRepoIndex>(json, JsonOptions);
+                report = AccessibilityModManager.Infrastructure.Services.PluginIndexValidation
+                    .Validate(entry.Id, json);
             }
             catch (JsonException ex)
             {
                 return new IndexValidationResult(false, $"index.json is not valid JSON: {ex.Message}", 0, 0);
             }
+            catch (InvalidOperationException ex)
+            {
+                return new IndexValidationResult(false, ex.Message, 0, 0);
+            }
 
-            if (index == null)
-                return new IndexValidationResult(false, "index.json deserialized to null.", 0, 0);
+            var problems = report.TrustErrors.Concat(report.UnobtainableReleases).ToList();
+            if (problems.Count > 0)
+            {
+                const int shown = 5;
+                var text = string.Join(Environment.NewLine, problems.Take(shown));
+                if (problems.Count > shown)
+                    text += Environment.NewLine + $"...and {problems.Count - shown} more.";
+                return new IndexValidationResult(false, text,
+                    report.Index.Games.Count, report.Index.ReleasesByGameId.Values.Sum(rs => rs.Count));
+            }
 
-            if (!string.Equals(index.PluginId, entry.Id, StringComparison.OrdinalIgnoreCase))
-                return new IndexValidationResult(false,
-                    $"Plugin ID mismatch: registry entry says \"{entry.Id}\" but the index.json says \"{index.PluginId}\".",
-                    0, 0);
-
-            var releaseCount = index.ReleasesByGameId.Values.Sum(rs => rs.Count);
+            var releaseCount = report.Index.ReleasesByGameId.Values.Sum(rs => rs.Count);
             if (releaseCount == 0)
                 return new IndexValidationResult(false,
                     "index.json has no releases yet. Wait until the author publishes at least one before accepting.",
-                    index.Games.Count, 0);
+                    report.Index.Games.Count, 0);
 
-            return new IndexValidationResult(true, null, index.Games.Count, releaseCount);
+            return new IndexValidationResult(true, null, report.Index.Games.Count, releaseCount);
         }
         catch (Exception ex)
         {

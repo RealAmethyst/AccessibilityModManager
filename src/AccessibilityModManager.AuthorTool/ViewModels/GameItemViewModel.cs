@@ -67,6 +67,7 @@ public sealed partial class GameItemViewModel : ObservableObject
     public GameItemViewModel(GameDefinition def, IList<ModRelease> releases, IndexEditorViewModel parent)
     {
         _parent = parent;
+        _originalGameId = def.GameId;
         _gameId = def.GameId;
         _displayName = def.DisplayName;
         _modName = def.ModName;
@@ -184,6 +185,13 @@ public sealed partial class GameItemViewModel : ObservableObject
 
     internal void MarkParentDirty() => _parent.MarkDirty();
 
+    /// <summary>
+    /// The id this game had when the editor loaded it (or last saved it). The save-back looks
+    /// the game up by THIS id, not the editable one — looking up by the edited id found
+    /// nothing and silently dropped every change on the game (audit finding 9).
+    /// </summary>
+    private string _originalGameId;
+
     public void WriteBackTo(PluginRepoIndex index)
     {
         // Game ids become folder names on every user's machine — block unsafe ones at save time
@@ -191,8 +199,48 @@ public sealed partial class GameItemViewModel : ObservableObject
         AccessibilityModManager.Infrastructure.Security.PathSafety.EnsureSafeId(
             GameId, $"Game id for \"{DisplayName}\"");
 
-        var def = index.Games.FirstOrDefault(g => g.GameId == GameId);
+        var def = index.Games.FirstOrDefault(g => g.GameId == _originalGameId);
         if (def == null) return;
+
+        // Collision detection is case-INSENSITIVE even though identity comparisons elsewhere are
+        // ordinal: game ids become folder names and receipt keys on Windows, where "Game" and
+        // "game" are the same place. An ordinal-only check would wave through a rename that
+        // silently shares another game's install records.
+        var idChanged = !string.Equals(_originalGameId, GameId, StringComparison.Ordinal);
+        if (idChanged &&
+            (index.Games.Any(g => !ReferenceEquals(g, def) &&
+                                  string.Equals(g.GameId, GameId, StringComparison.OrdinalIgnoreCase)) ||
+             index.ReleasesByGameId.Keys.Any(k =>
+                 !string.Equals(k, _originalGameId, StringComparison.Ordinal) &&
+                 string.Equals(k, GameId, StringComparison.OrdinalIgnoreCase))))
+        {
+            throw new InvalidOperationException(
+                $"Can't rename \"{_originalGameId}\" to \"{GameId}\" — another game already uses that id " +
+                "(ids that differ only in capitalisation count as the same id on Windows).");
+        }
+        // The releases survive a rename, but the packages they point at DON'T: each one is already
+        // published and carries a manifest that still names the old game id, and the manager
+        // refuses to install a package whose id doesn't match the game. So a rename that looks
+        // entirely successful quietly stops every existing release from installing. Declining puts
+        // the id back and lets the author's other edits save as normal.
+        if (idChanged)
+        {
+            var affected = index.ReleasesByGameId.TryGetValue(_originalGameId, out var published)
+                ? published.Count
+                : 0;
+            if (affected > 0 &&
+                !_parent.ConfirmDuringSave("Renaming this game breaks its published releases",
+                    $"\"{_originalGameId}\" has {affected} published release(s). Their packages were built " +
+                    "with the old id inside them, and the manager refuses to install a package whose id " +
+                    "doesn't match the game — so after this rename, none of them would install.\n\n" +
+                    $"To fix that you'd rebuild each package for \"{GameId}\" and publish it under a new " +
+                    "version number.\n\nRename it anyway?"))
+            {
+                GameId = _originalGameId;
+                idChanged = false;
+            }
+        }
+
         var newDef = new GameDefinition
         {
             GameId = GameId,
@@ -213,6 +261,34 @@ public sealed partial class GameItemViewModel : ObservableObject
         };
         var idx = index.Games.IndexOf(def);
         if (idx >= 0) index.Games[idx] = newDef;
+
+        // Explicit rekey on rename: the releases dictionary is keyed by game id, and every
+        // release inside carries its own GameId that the manager requires to MATCH the key —
+        // moving the list without rewriting the releases would make the whole index refuse to
+        // load (finding 9's second half).
+        if (idChanged)
+        {
+            if (index.ReleasesByGameId.TryGetValue(_originalGameId, out var releases))
+            {
+                index.ReleasesByGameId.Remove(_originalGameId);
+                index.ReleasesByGameId[GameId] = releases
+                    .Select(r => new ModRelease
+                    {
+                        GameId = GameId,
+                        PluginId = r.PluginId,
+                        Version = r.Version,
+                        Channel = r.Channel,
+                        PackageUrl = r.PackageUrl,
+                        Sha256 = r.Sha256,
+                        ChangelogUrl = r.ChangelogUrl,
+                        Notes = r.Notes,
+                        Compatibility = r.Compatibility,
+                        Patreon = r.Patreon
+                    })
+                    .ToList();
+            }
+            _originalGameId = GameId;
+        }
     }
 
     /// <summary>

@@ -19,7 +19,9 @@ public sealed record RegistryMembershipResult(
 public sealed class RegistryMembershipChecker
 {
     public static readonly Uri RegistryUrl =
-        new("https://github.com/RealAmethyst/accessibility-mod-manager-registry/releases/latest/download/plugin-registry.json");
+        // The registry's canonical home is the VPS (GitHub retired with the publish-to-VPS
+        // move); this must match the manager's own hardcoded trust anchor in AppConfig.
+        new("https://accessibilitymods.com/registry/plugin-registry.json");
 
     public const string RegistryRepo = "RealAmethyst/accessibility-mod-manager-registry";
 

@@ -17,17 +17,26 @@ public class DependencyCheckerRegistryTests : IDisposable
     private readonly string _keyName = @"Software\AMMTest_" + Guid.NewGuid().ToString("N");
     private readonly string _tempRoot;
 
+    /// <summary>A key shaped like .NET's runtime record: the VALUE NAMES are the versions.</summary>
+    private readonly string _versionNamesKey = @"Software\AMMTest_" + Guid.NewGuid().ToString("N");
+
     public DependencyCheckerRegistryTests()
     {
         _tempRoot = Path.Combine(Path.GetTempPath(), "ammtest_depreg_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempRoot);
         using var key = Registry.CurrentUser.CreateSubKey(_keyName);
         key.SetValue("Version", "2.5.0");
+
+        using var verKey = Registry.CurrentUser.CreateSubKey(_versionNamesKey);
+        verKey.SetValue("9.0.5", 1);
+        verKey.SetValue("10.0.8", 1);
+        verKey.SetValue("InstallLocation", @"C:\x"); // non-version noise the filter must skip
     }
 
     public void Dispose()
     {
         try { Registry.CurrentUser.DeleteSubKeyTree(_keyName, throwOnMissingSubKey: false); } catch { }
+        try { Registry.CurrentUser.DeleteSubKeyTree(_versionNamesKey, throwOnMissingSubKey: false); } catch { }
         try { Directory.Delete(_tempRoot, recursive: true); } catch { }
     }
 
@@ -202,5 +211,45 @@ public class DependencyCheckerRegistryTests : IDisposable
         var status = await CheckAsync(dep);
         Assert.Equal(DependencyStatusKind.Missing, status.Status);
         Assert.Contains("contradicts", status.Details);
+    }
+
+    private Dependency VersionNamesDep(string minVersion) => new()
+    {
+        Id = "dep-1",
+        Type = "system",
+        MinVersion = minVersion,
+        Check = new DependencyCheck { RegistryKey = _versionNamesKey, RegistryHive = "HKCU" }
+    };
+
+    [Fact]
+    public async Task VersionNamedValues_HighestSatisfiesMin_Installed()
+    {
+        // The .NET-runtime shape (audit finding 10): no value name, versions ARE the value names.
+        var status = await CheckAsync(VersionNamesDep("10.0.0"));
+        Assert.Equal(DependencyStatusKind.Installed, status.Status);
+    }
+
+    [Fact]
+    public async Task VersionNamedValues_AllTooOld_IncompatibleNamingTheBest()
+    {
+        var status = await CheckAsync(VersionNamesDep("11.0.0"));
+        Assert.Equal(DependencyStatusKind.Incompatible, status.Status);
+        Assert.Contains("10.0.8", status.Details);
+    }
+
+    [Fact]
+    public async Task VersionNamedValues_KeyWithoutVersionEntries_Missing()
+    {
+        var dep = new Dependency
+        {
+            Id = "dep-1",
+            Type = "system",
+            MinVersion = "1.0.0",
+            Check = new DependencyCheck { RegistryKey = _keyName, RegistryHive = "HKCU" }
+        };
+        // _keyName holds only a value NAMED "Version" — not a version-shaped name.
+        var status = await CheckAsync(dep);
+        Assert.Equal(DependencyStatusKind.Missing, status.Status);
+        Assert.Contains("no version entries", status.Details);
     }
 }

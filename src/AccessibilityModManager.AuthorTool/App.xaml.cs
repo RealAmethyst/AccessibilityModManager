@@ -83,7 +83,8 @@ public partial class App : Application
             ConfirmDialog,
             BrowseForFolder,
             PromptForString,
-            () => mainVm.OpenRegistryAdmin());
+            () => mainVm.OpenRegistryAdmin(),
+            () => ShowServerUploadSettingsDialog(sp));
     }
 
     private static RegistryAdminViewModel CreateRegistryAdmin(IServiceProvider sp, MainViewModel mainVm)
@@ -92,6 +93,7 @@ public partial class App : Application
             sp.GetRequiredService<AuthorConfigService>(),
             sp.GetRequiredService<GitHubService>(),
             sp.GetRequiredService<GitService>(),
+            sp.GetRequiredService<ServerUploadService>(),
             sp.GetRequiredService<IndexValidator>(),
             sp.GetRequiredService<ILogger>(),
             ShowInfoDialog,
@@ -124,6 +126,7 @@ public partial class App : Application
             sp.GetRequiredService<Sha256HashService>(),
             sp.GetRequiredService<GitService>(),
             sp.GetRequiredService<GitHubService>(),
+            sp.GetRequiredService<ServerUploadService>(),
             sp.GetRequiredService<PatreonAuthorService>(),
             sp.GetRequiredService<ILogger>(),
             ShowInfoDialog,
@@ -177,7 +180,7 @@ public partial class App : Application
         return vm.Confirmed ? vm : null;
     }
 
-    private static AccessibilityModManager.Core.Models.ModRelease? ShowReleaseDialog(
+    private static ReleaseDialogResult? ShowReleaseDialog(
         IServiceProvider sp,
         string gameId, string gameDisplayName, string pluginId, string projectPath, string? initialSourceRepo,
         System.Collections.ObjectModel.ObservableCollection<string> availableGitHubRepos,
@@ -203,6 +206,7 @@ public partial class App : Application
             sp.GetRequiredService<ServerUploadService>(),
             sp.GetRequiredService<ILogger>(),
             ShowInfoDialog,
+            ConfirmDialog,
             BrowseForFile,
             showBuildPackage,
             existingRelease);
@@ -212,7 +216,7 @@ public partial class App : Application
             Owner = Application.Current?.MainWindow
         };
         dialog.ShowDialog();
-        return vm.Result;
+        return vm.Result is null ? null : new ReleaseDialogResult(vm.Result, vm.GateChange);
     }
 
     private static string? ShowBuildPackageDialog(

@@ -20,6 +20,7 @@ public sealed partial class ProjectPickerViewModel : ObservableObject
     private readonly Func<string?, string?> _browseForFolder;
     private readonly Func<string, string, string?, string?> _promptForString;
     private readonly Action _openRegistryAdmin;
+    private readonly Action _showServerUploadSettingsDialog;
 
     [ObservableProperty]
     private bool _isLoading;
@@ -50,7 +51,8 @@ public sealed partial class ProjectPickerViewModel : ObservableObject
         Func<string, string, bool> confirmDialog,
         Func<string?, string?> browseForFolder,
         Func<string, string, string?, string?> promptForString,
-        Action openRegistryAdmin)
+        Action openRegistryAdmin,
+        Action showServerUploadSettingsDialog)
     {
         _configService = configService;
         _gitHubService = gitHubService;
@@ -63,6 +65,7 @@ public sealed partial class ProjectPickerViewModel : ObservableObject
         _browseForFolder = browseForFolder;
         _promptForString = promptForString;
         _openRegistryAdmin = openRegistryAdmin;
+        _showServerUploadSettingsDialog = showServerUploadSettingsDialog;
 
         LoadRecentProjects();
     }
@@ -103,6 +106,14 @@ public sealed partial class ProjectPickerViewModel : ObservableObject
 
     [RelayCommand]
     private void OpenAdmin() => _openRegistryAdmin();
+
+    /// <summary>
+    /// The download server is configured per MACHINE, not per project — every project and the
+    /// registry admin screen share the one setting. Reaching it used to mean opening some
+    /// project first, which put a global setting behind an unrelated choice.
+    /// </summary>
+    [RelayCommand]
+    private void EditServerUploadSettings() => _showServerUploadSettingsDialog();
 
     [RelayCommand]
     private void OpenLocalFolder()

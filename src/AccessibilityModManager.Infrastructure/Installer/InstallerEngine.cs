@@ -624,7 +624,8 @@ public sealed class InstallerEngine : IInstallerEngine
 
             if (manifest.PreInstall is not null && (!isUpdate || manifest.PreInstall.RunOnUpdate))
             {
-                await RunHookOrThrow("Pre-install", manifest.PreInstall, tempDir, game, scriptHost, ct);
+                await RunHookOrThrow("Pre-install", manifest.PreInstall, tempDir, game,
+                    backupFolder, allChanges, scriptHost, ct);
             }
 
             // Run install actions — every file change is journaled into allChanges before writing.
@@ -636,7 +637,8 @@ public sealed class InstallerEngine : IInstallerEngine
 
             if (manifest.PostInstall is not null && (!isUpdate || manifest.PostInstall.RunOnUpdate))
             {
-                await RunHookOrThrow("Post-install", manifest.PostInstall, tempDir, game, scriptHost, ct);
+                await RunHookOrThrow("Post-install", manifest.PostInstall, tempDir, game,
+                    backupFolder, allChanges, scriptHost, ct);
             }
 
             // Build receipt (with cached post-uninstall script if any)
@@ -759,6 +761,8 @@ public sealed class InstallerEngine : IInstallerEngine
         LifecycleScript script,
         string stagingDir,
         GameInstall game,
+        string backupFolder,
+        List<FileChange> journal,
         IScriptHost? scriptHost,
         CancellationToken ct)
     {
@@ -774,7 +778,8 @@ public sealed class InstallerEngine : IInstallerEngine
         var scriptAbsolute = stagingScriptPath;
         if (script.RunFromGameFolder)
         {
-            gameFolderRun = PrepareGameFolderRun(stagingScriptPath, script, game.InstallPath, hookLabel);
+            gameFolderRun = PrepareGameFolderRun(stagingScriptPath, script, game.InstallPath, hookLabel,
+                backupFolder, journal);
             scriptAbsolute = gameFolderRun.GameFolderScriptPath;
         }
 
@@ -832,11 +837,17 @@ public sealed class InstallerEngine : IInstallerEngine
 
     /// <summary>
     /// Copies the staging-area script into the game folder so it runs with the game folder
-    /// as its own location. If a file with that name already exists, it's stashed to a temp
-    /// path so <see cref="CleanupGameFolderRun"/> can restore it.
+    /// as its own location. If a file with that name already exists: for a script the author
+    /// KEEPS in the game folder (<see cref="LifecycleScript.InstallToGameFolder"/>), the
+    /// original goes into the REAL install transaction — backup folder + journal — so uninstall
+    /// restores the true original (before this, the temp stash was discarded by the keep flag
+    /// and uninstall "restored" the script over the user's file: audit finding 11, option 2).
+    /// For a temporary copy, the original is stashed to a temp path and
+    /// <see cref="CleanupGameFolderRun"/> restores it right after the run.
     /// </summary>
     private GameFolderRunState PrepareGameFolderRun(
-        string stagingScriptPath, LifecycleScript script, string gameFolder, string hookLabel)
+        string stagingScriptPath, LifecycleScript script, string gameFolder, string hookLabel,
+        string backupFolder, List<FileChange> journal)
     {
         var basename = Path.GetFileName(script.Executable);
         if (string.IsNullOrEmpty(basename))
@@ -850,10 +861,42 @@ public sealed class InstallerEngine : IInstallerEngine
         string? backupPath = null;
         if (File.Exists(targetPath))
         {
-            backupPath = Path.Combine(Path.GetTempPath(),
-                $"amm-script-backup-{Guid.NewGuid():N}-{basename}");
-            File.Copy(targetPath, backupPath, overwrite: true);
-            _logger.Debug("{Hook}: stashed existing {Target} to {Backup}", hookLabel, targetPath, backupPath);
+            if (script.InstallToGameFolder)
+            {
+                // Journal BEFORE the overwrite, same discipline as every action write: a failure
+                // between the copy and the actions still rolls the original back.
+                var backupRel = _backupManager.BackupFile(gameFolder, basename, backupFolder);
+                journal.Add(new FileChange
+                {
+                    Type = ChangeType.Replaced,
+                    RelativePath = basename,
+                    BackupRelativePath = backupRel
+                });
+                _logger.Information(
+                    "{Hook}: existing {Target} backed up into the install transaction (script stays in the game folder)",
+                    hookLabel, targetPath);
+            }
+            else
+            {
+                backupPath = Path.Combine(Path.GetTempPath(),
+                    $"amm-script-backup-{Guid.NewGuid():N}-{basename}");
+                File.Copy(targetPath, backupPath, overwrite: true);
+                _logger.Debug("{Hook}: stashed existing {Target} to {Backup}", hookLabel, targetPath, backupPath);
+            }
+        }
+        else if (script.InstallToGameFolder)
+        {
+            // Nothing was there before, and this script is one the author keeps in the game
+            // folder — so this copy CREATES a file the transaction now owns. Without the Added
+            // entry, a fatal hook failure leaves the script behind, and the copyFile action the
+            // manifest builder emits for it later sees a file that "already existed" and records
+            // a Replaced whose backup is our own copy — so uninstall restores the script instead
+            // of removing it.
+            journal.Add(new FileChange
+            {
+                Type = ChangeType.Added,
+                RelativePath = basename
+            });
         }
 
         File.Copy(stagingScriptPath, targetPath, overwrite: true);

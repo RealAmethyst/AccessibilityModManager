@@ -150,6 +150,7 @@
         <Grid Grid.Row="4">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
@@ -165,7 +166,52 @@
                 </TextBlock>
             </DockPanel>
 
-            <TextBox Grid.Row="1"
+            <!-- Real fields for the values that actually get edited; they write straight into
+                 the JSON below, so Save / Sign / Publish are unchanged. Born from the outage:
+                 re-pointing the index URL used to mean hand-editing raw JSON in a screen reader. -->
+            <Grid Grid.Row="1" Margin="0,0,0,6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Registry version:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Text="{Binding FieldRegistryVersion, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Registry version"
+                         AutomationProperties.HelpText="Must be raised on every published change. Publish blocks if it wasn't."
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Plugin:" VerticalAlignment="Center" Margin="0,2"/>
+                <ComboBox Grid.Row="1" Grid.Column="1"
+                          ItemsSource="{Binding PluginIds}"
+                          SelectedItem="{Binding SelectedPluginId}"
+                          AutomationProperties.Name="Plugin the fields below edit"
+                          Margin="0,2"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Repo index URL:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding FieldRepoIndexUrl, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Repo index URL"
+                         AutomationProperties.HelpText="The https address of this plugin's index.json. Applies to the JSON once it's a complete https address."
+                         FontFamily="Consolas"
+                         Margin="0,2"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Website:" VerticalAlignment="Center" Margin="0,2"/>
+                <TextBox Grid.Row="3" Grid.Column="1"
+                         Text="{Binding FieldWebsite, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Plugin website"
+                         AutomationProperties.HelpText="Optional https address shown to users. Leave empty to remove it."
+                         Margin="0,2"/>
+            </Grid>
+
+            <TextBox Grid.Row="2"
                      Text="{Binding RegistryJsonContent, UpdateSourceTrigger=PropertyChanged}"
                      AcceptsReturn="True"
                      AcceptsTab="False"
@@ -200,9 +246,10 @@
                         Command="{Binding CommitAndPushCommand}"
                         AutomationProperties.Name="Commit and push registry changes"
                         Margin="0,0,8,0" MinWidth="120"/>
-                <Button Content="Publish release"
+                <Button Content="Publish"
                         Command="{Binding PublishReleaseCommand}"
-                        AutomationProperties.Name="Publish a new GitHub release with the signed registry"
+                        AutomationProperties.Name="Publish the signed registry to your server"
+                        AutomationProperties.HelpText="Uploads the registry and its signature to your server and switches them live. This is what every manager reads."
                         MinWidth="130"/>
             </StackPanel>
             <TextBlock Text="{Binding StatusMessage}"

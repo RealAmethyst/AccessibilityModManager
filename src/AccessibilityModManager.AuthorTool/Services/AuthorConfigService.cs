@@ -44,9 +44,17 @@ public sealed class AuthorConfigService
 
             var json = File.ReadAllText(ConfigFile);
             _cached = JsonSerializer.Deserialize<AuthorConfig>(json, JsonOptions) ?? new AuthorConfig();
-            // Decrypt the SSH passphrase back to cleartext for in-memory use.
+            // Decrypt the SSH passphrase back to cleartext for in-memory use. The explicit flag
+            // decides — never the value's shape (audit finding 38: a passphrase that itself
+            // started with "dpapi:" was stored cleartext and destroyed on the next load).
+            // Flag-less values are legacy: either the old prefix format or original cleartext.
             if (_cached.ServerUpload is { KeyPassphrase.Length: > 0 } su)
-                su.KeyPassphrase = UnprotectSecret(su.KeyPassphrase);
+            {
+                su.KeyPassphrase = su.KeyPassphraseProtected
+                    ? UnprotectByFlag(su.KeyPassphrase)
+                    : UnprotectLegacy(su.KeyPassphrase);
+                su.KeyPassphraseProtected = false; // in memory the value is always cleartext
+            }
             return _cached;
         }
         catch (Exception ex)
@@ -63,10 +71,20 @@ public sealed class AuthorConfigService
 
         // Encrypt the SSH passphrase at rest (DPAPI, current user) instead of storing cleartext.
         // Swap the ciphertext in only for serialization, then restore the cleartext so the rest of
-        // the app keeps using the passphrase normally.
+        // the app keeps using the passphrase normally. Encryption is UNCONDITIONAL and recorded in
+        // the explicit flag — the in-memory value is cleartext by convention, so any passphrase
+        // content is legal, including one that happens to start with "dpapi:".
         var plainPassphrase = config.ServerUpload?.KeyPassphrase;
-        if (config.ServerUpload != null && !string.IsNullOrEmpty(plainPassphrase))
-            config.ServerUpload.KeyPassphrase = ProtectSecret(plainPassphrase);
+        var hasPassphrase = config.ServerUpload != null && !string.IsNullOrEmpty(plainPassphrase);
+        if (hasPassphrase)
+        {
+            config.ServerUpload!.KeyPassphrase = ProtectSecret(plainPassphrase!);
+            config.ServerUpload.KeyPassphraseProtected = true;
+        }
+        else if (config.ServerUpload != null)
+        {
+            config.ServerUpload.KeyPassphraseProtected = false;
+        }
         try
         {
             var json = JsonSerializer.Serialize(config, JsonOptions);
@@ -74,34 +92,66 @@ public sealed class AuthorConfigService
         }
         finally
         {
-            if (config.ServerUpload != null && plainPassphrase != null)
-                config.ServerUpload.KeyPassphrase = plainPassphrase;
+            if (hasPassphrase)
+            {
+                config.ServerUpload!.KeyPassphrase = plainPassphrase!;
+                config.ServerUpload.KeyPassphraseProtected = false;
+            }
         }
         _cached = config;
     }
 
-    // DPAPI protection for the SSH key passphrase. Prefixed so we can tell an encrypted value from a
-    // legacy cleartext one written before encryption existed (those are used as-is, then re-encrypted
-    // on the next save). Entropy pins the blob to this specific use; DPAPI's per-user key is the secret.
-    private const string DpapiPrefix = "dpapi:";
+    // DPAPI protection for the SSH key passphrase. The keyPassphraseProtected flag (not the
+    // value's shape) says whether the stored string is ciphertext. Entropy pins the blob to this
+    // specific use; DPAPI's per-user key is the secret.
+    private const string LegacyDpapiPrefix = "dpapi:";
     private static readonly byte[] PassphraseEntropy = "AMM:Author:ServerUpload:v1"u8.ToArray();
 
     private static string ProtectSecret(string plain)
     {
-        if (plain.StartsWith(DpapiPrefix, StringComparison.Ordinal)) return plain; // already protected
         var bytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), PassphraseEntropy, DataProtectionScope.CurrentUser);
-        return DpapiPrefix + Convert.ToBase64String(bytes);
+        return Convert.ToBase64String(bytes);
     }
 
-    private string UnprotectSecret(string stored)
+    /// <summary>Decrypts a value the flag marks as protected (base64 DPAPI blob, no prefix).</summary>
+    private string UnprotectByFlag(string stored)
     {
-        if (!stored.StartsWith(DpapiPrefix, StringComparison.Ordinal))
-            return stored; // legacy cleartext — used as-is; the next Save re-writes it encrypted
         try
         {
             var bytes = ProtectedData.Unprotect(
-                Convert.FromBase64String(stored[DpapiPrefix.Length..]), PassphraseEntropy, DataProtectionScope.CurrentUser);
+                Convert.FromBase64String(stored), PassphraseEntropy, DataProtectionScope.CurrentUser);
             return Encoding.UTF8.GetString(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't decrypt the saved SSH passphrase (config copied from another user/machine?) — clearing it");
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Handles values saved before the flag existed: the old "dpapi:"-prefixed ciphertext, or
+    /// original pre-encryption cleartext (used as-is; the next Save writes flagged ciphertext).
+    /// </summary>
+    private string UnprotectLegacy(string stored)
+    {
+        if (!stored.StartsWith(LegacyDpapiPrefix, StringComparison.Ordinal))
+            return stored;
+        try
+        {
+            var bytes = ProtectedData.Unprotect(
+                Convert.FromBase64String(stored[LegacyDpapiPrefix.Length..]), PassphraseEntropy, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        // A flagless value that LOOKS encrypted but won't decrypt is the very case finding 38
+        // was about: a real passphrase that happened to start with "dpapi:", stored as-is by
+        // the old prefix-sniffing code. Keep it — erasing it would destroy the one value the
+        // fix exists to protect. The next Save rewrites it as flagged ciphertext.
+        catch (Exception ex) when (ex is FormatException or CryptographicException)
+        {
+            _logger.Warning(
+                "A saved SSH passphrase looks prefixed but doesn't decrypt — treating it as the literal passphrase it probably is");
+            return stored;
         }
         catch (Exception ex)
         {
@@ -158,6 +208,24 @@ public sealed class AuthorConfigService
         return config.RecentProjects.FirstOrDefault(p =>
             string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase));
     }
+
+    /// <summary>
+    /// Records the fingerprint of the index.json this machine just published for a project.
+    /// See <see cref="RecentProject.LastPublishedIndexSha256"/> for what it's used to decide.
+    /// </summary>
+    public void SetLastPublishedIndexSha(string projectPath, string sha256)
+    {
+        var config = Load();
+        var project = config.RecentProjects.FirstOrDefault(p =>
+            string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase));
+        if (project == null) return;
+
+        project.LastPublishedIndexSha256 = sha256;
+        Save(config);
+    }
+
+    public string? GetLastPublishedIndexSha(string projectPath) =>
+        GetRecent(projectPath)?.LastPublishedIndexSha256;
 
     public void SetGameSourceRepo(string projectPath, string gameId, string sourceRepo)
     {

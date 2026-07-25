@@ -1,21 +1,55 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Security.Cryptography;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Patreon;
+using AccessibilityModManager.Infrastructure.Security;
+using AccessibilityModManager.Infrastructure.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
 
 namespace AccessibilityModManager.AuthorTool.ViewModels;
 
+/// <summary>
+/// A change to what the download server enforces for an ALREADY-PUBLISHED release: new tiers, or
+/// (when <paramref name="Gate"/> is null) no tier lock at all.
+/// <para>
+/// It is carried out of the release dialog rather than applied there because entitlement changes
+/// have to be sequenced with the catalog. Loosening enforcement before the index says so exposes
+/// patrons-only bytes; tightening it before the index says so turns away people the live catalog
+/// still tells to download. Applied once the public index matches, both directions are consistent
+/// at every moment, and a declined publish simply leaves the server as the live catalog describes
+/// it. (A gate that ships WITH new bytes is different and stays inline — it must be in force
+/// before the bytes it protects exist.)
+/// </para>
+/// </summary>
+/// <param name="PublicUrl">
+/// Where the release will be downloadable once the lock is off — so the editor can confirm the
+/// address actually serves it, which is the one check a still-gated release can't do for itself.
+/// Null when the change doesn't make anything public.
+/// </param>
+public sealed record PendingGateChange(
+    string GameId, string Version, PatreonGate? Gate, string? PublicUrl = null);
+
+/// <summary>
+/// What the release dialog hands back: the release to file in the index, plus any server-side
+/// work that must wait until the catalog agrees with it.
+/// </summary>
+public sealed record ReleaseDialogResult(ModRelease Release, PendingGateChange? GateChange);
+
 public sealed partial class ReleaseDialogViewModel : ObservableObject
 {
+    /// <summary>Reads back what's already published, to compare it with what's about to be.</summary>
+    private static readonly System.Net.Http.HttpClient PublishedAssetHttp = new();
+
     private readonly Sha256HashService _hashService;
     private readonly GitHubService _gitHubService;
     private readonly AuthorConfigService _configService;
     private readonly ILogger _logger;
     private readonly Action<string, string> _showInfoDialog;
+    private readonly Func<string, string, bool> _confirmDialog;
     private readonly Func<string, string, string?, string?> _browseForFile;
     private readonly Func<string, string?> _showBuildPackageDialog;
     private readonly string _pluginId;
@@ -26,6 +60,12 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     private string? _previousAutoPackageUrl;
 
     /// <summary>
+    /// Download-server URL produced by a successful publish in this dialog session. Takes
+    /// precedence over <see cref="_existingServerUrl"/> when the release record is built.
+    /// </summary>
+    private string? _freshServerUrl;
+
+    /// <summary>
     /// ServerUrl carried over from the release being edited. The download-server link lives
     /// only on the existing <see cref="PatreonGate.ServerUrl"/> — it isn't surfaced as an
     /// editable field — so we stash it here at construction and re-stamp it onto the rebuilt
@@ -34,6 +74,16 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// <see cref="SaveWithoutUploadAsync"/> recomputes and overwrites it. Null for new releases.
     /// </summary>
     private string? _existingServerUrl;
+
+    /// <summary>
+    /// Version this dialog opened on, for an edit. A package's manifest declares its own version
+    /// and the manager refuses an install where the two disagree, so changing the version while
+    /// keeping the old package is not a metadata edit — it's a broken release.
+    /// </summary>
+    private readonly string? _existingVersion;
+
+    /// <summary>The gate this release opened with, so a tier-only change can be detected.</summary>
+    private readonly PatreonGate? _existingGate;
 
     public string GameDisplayName { get; }
     public bool IsEditingExistingRelease { get; }
@@ -78,7 +128,23 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     private string? _releaseNotes;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsNotBusy))]
     private bool _isBusy;
+
+    /// <summary>
+    /// Drives IsEnabled on the form and the save buttons. While a publish is in flight the
+    /// author must not be able to edit the version or fingerprint the upload was based on, or
+    /// start a second save on top of the first.
+    /// </summary>
+    public bool IsNotBusy => !IsBusy;
+
+    /// <summary>
+    /// What was actually published, captured before the upload started. The saved release is
+    /// built from this, never from form fields that could have changed underneath it.
+    /// </summary>
+    private sealed record PublishedIdentity(string Version, string Sha256);
+
+    private PublishedIdentity? _published;
 
     [ObservableProperty]
     private string? _statusMessage;
@@ -93,6 +159,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsPatreonPostUiVisible))]
     [NotifyPropertyChangedFor(nameof(IsServerUploadInfoVisible))]
     [NotifyPropertyChangedFor(nameof(IsHostingSelectorVisible))]
+    [NotifyPropertyChangedFor(nameof(IsHostingHintVisible))]
     [NotifyPropertyChangedFor(nameof(IsHostingOnGitHub))]
     [NotifyPropertyChangedFor(nameof(IsHostingOnServer))]
     [NotifyPropertyChangedFor(nameof(IsPublicServerInfoVisible))]
@@ -134,6 +201,17 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// GitHub as an option).
     /// </summary>
     public bool IsHostingSelectorVisible => IsPublicRelease && IsServerUploadConfigured;
+
+    /// <summary>
+    /// Shown in the selector's place when there's no server configured. A control that simply
+    /// isn't rendered is invisible to a screen reader — there's no way to discover that the
+    /// choice exists, or what to do to get it — so the absence explains itself instead.
+    /// </summary>
+    public bool IsHostingHintVisible => IsPublicRelease && !IsServerUploadConfigured;
+
+    public string HostingHintText =>
+        "Hosting on GitHub. To host releases on your own server instead, close this dialog and " +
+        "fill in Server settings, then add the release again.";
 
     /// <summary>
     /// True when this public release will be uploaded to / served from GitHub. Used to
@@ -269,6 +347,13 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     public Action? CloseDialog { get; set; }
     public ModRelease? Result { get; private set; }
 
+    /// <summary>
+    /// Set when this save changes what the server enforces for a release whose package is already
+    /// published — new tiers, or no lock at all. The index editor applies it after the public
+    /// catalog has switched. See <see cref="PendingGateChange"/> for why it can't happen here.
+    /// </summary>
+    public PendingGateChange? GateChange { get; private set; }
+
     private readonly ServerUploadService _serverUpload;
 
     public ReleaseDialogViewModel(
@@ -285,6 +370,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         ServerUploadService serverUpload,
         ILogger logger,
         Action<string, string> showInfoDialog,
+        Func<string, string, bool> confirmDialog,
         Func<string, string, string?, string?> browseForFile,
         Func<string, string?> showBuildPackageDialog,
         ModRelease? existingRelease = null)
@@ -302,6 +388,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         _serverUpload = serverUpload;
         _logger = logger;
         _showInfoDialog = showInfoDialog;
+        _confirmDialog = confirmDialog;
         _browseForFile = browseForFile;
         _showBuildPackageDialog = showBuildPackageDialog;
 
@@ -310,6 +397,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         if (existingRelease != null)
         {
             IsEditingExistingRelease = true;
+            _existingVersion = existingRelease.Version;
+            _existingGate = existingRelease.Patreon;
             _version = existingRelease.Version;
             _channel = existingRelease.Channel;
             _sha256 = existingRelease.Sha256;
@@ -586,6 +675,12 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         await AdoptBuiltZipAsync(resultPath);
     }
 
+    /// <summary>
+    /// Shows the author the hash of the file they just picked or built. It's a preview, not the
+    /// published value — <see cref="StageVerifyAndPublishAsync"/> re-hashes the exact bytes it
+    /// publishes and overwrites <see cref="Sha256"/> with that, so a ZIP rebuilt after being
+    /// picked can't leave a stale hash in the index.
+    /// </summary>
     private async Task AdoptBuiltZipAsync(string path)
     {
         IsBusy = true;
@@ -621,24 +716,24 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             return;
         }
 
+        // Anything that can refuse the release has to refuse it BEFORE bytes go anywhere —
+        // a public URL that 404s is better than a published file no index points at.
+        if (!TryBuildGate(out var gate, out var gateError))
+        {
+            _showInfoDialog("Cannot save release", gateError!);
+            return;
+        }
+
         IsBusy = true;
         try
         {
-            if (!string.IsNullOrWhiteSpace(LocalZipPath))
+            if (!string.IsNullOrWhiteSpace(LocalZipPath) &&
+                !await StageVerifyAndPublishAsync(gate, ChooseDestination(gate, uploadRequested: true)))
             {
-                if (IsHostingOnServer)
-                {
-                    var ok = await UploadPublicReleaseToServerAsync();
-                    if (!ok) return;
-                }
-                else
-                {
-                    var ok = await UploadPublicReleaseToGitHubAsync();
-                    if (!ok) return;
-                }
+                return;
             }
 
-            BuildResult();
+            BuildResult(gate);
             CloseDialog?.Invoke();
         }
         catch (Exception ex)
@@ -652,13 +747,385 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         }
     }
 
+    [RelayCommand]
+    private async Task SaveWithoutUploadAsync()
+    {
+        var error = ValidateForUrlOnly();
+        if (error != null)
+        {
+            _showInfoDialog("Cannot save release", error);
+            return;
+        }
+
+        if (!TryBuildGate(out var gate, out var gateError))
+        {
+            _showInfoDialog("Cannot save release", gateError!);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SourceRepo))
+            _configService.SetGameSourceRepo(_projectPath, _gameId, SourceRepo);
+
+        IsBusy = true;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(LocalZipPath))
+            {
+                if (!await StageVerifyAndPublishAsync(gate, ChooseDestination(gate, uploadRequested: false)))
+                    return;
+            }
+            else if (!await QueueServerGateChangeAsync(gate))
+            {
+                return;
+            }
+
+            BuildResult(gate);
+            CloseDialog?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Save failed for {Game}", _gameId);
+            _showInfoDialog("Save error", ex.Message);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>Where the wrapped ZIP is going, if anywhere, on this save.</summary>
+    private enum PublishDestination
+    {
+        /// <summary>Nothing is uploaded — the file is still opened, hashed and checked.</summary>
+        None,
+        Server,
+        GitHub
+    }
+
     /// <summary>
-    /// GitHub upload path for the "Upload and save" button. Mirrors the historical behaviour:
-    /// requires gh CLI, picks the right asset filename, creates the release if the tag is
-    /// new or clobbers the asset on an existing tag. Returns false when the caller should
-    /// abort (validation failed and we already surfaced a dialog); true on success.
+    /// Decides where the ZIP goes, and it is the ONLY place that decides. A Patreon-gated
+    /// release can only ever go to the author's own download server, which enforces the tier
+    /// check — never to a public GitHub release. The "Upload and save" button is already hidden
+    /// for gated releases, but a hidden button is a UI detail, not a boundary, and the mistake
+    /// it would prevent is publishing patrons-only files in the open.
+    /// <para>
+    /// Gated releases with no server configured, and public releases saved with the "without
+    /// upload" button, publish nothing here: the author uploads the file themselves (to a
+    /// tier-locked Patreon post, or wherever the URL they typed points).
+    /// </para>
     /// </summary>
-    private async Task<bool> UploadPublicReleaseToGitHubAsync()
+    private PublishDestination ChooseDestination(PatreonGate? gate, bool uploadRequested)
+    {
+        if (gate != null)
+        {
+            // See AUTOMATED_RELEASE_UPLOAD.md: the wrapped ZIP and a fresh gate.json go to
+            // /var/www/mod-server/releases/<gameId>/<version>/ over SFTP, and the resulting URL
+            // is stamped onto Patreon.ServerUrl so the manager knows where to fetch from.
+            return IsServerUploadConfigured ? PublishDestination.Server : PublishDestination.None;
+        }
+
+        if (!uploadRequested) return PublishDestination.None;
+
+        return IsHostingOnServer ? PublishDestination.Server : PublishDestination.GitHub;
+    }
+
+    /// <summary>
+    /// The single path every release takes to the outside world (audit finding 37). It stages a
+    /// private copy of the wrapped ZIP under the asset's published filename, holds that copy
+    /// open for the whole operation, and from that one handle: hashes it, opens it as a ZIP and
+    /// checks its manifest the way the manager will, and streams it to the destination. The
+    /// hash published in the index is therefore the hash of the exact bytes that were
+    /// published — not of whatever the file happened to contain when it was picked.
+    /// Returns false when the author should stay in the dialog; every such path has already
+    /// shown them a dialog explaining why.
+    /// </summary>
+    private async Task<bool> StageVerifyAndPublishAsync(PatreonGate? gate, PublishDestination destination)
+    {
+        var version = Version!.Trim();
+        var sourceName = Path.GetFileName(LocalZipPath!);
+
+        // Copying and hashing a wrapped ZIP is real I/O — off the UI thread, or the window
+        // freezes and takes the screen reader's feedback with it.
+        StagedPackage staged;
+        try
+        {
+            StatusMessage = $"Preparing {sourceName}...";
+            staged = await Task.Run(() => StagedPackage.Create(LocalZipPath!, AssetFileName));
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Staging the wrapped ZIP failed for {Game} v{Version}", _gameId, version);
+            _showInfoDialog("Can't read the wrapped ZIP", ex.Message);
+            return false;
+        }
+
+        using (staged)
+        {
+            StatusMessage = $"Checking {staged.FileName}...";
+            var report = await Task.Run(() => PluginPackageValidation.Validate(
+                staged.Stream, _pluginId, _gameId, version, _logger));
+            if (!report.IsValid)
+            {
+                _showInfoDialog("The package won't install",
+                    "The manager would refuse this ZIP on the user's machine:\n\n" +
+                    string.Join("\n\n", report.Errors));
+                return false;
+            }
+
+            // The authoritative identity: the hash comes off the held handle, after the manifest
+            // check, right before the bytes are published — and it is recorded here so the saved
+            // release describes THIS package even if the form is edited later.
+            Sha256 = staged.Sha256;
+            AssetFileName = staged.FileName;
+            _published = new PublishedIdentity(version, staged.Sha256);
+
+            var published = destination switch
+            {
+                PublishDestination.Server => await PublishToServerAsync(staged, version, gate),
+                PublishDestination.GitHub => await PublishToGitHubAsync(staged, version),
+                _ => true
+            };
+            if (!published) return false;
+
+            if (destination == PublishDestination.None)
+                StatusMessage = $"Checked {staged.FileName}. SHA256: {staged.Sha256}";
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Publishes the staged ZIP to the author's own download server — the path both gated and
+    /// public server-hosted releases take. Refuses, before uploading anything, to replace a
+    /// version that is already live with different bytes, and asks first when saving a release
+    /// as public would strip a Patreon gate that's currently in force.
+    /// </summary>
+    private async Task<bool> PublishToServerAsync(StagedPackage staged, string version, PatreonGate? gate)
+    {
+        var serverCfg = _configService.GetServerUploadConfig();
+        if (serverCfg == null)
+        {
+            _showInfoDialog("Server upload not configured",
+                "You don't have a download server configured. Open Settings → Server upload to add one, " +
+                "or pick GitHub as the destination.");
+            return false;
+        }
+
+        ServerUploadService.RemoteReleaseState state;
+        try
+        {
+            StatusMessage = $"Checking what's already published on {serverCfg.Host}...";
+            state = await _serverUpload.ProbeReleaseAsync(
+                serverCfg, _gameId, version, staged.FileName, staged.Stream, staged.Sha256,
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Couldn't read the published state for {Game} v{Version}", _gameId, version);
+            _showInfoDialog("Couldn't reach your server",
+                $"Nothing was uploaded — reading what's already published on {serverCfg.Host} failed:\n\n{ex.Message}");
+            return false;
+        }
+
+        if (state.OtherAssets.Count > 0)
+        {
+            _showInfoDialog("That version folder already holds another file",
+                $"Version {version} on {serverCfg.Host} already contains {string.Join(", ", state.OtherAssets)}, " +
+                $"which isn't the file you're publishing ({staged.FileName}).\n\n" +
+                "A version folder holds exactly one package, because the Patreon tier lock applies to the " +
+                "whole folder — a second file there would ride this release's lock, or lose its own when " +
+                "this one goes public.\n\n" +
+                "Bump the version number and publish that instead. Nothing was uploaded.");
+            return false;
+        }
+
+        if (state.PackageExists && !state.PackageMatches)
+        {
+            _showInfoDialog("That version is already published",
+                $"Version {version} is already live on {serverCfg.Host}, and this ZIP is a different file. " +
+                "Published versions are never overwritten — anyone who already downloaded it would get a " +
+                "hash mismatch on their next check.\n\n" +
+                "Bump the version number and publish that instead. Nothing was uploaded.");
+            return false;
+        }
+
+        if (gate == null && state.GateExists)
+        {
+            if (!_confirmDialog("Make this release public?",
+                    $"Version {version} is currently locked to your Patreon tiers on the server. Saving it " +
+                    "as a public release removes that lock, so anyone with the link can download it.\n\n" +
+                    "The lock stays on until the updated catalog is live, so nothing is exposed before " +
+                    "your index says the release is public.\n\n" +
+                    "Remove the tier lock and publish it publicly?"))
+            {
+                StatusMessage = "Save cancelled — the release is still patrons-only on your server.";
+                return false;
+            }
+        }
+
+        try
+        {
+            StatusMessage = state.PackageMatches
+                ? $"Confirming {staged.FileName} on {serverCfg.Host}..."
+                : $"Uploading {staged.FileName} to {serverCfg.Host}...";
+
+            var outcome = await _serverUpload.PublishReleaseAsync(
+                serverCfg, _gameId, version, staged.FileName, staged.Stream, staged.Sha256,
+                gate, CancellationToken.None);
+
+            if (gate != null)
+                _freshServerUrl = outcome.PublicUrl;
+            else
+                PackageUrl = outcome.PublicUrl;
+
+            // Handed to the index editor, which removes the lock only after the public catalog
+            // has switched to the version that says this release is open.
+            if (outcome.GateRemovalPending)
+                GateChange = new PendingGateChange(_gameId, version, null, outcome.PublicUrl);
+            else if (outcome.GateChangePending)
+                GateChange = new PendingGateChange(_gameId, version, gate);
+
+            // For a public release, prove the address in the index actually serves these bytes.
+            // Uploading over SFTP and building a URL from settings are two different things: a
+            // web root that doesn't correspond to the upload path produces a confident publish
+            // and a 404 for every user. (A gated release can't be checked this way — the server
+            // would rightly turn us away — so its first real test is a patron's download. Nor can
+            // one whose tier lock is still standing while the catalog catches up: it is public in
+            // intent but correctly still gated on the wire.)
+            if (gate == null && !outcome.GateRemovalPending)
+            {
+                StatusMessage = "Checking the public address serves it...";
+                var (status, servedSha) = await TryHashPublishedAsync(new Uri(outcome.PublicUrl));
+                if (status != PublishedProbe.Found)
+                {
+                    _showInfoDialog("Uploaded, but the public address doesn't serve it",
+                        $"The file went up, but {outcome.PublicUrl} " +
+                        (status == PublishedProbe.Absent ? "returned nothing." : "couldn't be read.") +
+                        "\n\nIf it returned nothing, the public base URL and the remote releases path in " +
+                        "Server upload settings most likely point at different places. The release hasn't " +
+                        "been saved — check that and save again.");
+                    StatusMessage = "Published, but not reachable at its public address.";
+                    return false;
+                }
+
+                if (!string.Equals(servedSha, staged.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    _showInfoDialog("The public address serves different bytes",
+                        $"{outcome.PublicUrl} returned a file that isn't the one just published. Something " +
+                        "between the upload and the web server is serving stale or unrelated content.\n\n" +
+                        "The release hasn't been saved — every user would fail the fingerprint check.");
+                    StatusMessage = "Published, but the public address serves something else.";
+                    return false;
+                }
+            }
+
+            StatusMessage = DescribeOutcome(outcome);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Server publish failed for {Game} v{Version}", _gameId, version);
+            _showInfoDialog("Publishing to your server failed",
+                $"{ex.Message}\n\nThe release hasn't been saved. Fix the problem and try again, or cancel " +
+                "to discard it.");
+            StatusMessage = "Publish failed.";
+            return false;
+        }
+    }
+
+    private static string DescribeOutcome(ServerUploadService.ReleasePublishOutcome outcome)
+    {
+        var what = outcome.PackageUploaded
+            ? "Uploaded"
+            : "Already published with these exact bytes — nothing re-uploaded";
+        if (outcome.GateRemovalPending) what += "; the tier lock comes off once the catalog is live";
+        else if (outcome.GateChangePending) what += "; the new tiers apply once the catalog is live";
+        else if (outcome.GateWritten) what += ", tier lock in place";
+        return $"{what}. URL: {outcome.PublicUrl}";
+    }
+
+    /// <summary>
+    /// Handles the saves where no new package is involved but what the server ENFORCES changes:
+    /// the author edits which tiers unlock a release (the common case — it needs no rebuild), or
+    /// makes a patrons-only release public without touching the file. Neither used to reach the
+    /// server at all, so the index would promise one thing while the download server enforced
+    /// another, permanently, with no amount of re-saving reconciling them.
+    /// <para>
+    /// The change is queued rather than applied, so it lands after the catalog agrees with it.
+    /// Returns false only when the author declines making a release public.
+    /// </para>
+    /// </summary>
+    private async Task<bool> QueueServerGateChangeAsync(PatreonGate? gate)
+    {
+        // Only meaningful for a release whose package is already on the author's own server.
+        if (!IsServerUploadConfigured || string.IsNullOrEmpty(_existingServerUrl)) return true;
+
+        var version = Version!.Trim();
+        var serverCfg = _configService.GetServerUploadConfig();
+        if (serverCfg == null) return true;
+
+        if (gate == null)
+        {
+            // Ask the SERVER, not the local index. Once a "make it public" save has written the
+            // gateless release to disk, the index no longer remembers there was a lock — so a
+            // transition interrupted before the catalog went live would otherwise be invisible
+            // for ever, leaving a public release that turns everyone away.
+            bool lockStanding;
+            try
+            {
+                lockStanding = await _serverUpload.GateExistsAsync(
+                    serverCfg, _gameId, version, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Couldn't check the tier lock for {Game} v{Version}", _gameId, version);
+                _showInfoDialog("Couldn't check your server",
+                    $"Reading whether {version} still has a tier lock on {serverCfg.Host} failed:\n\n" +
+                    $"{ex.Message}\n\nThe release hasn't been saved — otherwise your catalog could say it's " +
+                    "public while your server keeps turning people away.");
+                return false;
+            }
+
+            if (!lockStanding) return true;
+
+            if (!_confirmDialog("Make this release public?",
+                    $"Version {version} is currently locked to your Patreon tiers on the server. Saving it " +
+                    "as a public release removes that lock, so anyone with the link can download it.\n\n" +
+                    "The lock comes off once your updated index is live, so nothing is exposed before the " +
+                    "catalog says the release is public.\n\n" +
+                    "Remove the tier lock and publish it publicly?"))
+            {
+                StatusMessage = "Save cancelled — the release is still patrons-only on your server.";
+                return false;
+            }
+
+            // The address the index will carry for this release — the one worth proving works.
+            GateChange = new PendingGateChange(_gameId, version, null, PackageUrl);
+            return true;
+        }
+
+        if (GateDiffersFromPublished(gate))
+            GateChange = new PendingGateChange(_gameId, version, gate);
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when the tiers or campaign differ from what this release opened with. Tier order
+    /// isn't meaningful, so the comparison ignores it.
+    /// </summary>
+    private bool GateDiffersFromPublished(PatreonGate gate) =>
+        _existingGate is null ||
+        !string.Equals(_existingGate.CampaignId, gate.CampaignId, StringComparison.Ordinal) ||
+        !_existingGate.TierIds.OrderBy(t => t, StringComparer.Ordinal)
+            .SequenceEqual(gate.TierIds.OrderBy(t => t, StringComparer.Ordinal), StringComparer.Ordinal);
+
+    /// <summary>
+    /// GitHub upload path for the "Upload and save" button: requires the gh CLI, creates the
+    /// release when the tag is new, or replaces the asset on an existing tag. Uploads the
+    /// staged copy, so what lands on the release is the file that was hashed and checked.
+    /// </summary>
+    private async Task<bool> PublishToGitHubAsync(StagedPackage staged, string version)
     {
         if (string.IsNullOrWhiteSpace(SourceRepo))
         {
@@ -675,24 +1142,52 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             return false;
         }
 
-        var tag = string.IsNullOrWhiteSpace(TagName) ? $"v{Version}" : TagName!;
-        var assetFileName = string.IsNullOrWhiteSpace(AssetFileName)
-            ? Path.GetFileName(LocalZipPath!)
-            : AssetFileName!;
+        var tag = string.IsNullOrWhiteSpace(TagName) ? $"v{version}" : TagName!.Trim();
+        var assetUrl = GitHubService.BuildAssetUrl(SourceRepo, tag, staged.FileName);
 
-        var stagingPath = LocalZipPath!;
-        if (!string.Equals(Path.GetFileName(stagingPath), assetFileName, StringComparison.OrdinalIgnoreCase))
-        {
-            var dir = Path.GetDirectoryName(stagingPath) ?? Path.GetTempPath();
-            var renamed = Path.Combine(dir, assetFileName);
-            if (File.Exists(renamed)) File.Delete(renamed);
-            File.Copy(stagingPath, renamed);
-            stagingPath = renamed;
-        }
-
-        StatusMessage = $"Uploading {assetFileName} to {SourceRepo} {tag}...";
+        StatusMessage = $"Checking what's already published at {SourceRepo} {tag}...";
         var existingReleases = await _gitHubService.ListReleasesAsync(SourceRepo);
         var hasTag = existingReleases.Any(r => r.TagName == tag);
+
+        // A published asset URL is as immutable here as it is on the author's own server. The
+        // GitHub leg used to clobber it, which put new bytes behind the live index's old
+        // fingerprint — every download then failed the manager's hash gate until a new index
+        // went out, and forever if it didn't.
+        if (hasTag)
+        {
+            var (status, publishedSha) = await TryHashPublishedAsync(assetUrl);
+
+            if (status == PublishedProbe.Unreadable)
+            {
+                // The upload below replaces whatever is at that address. Doing that without
+                // knowing what's there is how live bytes get overwritten behind a published
+                // fingerprint, so an unclear answer stops the publish rather than risking it.
+                _showInfoDialog("Couldn't check what's already published",
+                    $"{SourceRepo} {tag} exists, but reading the file already published there failed, so " +
+                    "there's no way to tell whether uploading would replace someone's working download.\n\n" +
+                    "Nothing was uploaded. Try again in a moment.");
+                return false;
+            }
+
+            if (status == PublishedProbe.Found)
+            {
+                if (!string.Equals(publishedSha, staged.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    _showInfoDialog("That release already has this file",
+                        $"{SourceRepo} {tag} already publishes {staged.FileName}, and this ZIP is a different " +
+                        "file. Replacing it would break the download for anyone whose catalog still lists the " +
+                        "old fingerprint.\n\nBump the version and publish that instead. Nothing was uploaded.");
+                    return false;
+                }
+
+                PackageUrl = assetUrl.AbsoluteUri;
+                _configService.SetGameSourceRepo(_projectPath, _gameId, SourceRepo);
+                StatusMessage = $"Already published with these exact bytes — nothing re-uploaded. URL: {PackageUrl}";
+                return true;
+            }
+        }
+
+        StatusMessage = $"Uploading {staged.FileName} to {SourceRepo} {tag}...";
 
         var notes = string.IsNullOrWhiteSpace(ReleaseNotes)
             ? $"Release {tag} for the Accessibility Mod Manager."
@@ -701,7 +1196,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         ProcessResult result;
         if (hasTag)
         {
-            result = await _gitHubService.UploadReleaseAssetAsync(SourceRepo, tag, stagingPath, clobber: true);
+            result = await _gitHubService.UploadReleaseAssetAsync(SourceRepo, tag, staged.Path, clobber: true);
             if (result.Success && !string.IsNullOrWhiteSpace(ReleaseNotes))
             {
                 // Tag already existed; refresh its release notes too.
@@ -716,7 +1211,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 SourceRepo, tag,
                 title: tag,
                 notes: notes,
-                new[] { stagingPath });
+                new[] { staged.Path });
         }
 
         if (!result.Success)
@@ -726,140 +1221,136 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             return false;
         }
 
-        PackageUrl = GitHubService.BuildAssetUrl(SourceRepo, tag, assetFileName).AbsoluteUri;
+        PackageUrl = assetUrl.AbsoluteUri;
         _configService.SetGameSourceRepo(_projectPath, _gameId, SourceRepo);
         StatusMessage = $"Uploaded. URL: {PackageUrl}";
         return true;
     }
 
-    /// <summary>
-    /// Server upload path for a public (non-Patreon) release. Same SFTP service the Patreon
-    /// flow uses, just with no <c>gate.json</c> companion file — the download server serves
-    /// the ZIP over plain HTTPS without checking entitlements. Returns false on caller-abort
-    /// (validation or upload failed and the user has seen a dialog); true on success.
-    /// </summary>
-    private async Task<bool> UploadPublicReleaseToServerAsync()
+    /// <summary>What reading a published asset told us. The three cases must not be conflated.</summary>
+    private enum PublishedProbe
     {
-        var serverCfg = _configService.GetServerUploadConfig();
-        if (serverCfg == null)
-        {
-            _showInfoDialog("Server upload not configured",
-                "You don't have a download server configured. Open Settings → Server upload to add one, or pick GitHub as the destination.");
-            return false;
-        }
+        /// <summary>It's there and we hashed it.</summary>
+        Found,
+        /// <summary>The server says there's nothing at that address.</summary>
+        Absent,
+        /// <summary>We couldn't tell — a network blip, a proxy error, anything but a clean 404.</summary>
+        Unreadable
+    }
 
-        var assetFileName = string.IsNullOrWhiteSpace(AssetFileName)
-            ? Path.GetFileName(LocalZipPath!)
-            : AssetFileName!.Trim();
-
-        // Match the GitHub path's filename-rename behaviour so the file uploaded matches the
-        // public URL's filename component. Without this, picking a ZIP named "foo.zip" but
-        // editing AssetFileName to "bar.zip" would upload "foo.zip" but the URL would point
-        // at "bar.zip".
-        var stagingPath = LocalZipPath!;
-        if (!string.Equals(Path.GetFileName(stagingPath), assetFileName, StringComparison.OrdinalIgnoreCase))
-        {
-            var dir = Path.GetDirectoryName(stagingPath) ?? Path.GetTempPath();
-            var renamed = Path.Combine(dir, assetFileName);
-            if (File.Exists(renamed)) File.Delete(renamed);
-            File.Copy(stagingPath, renamed);
-            stagingPath = renamed;
-        }
-
-        StatusMessage = $"Uploading {assetFileName} to {serverCfg.Host}...";
+    /// <summary>
+    /// Hashes whatever is published at <paramref name="url"/>, streaming it rather than holding
+    /// it in memory — these are mod packages, and buffering one to compare a fingerprint is
+    /// needless pressure. "Couldn't read it" is deliberately distinct from "it isn't there":
+    /// treating a transient failure as absence is exactly how an overwrite gets waved through.
+    /// </summary>
+    private async Task<(PublishedProbe Status, string? Sha256)> TryHashPublishedAsync(Uri url)
+    {
         try
         {
-            await _serverUpload.UploadReleaseAsync(
-                serverCfg, _gameId, Version!.Trim(), stagingPath, gate: null, CancellationToken.None);
+            var separator = string.IsNullOrEmpty(url.Query) ? "?" : "&";
+            var busted = new Uri(url.AbsoluteUri + separator + "_=" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            using var response = await PublishedAssetHttp.GetAsync(
+                busted, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
+
+            if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Gone)
+                return (PublishedProbe.Absent, null);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.Warning("Reading {Url} returned {Status}", url, response.StatusCode);
+                return (PublishedProbe.Unreadable, null);
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            return (PublishedProbe.Found, Convert.ToHexStringLower(await SHA256.HashDataAsync(stream)));
         }
         catch (Exception ex)
         {
-            _logger.Error(ex, "Public server upload failed for {Game} v{Version}", _gameId, Version);
-            _showInfoDialog("Server upload failed",
-                $"Couldn't upload the wrapped ZIP to {serverCfg.Host}:\n\n{ex.Message}");
-            return false;
+            _logger.Warning(ex, "Couldn't read the published asset at {Url}", url);
+            return (PublishedProbe.Unreadable, null);
         }
-
-        PackageUrl = ServerUploadService.BuildPublicUrl(serverCfg, _gameId, Version!.Trim(), assetFileName);
-        StatusMessage = $"Uploaded. URL: {PackageUrl}";
-        return true;
     }
 
-    [RelayCommand]
-    private async Task SaveWithoutUploadAsync()
+    /// <summary>
+    /// A private copy of the wrapped ZIP, named the way it will be published, held open for as
+    /// long as the publish takes. The copy lives in our own temp folder rather than beside the
+    /// author's build output: renaming in place used to overwrite whatever file already had
+    /// that name in their folder, and a build tool writing to the original mid-publish would
+    /// have made the published hash a lie. Deleting the folder is what disposal is for.
+    /// </summary>
+    private sealed class StagedPackage : IDisposable
     {
-        var error = ValidateForUrlOnly();
-        if (error != null)
+        private readonly string _tempDir;
+
+        public FileStream Stream { get; }
+        public string Path { get; }
+        public string FileName { get; }
+        public string Sha256 { get; }
+
+        private StagedPackage(string tempDir, string path, string fileName, FileStream stream, string sha256)
         {
-            _showInfoDialog("Cannot save release", error);
-            return;
+            _tempDir = tempDir;
+            Path = path;
+            FileName = fileName;
+            Stream = stream;
+            Sha256 = sha256;
         }
 
-        if (!string.IsNullOrWhiteSpace(SourceRepo))
-            _configService.SetGameSourceRepo(_projectPath, _gameId, SourceRepo);
-
-        BuildResult();
-
-        // Patreon-gated releases get auto-uploaded to the author's download server when one
-        // is configured (see AUTOMATED_RELEASE_UPLOAD.md). The upload writes the wrapped ZIP
-        // and a fresh gate.json to /var/www/mod-server/releases/<gameId>/<version>/ on the
-        // VPS over SFTP, then sets Patreon.ServerUrl on the release so the manager knows
-        // where to fetch from. If no server is configured, the release saves with no
-        // ServerUrl and the manager falls back to the file-picker flow as before.
-        if (Result?.Patreon != null && !string.IsNullOrEmpty(LocalZipPath))
+        public static StagedPackage Create(string sourcePath, string? assetFileName)
         {
-            var serverCfg = _configService.GetServerUploadConfig();
-            if (serverCfg != null)
+            if (!File.Exists(sourcePath))
+                throw new FileNotFoundException($"The wrapped ZIP isn't there any more: {sourcePath}", sourcePath);
+
+            // The published filename becomes a path segment locally and remotely, so it has to
+            // be a plain file name (audit finding 38c).
+            var fileName = PathSafety.EnsureLeafFileName(
+                string.IsNullOrWhiteSpace(assetFileName) ? System.IO.Path.GetFileName(sourcePath) : assetFileName,
+                "Asset filename");
+
+            var tempDir = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), "AccessibilityModManager.AuthorTool", "publish", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            try
             {
-                IsBusy = true;
-                StatusMessage = $"Uploading to {serverCfg.Host}...";
+                var stagedPath = System.IO.Path.Combine(tempDir, fileName);
+                File.Copy(sourcePath, stagedPath);
+
+                // FileShare.Read: readers (the gh CLI) are fine, writers are locked out for the
+                // lifetime of the publish.
+                var stream = new FileStream(
+                    stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read);
                 try
                 {
-                    await _serverUpload.UploadReleaseAsync(
-                        serverCfg, _gameId, Result.Version, LocalZipPath, Result.Patreon, CancellationToken.None);
-
-                    var fileName = Path.GetFileName(LocalZipPath);
-                    var url = ServerUploadService.BuildPublicUrl(serverCfg, _gameId, Result.Version, fileName);
-                    Result = new ModRelease
-                    {
-                        GameId = Result.GameId,
-                        PluginId = Result.PluginId,
-                        Version = Result.Version,
-                        Channel = Result.Channel,
-                        PackageUrl = Result.PackageUrl,
-                        Sha256 = Result.Sha256,
-                        ChangelogUrl = Result.ChangelogUrl,
-                        Notes = Result.Notes,
-                        Compatibility = Result.Compatibility,
-                        Patreon = new PatreonGate
-                        {
-                            CampaignId = Result.Patreon.CampaignId,
-                            TierIds = Result.Patreon.TierIds,
-                            PostId = Result.Patreon.PostId,
-                            AttachmentFileName = Result.Patreon.AttachmentFileName,
-                            ServerUrl = url
-                        }
-                    };
-                    StatusMessage = $"Uploaded to {url}";
+                    var sha = Convert.ToHexStringLower(SHA256.HashData(stream));
+                    stream.Position = 0;
+                    return new StagedPackage(tempDir, stagedPath, fileName, stream, sha);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    _logger.Error(ex, "Server upload failed for {Game} v{Version}", _gameId, Result.Version);
-                    _showInfoDialog("Server upload failed",
-                        $"Couldn't upload the wrapped ZIP to {serverCfg.Host}:\n\n{ex.Message}\n\n" +
-                        "The release is not yet saved. Fix the issue and try Save again, or cancel " +
-                        "to discard the release.");
-                    StatusMessage = "Upload failed.";
-                    return;
+                    stream.Dispose();
+                    throw;
                 }
-                finally
-                {
-                    IsBusy = false;
-                }
+            }
+            catch
+            {
+                TryDelete(tempDir);
+                throw;
             }
         }
 
-        CloseDialog?.Invoke();
+        public void Dispose()
+        {
+            Stream.Dispose();
+            TryDelete(_tempDir);
+        }
+
+        private static void TryDelete(string dir)
+        {
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
+            catch (IOException) { /* temp folder; the OS cleans up */ }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     [RelayCommand]
@@ -869,68 +1360,155 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         CloseDialog?.Invoke();
     }
 
-    private void BuildResult()
+    /// <summary>
+    /// Builds the release's Patreon block, or reports what's still missing. Runs BEFORE any
+    /// upload: a release that can't be saved must not leave files on the server first. The
+    /// <c>ServerUrl</c> it carries is filled in later — a fresh publish stamps the new URL,
+    /// an edit that doesn't re-upload keeps the link the author already published.
+    /// </summary>
+    private bool TryBuildGate(out PatreonGate? gate, out string? error)
     {
-        PatreonGate? gate = null;
-        if (IsPatreonGated)
+        gate = null;
+        error = null;
+        if (!IsPatreonGated) return true;
+
+        var selectedTierIds = PatreonTierSelections.Where(t => t.IsSelected).Select(t => t.TierId).ToList();
+        if (selectedTierIds.Count == 0)
         {
-            var selectedTierIds = PatreonTierSelections.Where(t => t.IsSelected).Select(t => t.TierId).ToList();
-            if (selectedTierIds.Count == 0)
-                throw new InvalidOperationException(
-                    "Pick at least one Patreon tier that grants access to this release.");
-            if (string.IsNullOrEmpty(_resolvedCampaignId))
-                throw new InvalidOperationException(
-                    "Couldn't resolve your Patreon campaign id. Sign in to Patreon and refresh tiers, then try again.");
+            error = "Pick at least one Patreon tier that grants access to this release.";
+            return false;
+        }
+        if (string.IsNullOrEmpty(_resolvedCampaignId))
+        {
+            error = "Couldn't resolve your Patreon campaign id. Sign in to Patreon and refresh tiers, then try again.";
+            return false;
+        }
 
-            string? postId = null;
-            string? attachmentFileName = null;
-            if (!IsServerUploadConfigured)
+        string? postId = null;
+        string? attachmentFileName = null;
+        if (!IsServerUploadConfigured)
+        {
+            // Patreon-post-as-CDN flow — author manually attached the ZIP to a tier-locked
+            // post and the manager will open the post in the patron's browser as the
+            // file-picker fallback path.
+            postId = PatreonAuthorService.ExtractPostId(PatreonPostUrl ?? "");
+            if (string.IsNullOrEmpty(postId))
             {
-                // Patreon-post-as-CDN flow — author manually attached the ZIP to a tier-locked
-                // post and the manager will open the post in the patron's browser as the
-                // file-picker fallback path.
-                postId = PatreonAuthorService.ExtractPostId(PatreonPostUrl ?? "");
-                if (string.IsNullOrEmpty(postId))
-                    throw new InvalidOperationException(
-                        "Patreon post URL is missing or invalid. Paste the URL of the post your wrapped ZIP is attached to.");
-                attachmentFileName = string.IsNullOrWhiteSpace(SelectedPatreonAttachmentFileName)
-                    ? null
-                    : SelectedPatreonAttachmentFileName!.Trim();
+                error = "Patreon post URL is missing or invalid. Paste the URL of the post your wrapped ZIP is attached to.";
+                return false;
             }
+            attachmentFileName = string.IsNullOrWhiteSpace(SelectedPatreonAttachmentFileName)
+                ? null
+                : SelectedPatreonAttachmentFileName!.Trim();
+        }
 
+        gate = new PatreonGate
+        {
+            CampaignId = _resolvedCampaignId,
+            TierIds = selectedTierIds,
+            PostId = postId,
+            AttachmentFileName = attachmentFileName
+        };
+        return true;
+    }
+
+    private void BuildResult(PatreonGate? gate)
+    {
+        if (gate != null)
+        {
             gate = new PatreonGate
             {
-                CampaignId = _resolvedCampaignId,
-                TierIds = selectedTierIds,
-                PostId = postId,
-                AttachmentFileName = attachmentFileName,
-                // Preserve the existing download-server link by default. A fresh upload in
-                // SaveWithoutUploadAsync overwrites this with a newly computed URL; an edit
-                // that doesn't re-upload keeps the link the author already published.
-                ServerUrl = _existingServerUrl
+                CampaignId = gate.CampaignId,
+                TierIds = gate.TierIds,
+                PostId = gate.PostId,
+                AttachmentFileName = gate.AttachmentFileName,
+                ServerUrl = _freshServerUrl ?? _existingServerUrl
             };
+        }
+
+        // When a package was published in this session, IT decides the version and fingerprint —
+        // the form fields are only a fallback for metadata-only saves. Anything the author typed
+        // into those two fields mid-publish is written back so the dialog stops showing a value
+        // that was never published.
+        if (_published is { } published)
+        {
+            Version = published.Version;
+            Sha256 = published.Sha256;
         }
 
         Result = new ModRelease
         {
             GameId = _gameId,
             PluginId = _pluginId,
-            Version = Version!,
+            Version = _published?.Version ?? Version!,
             Channel = Channel ?? "stable",
             // Patreon-gated releases don't carry a public URL — the manager resolves the
             // attachment URL via the Patreon API at install time.
             PackageUrl = gate is null ? new Uri(PackageUrl!) : null,
-            Sha256 = Sha256!,
+            Sha256 = _published?.Sha256 ?? Sha256!,
             ChangelogUrl = string.IsNullOrWhiteSpace(ChangelogUrl) ? null : ChangelogUrl,
             Notes = string.IsNullOrWhiteSpace(ReleaseNotes) ? null : ReleaseNotes,
             Patreon = gate
         };
     }
 
+    /// <summary>
+    /// The version and the asset filename both become folder and file names — locally in the
+    /// staging copy, remotely as URL segments on the download server. Checking them here means
+    /// the author is told in the form, not by an exception from deep inside a publish (audit
+    /// finding 38c).
+    /// </summary>
+    /// <summary>
+    /// A release's version is baked into its package: the manifest declares it, and the manager
+    /// aborts the install when the two disagree. So changing the version of an existing release
+    /// without producing the package for that version doesn't edit metadata — it publishes a
+    /// release nobody can install. Rebuilding or re-picking the ZIP is the fix, and it also puts
+    /// the file back through the pre-publish checks.
+    /// </summary>
+    private string? ValidateVersionMatchesPackage()
+    {
+        if (!IsEditingExistingRelease || string.IsNullOrEmpty(_existingVersion)) return null;
+        if (!string.IsNullOrWhiteSpace(LocalZipPath)) return null;
+        if (string.Equals(_existingVersion.Trim(), Version?.Trim(), StringComparison.Ordinal)) return null;
+
+        return $"This release's package was built for version {_existingVersion}, and its manifest still " +
+               $"says so — the manager refuses an install where the package and the release disagree.\n\n" +
+               $"Build or pick the wrapped ZIP for {Version?.Trim()} before saving, or set the version back " +
+               $"to {_existingVersion}.";
+    }
+
+    private string? ValidatePublishedNames()
+    {
+        var version = Version?.Trim();
+        if (!string.IsNullOrEmpty(version) &&
+            (version.Contains('/') || version.Contains('\\') || version == "." ||
+             version.Contains("..", StringComparison.Ordinal) || version.Any(char.IsControl)))
+        {
+            return $"Version '{Version}' can't be used as a folder name on your download server. " +
+                   "Use a plain version like 1.2.0 — no slashes or '..'.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(AssetFileName))
+        {
+            try
+            {
+                PathSafety.EnsureLeafFileName(AssetFileName, "Asset filename");
+            }
+            catch (InvalidOperationException ex)
+            {
+                return ex.Message;
+            }
+        }
+
+        return null;
+    }
+
     private string? ValidateForUpload()
     {
         if (string.IsNullOrWhiteSpace(Version)) return "Version is required.";
         if (string.IsNullOrWhiteSpace(Channel)) return "Channel is required.";
+        if (ValidatePublishedNames() is { } nameError) return nameError;
+        if (ValidateVersionMatchesPackage() is { } versionError) return versionError;
         if (string.IsNullOrWhiteSpace(LocalZipPath) && string.IsNullOrWhiteSpace(PackageUrl))
             return "Pick a wrapped ZIP to upload, or paste a public URL and use 'Save without upload'.";
         if (!string.IsNullOrWhiteSpace(PackageUrl) && string.IsNullOrWhiteSpace(Sha256))
@@ -946,6 +1524,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(Version)) return "Version is required.";
         if (string.IsNullOrWhiteSpace(Channel)) return "Channel is required.";
+        if (ValidatePublishedNames() is { } nameError) return nameError;
+        if (ValidateVersionMatchesPackage() is { } versionError) return versionError;
 
         // Patreon-gated releases don't need a public URL — the manager resolves the asset
         // via the Patreon API or the author's download server. SHA256 is still required

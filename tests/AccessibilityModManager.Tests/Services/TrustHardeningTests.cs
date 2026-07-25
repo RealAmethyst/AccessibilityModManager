@@ -223,7 +223,7 @@ public class TrustHardeningTests : IDisposable
                 "gameId": "game-1",
                 "version": "1.0-beta1",
                 "channel": "stable",
-                "sha256": "00",
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
                 "patreon": { "campaignId": "c1", "tierIds": ["t1"], "serverUrl": "", "postId": "" }
               },
               {
@@ -231,7 +231,7 @@ public class TrustHardeningTests : IDisposable
                 "gameId": "game-1",
                 "version": "1.0-beta2",
                 "channel": "stable",
-                "sha256": "00",
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
                 "patreon": { "campaignId": "c1", "tierIds": ["t1"], "serverUrl": "https://downloads.example.invalid/x.zip", "postId": "" }
               },
               {
@@ -240,7 +240,7 @@ public class TrustHardeningTests : IDisposable
                 "version": "2.0.0",
                 "channel": "stable",
                 "packageUrl": "https://example.invalid/pkg.zip",
-                "sha256": "00"
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
               }
             ]
           }
@@ -272,7 +272,7 @@ public class TrustHardeningTests : IDisposable
                 "gameId": "game-1",
                 "version": "0.9.0",
                 "channel": "stable",
-                "sha256": "00"
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
               },
               {
                 "pluginId": "plug-a",
@@ -280,7 +280,7 @@ public class TrustHardeningTests : IDisposable
                 "version": "1.0.0",
                 "channel": "stable",
                 "packageUrl": "https://example.invalid/pkg.zip",
-                "sha256": "00"
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
               }
             ]
           }
@@ -365,7 +365,7 @@ public class TrustHardeningTests : IDisposable
                 "version": "1.0.0",
                 "channel": "stable",
                 "packageUrl": "https://example.invalid/pkg.zip",
-                "sha256": "00"
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
               }
             ]
           }

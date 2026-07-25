@@ -71,7 +71,9 @@ public static class DependencyPresets
         new DependencyPreset
         {
             DisplayName = ".NET 10 Desktop Runtime",
-            Description = "Required for managers/mods that need the .NET 10 runtime.",
+            Description = "Required for managers/mods that need the .NET 10 runtime. Checked via " +
+                          "the runtime's registry record (version-named entries; the x64 runtime " +
+                          "records under the 32-bit registry view, which the checker probes automatically).",
             Build = () => new Dependency
             {
                 Id = "dotnet-10-desktop",
@@ -80,7 +82,11 @@ public static class DependencyPresets
                 MinVersion = "10.0.0",
                 Check = new DependencyCheck
                 {
-                    RegistryKey = @"HKEY_LOCAL_MACHINE\SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App"
+                    // Deliberately NO RegistryValue and NO view pin: the installed versions are
+                    // the value NAMES under this key (highest wins vs MinVersion), and the x64
+                    // runtime writes it under the 32-bit view — the default both-views probe is
+                    // what finds it (audit finding 10; verified against a real install 2026-07-25).
+                    RegistryKey = @"SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App"
                 },
                 Fix = new DependencyFix { DownloadUrl = "https://dotnet.microsoft.com/download/dotnet/10.0" }
             }

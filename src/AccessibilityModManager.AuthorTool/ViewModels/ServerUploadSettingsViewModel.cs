@@ -22,6 +22,12 @@ public sealed partial class ServerUploadSettingsViewModel : ObservableObject
     private string _host = "";
 
     [ObservableProperty]
+    private string _hostKeyFingerprint = "";
+
+    [ObservableProperty]
+    private string _remoteCatalogRoot = "";
+
+    [ObservableProperty]
     private string _user = "";
 
     [ObservableProperty]
@@ -45,6 +51,21 @@ public sealed partial class ServerUploadSettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool _isBusy;
 
+    /// <summary>
+    /// The address managers actually fetch the signed registry from. It's a fixed trust anchor
+    /// compiled into the manager, not a setting — shown read-only so the author can confirm
+    /// what their Publish button is feeding, and copy it when checking the server by hand.
+    /// </summary>
+    public string PublishedRegistryUrl => RegistryMembershipChecker.RegistryUrl.AbsoluteUri;
+
+    /// <summary>
+    /// Companion to <see cref="PublishedRegistryUrl"/> for the per-plugin indexes, resolved the
+    /// same way the index editor resolves the real thing — with a stand-in where the plugin id
+    /// goes — so this display can't drift from where publishing actually puts the file.
+    /// </summary>
+    public string PublishedIndexUrlPattern =>
+        new Uri(RegistryMembershipChecker.RegistryUrl, "plugins/your-plugin-id/index.json").AbsoluteUri;
+
     public Action? CloseDialog { get; set; }
 
     public ServerUploadSettingsViewModel(
@@ -60,6 +81,8 @@ public sealed partial class ServerUploadSettingsViewModel : ObservableObject
         if (existing != null)
         {
             _host = existing.Host;
+            _hostKeyFingerprint = existing.HostKeyFingerprint ?? "";
+            _remoteCatalogRoot = existing.RemoteCatalogRoot;
             _user = existing.User;
             _privateKeyPath = existing.PrivateKeyPath;
             _keyPassphrase = existing.KeyPassphrase;
@@ -118,6 +141,12 @@ public sealed partial class ServerUploadSettingsViewModel : ObservableObject
     private ServerUploadConfig BuildConfig() => new()
     {
         Host = Host?.Trim() ?? "",
+        HostKeyFingerprint = string.IsNullOrWhiteSpace(HostKeyFingerprint)
+            ? null
+            : HostKeyFingerprint.Trim(),
+        RemoteCatalogRoot = string.IsNullOrWhiteSpace(RemoteCatalogRoot)
+            ? new ServerUploadConfig().RemoteCatalogRoot
+            : RemoteCatalogRoot.Trim(),
         User = User?.Trim() ?? "",
         PrivateKeyPath = PrivateKeyPath?.Trim() ?? "",
         KeyPassphrase = KeyPassphrase ?? "",

@@ -80,6 +80,8 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -109,13 +111,25 @@
                            Foreground="#666"
                            Margin="0,8,0,4"/>
 
+                <!-- The download server is one machine-wide setting shared by every project and
+                     by the registry admin screen, so it belongs here as well as inside a project
+                     — needing to open some project first to reach a setting that isn't part of
+                     any project is backwards. Both entry points edit the same stored values. -->
                 <Button Grid.Row="4"
+                        Content="Server settings..."
+                        Command="{Binding EditServerUploadSettingsCommand}"
+                        AutomationProperties.Name="Edit download server settings"
+                        AutomationProperties.HelpText="Your server's address and SSH key. Shared by every project and by the registry admin screen."
+                        HorizontalAlignment="Left"
+                        Margin="0,16,0,0"/>
+
+                <Button Grid.Row="5"
                         x:Name="AdminButton"
                         Content="Registry admin..."
                         Command="{Binding OpenAdminCommand}"
                         AutomationProperties.Name="Open the registry admin view"
                         HorizontalAlignment="Left"
-                        Margin="0,16,0,0"
+                        Margin="0,8,0,0"
                         Visibility="Collapsed"/>
             </Grid>
         </Grid>

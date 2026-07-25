@@ -42,6 +42,10 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="180"/>
@@ -63,8 +67,16 @@
                          AutomationProperties.HelpText="The Linux user on your VPS that owns the releases folder."
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="SSH private key path:" VerticalAlignment="Center" Margin="0,4"/>
-                <Grid Grid.Row="2" Grid.Column="1" Margin="0,4">
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Host key fingerprint:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding HostKeyFingerprint, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Server host key fingerprint"
+                         AutomationProperties.HelpText="Run Test connection to see the server's SHA256 fingerprint. Verify it out-of-band before pasting it here."
+                         FontFamily="Consolas"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="SSH private key path:" VerticalAlignment="Center" Margin="0,4"/>
+                <Grid Grid.Row="3" Grid.Column="1" Margin="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
@@ -82,33 +94,62 @@
                             Margin="8,0,0,0"/>
                 </Grid>
 
-                <TextBlock Grid.Row="3" Grid.Column="0" Text="Key passphrase:" VerticalAlignment="Center" Margin="0,4"/>
-                <PasswordBox Grid.Row="3" Grid.Column="1"
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Key passphrase:" VerticalAlignment="Center" Margin="0,4"/>
+                <PasswordBox Grid.Row="4" Grid.Column="1"
                              x:Name="PassphraseBox"
                              AutomationProperties.Name="SSH key passphrase"
                              AutomationProperties.HelpText="Leave empty if your key has no passphrase."
                              Margin="0,4"/>
 
-                <TextBlock Grid.Row="4" Grid.Column="0" Text="Remote releases path:" VerticalAlignment="Center" Margin="0,4"/>
-                <TextBox Grid.Row="4" Grid.Column="1"
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="Remote releases path:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="5" Grid.Column="1"
                          Text="{Binding RemoteBasePath, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="Remote releases base path"
                          AutomationProperties.HelpText="Absolute POSIX path on the VPS where each game and version subfolder lives."
                          FontFamily="Consolas"
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="5" Grid.Column="0" Text="Public base URL:" VerticalAlignment="Center" Margin="0,4"/>
-                <TextBox Grid.Row="5" Grid.Column="1"
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Remote catalog root:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="6" Grid.Column="1"
+                         Text="{Binding RemoteCatalogRoot, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="Remote catalog root"
+                         AutomationProperties.HelpText="Absolute POSIX path of the registry web root on the VPS. The registry pair and each plugin's index.json publish here."
+                         FontFamily="Consolas"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="Public base URL:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="7" Grid.Column="1"
                          Text="{Binding PublicBaseUrl, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="Public download base URL"
                          AutomationProperties.HelpText="HTTPS URL the manager downloads from. Must start with https://."
                          Margin="0,4"/>
 
-                <TextBlock Grid.Row="6" Grid.Column="0" Text="SFTP port:" VerticalAlignment="Center" Margin="0,4"/>
-                <TextBox Grid.Row="6" Grid.Column="1"
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="SFTP port:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="8" Grid.Column="1"
                          Text="{Binding Port, UpdateSourceTrigger=PropertyChanged}"
                          AutomationProperties.Name="SFTP port"
                          AutomationProperties.HelpText="Defaults to 22. Only change if your server runs SSH on a different port."
+                         Margin="0,4"/>
+
+                <!-- Read-only, so the author can confirm (and copy) exactly which addresses their
+                     publishes will be served from. These come from the manager's built-in
+                     registry address, not from anything editable here. -->
+                <TextBlock Grid.Row="9" Grid.Column="0" Text="Registry is served from:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="9" Grid.Column="1"
+                         Text="{Binding PublishedRegistryUrl, Mode=OneWay}"
+                         IsReadOnly="True"
+                         AutomationProperties.Name="Registry is served from"
+                         AutomationProperties.HelpText="Read-only. The address every manager fetches the signed registry from."
+                         FontFamily="Consolas"
+                         Margin="0,4"/>
+
+                <TextBlock Grid.Row="10" Grid.Column="0" Text="Indexes are served from:" VerticalAlignment="Center" Margin="0,4"/>
+                <TextBox Grid.Row="10" Grid.Column="1"
+                         Text="{Binding PublishedIndexUrlPattern, Mode=OneWay}"
+                         IsReadOnly="True"
+                         AutomationProperties.Name="Indexes are served from"
+                         AutomationProperties.HelpText="Read-only. Where each plugin's index.json lands, with your plugin id in place of the placeholder."
+                         FontFamily="Consolas"
                          Margin="0,4"/>
             </Grid>
         </ScrollViewer>

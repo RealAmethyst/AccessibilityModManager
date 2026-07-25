@@ -73,95 +73,22 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// </summary>
     private PluginRepoIndex ValidateIndex(PluginEntry plugin, string json)
     {
-        var index = JsonSerializer.Deserialize<PluginRepoIndex>(json, JsonOptions)
-            ?? throw new InvalidOperationException($"Repo index for plugin '{plugin.Id}' deserialized to null");
+        // THE validation lives in PluginIndexValidation, shared with the AuthorTool so the
+        // author's own checks match exactly what this client enforces. Trust violations refuse
+        // the whole index; unobtainable releases are dropped one by one with a warning (one
+        // stale entry must never blank the entire catalog - it did, live, 2026-07-24).
+        var report = PluginIndexValidation.Validate(plugin.Id, json);
 
-        // Identity binding: the unsigned index must declare exactly the identity the SIGNED
-        // registry entry promised — including case. Case-insensitive acceptance would let two
-        // spellings of one id flow into receipts and refcounts, whose comparisons are exact;
-        // requiring the registry's spelling keeps a single canonical id everywhere.
-        if (!string.Equals(index.PluginId, plugin.Id, StringComparison.Ordinal))
-            throw new InvalidOperationException(
-                $"Plugin index identity mismatch: the registry entry '{plugin.Id}' served an index claiming " +
-                $"to be '{index.PluginId}' (ids must match exactly, including case). Refusing it.");
+        if (report.TrustErrors.Count > 0)
+            throw new InvalidOperationException(report.TrustErrors[0]);
 
-        // Ids become folder names — they must be safe single segments (no separators, no '..').
-        foreach (var game in index.Games)
+        foreach (var problem in report.UnobtainableReleases)
         {
-            PathSafety.EnsureSafeId(game.GameId, $"plugin '{plugin.Id}' game id");
-            foreach (var dep in game.Dependencies)
-                PathSafety.EnsureSafeId(dep.Id, $"plugin '{plugin.Id}' dependency id");
+            _logger.Warning("{Problem} Hiding it from the catalog - fix the release in the AuthorTool " +
+                            "and republish the index.", problem);
         }
 
-        // Validate releases: HTTPS package URLs (Patreon-gated releases have PackageUrl == null
-        // and are fetched via the author's server or a manual pick), and identities that match
-        // both the signed plugin id and the game they're filed under.
-        //
-        // Two enforcement levels, deliberately different: TRUST violations (identity spoofing,
-        // non-https URLs) refuse the whole index — nothing in it can be believed. AUTHORING
-        // mistakes that merely make one release unobtainable (a gate with no server and no post,
-        // a release with no package source at all) drop THAT release with a warning: one stale
-        // entry must never blank the entire catalog for every user (it did, live, 2026-07-24 —
-        // an early beta authored before the download server existed emptied the Mods tab).
-        // The AuthorTool blocks publishing these; this is the manager-side safety net.
-        foreach (var (gameId, releases) in index.ReleasesByGameId)
-        {
-            PathSafety.EnsureSafeId(gameId, $"plugin '{plugin.Id}' release game id");
-            var unobtainable = new List<ModRelease>();
-            foreach (var release in releases)
-            {
-                if (!string.Equals(release.PluginId, plugin.Id, StringComparison.Ordinal))
-                    throw new InvalidOperationException(
-                        $"Release {gameId}/{release.Version} in plugin '{plugin.Id}' claims plugin id " +
-                        $"'{release.PluginId}' (ids must match exactly, including case). Refusing the index.");
-                if (!string.Equals(release.GameId, gameId, StringComparison.Ordinal))
-                    throw new InvalidOperationException(
-                        $"Release {release.Version} filed under game '{gameId}' in plugin '{plugin.Id}' claims " +
-                        $"game id '{release.GameId}' (ids must match exactly, including case). Refusing the index.");
-
-                // A Patreon gate is validated whenever it is PRESENT — the install flow treats
-                // any non-null gate as gated, even alongside a packageUrl, so a gate must be
-                // usable: an https author server, or a numeric post id for the manual browser
-                // path. A gate with neither would send users to a picker with nothing to pick.
-                if (release.Patreon is not null)
-                {
-                    var hasServer = !string.IsNullOrWhiteSpace(release.Patreon.ServerUrl);
-                    if (hasServer)
-                        UrlValidator.RequireHttps(release.Patreon.ServerUrl!, $"plugin '{plugin.Id}' game '{gameId}' Patreon server URL");
-                    var hasPost = !string.IsNullOrWhiteSpace(release.Patreon.PostId) &&
-                                  release.Patreon.PostId!.All(char.IsAsciiDigit);
-                    if (!hasServer && !hasPost)
-                    {
-                        _logger.Warning(
-                            "Release {PluginId}/{GameId}/{Version} is Patreon-gated but has neither a server URL " +
-                            "nor a numeric post id — hiding it from the catalog. Fix the release in the AuthorTool " +
-                            "and republish the index.",
-                            plugin.Id, gameId, release.Version);
-                        unobtainable.Add(release);
-                        continue;
-                    }
-                }
-
-                if (release.PackageUrl is null)
-                {
-                    if (release.Patreon is null)
-                    {
-                        _logger.Warning(
-                            "Release {PluginId}/{GameId}/{Version} has neither a public packageUrl nor a Patreon " +
-                            "gate — hiding it from the catalog. Fix the release in the AuthorTool and republish the index.",
-                            plugin.Id, gameId, release.Version);
-                        unobtainable.Add(release);
-                    }
-                    continue;
-                }
-                UrlValidator.RequireHttps(release.PackageUrl, $"plugin '{plugin.Id}' game '{gameId}' package URL");
-            }
-
-            foreach (var release in unobtainable)
-                releases.Remove(release);
-        }
-
-        return index;
+        return report.Index;
     }
 
     // ---- offline cache (audit finding 33) ----

@@ -36,8 +36,29 @@ public sealed class ServerUploadConfig
     /// <summary>SFTP host the AuthorTool connects to.</summary>
     public string Host { get; set; } = "";
 
+    /// <summary>
+    /// OpenSSH-style SHA256 fingerprint of the server's host key. Null for configs saved
+    /// before host-key pinning was added; connections then fail closed and report the
+    /// presented fingerprint so the author can verify it out-of-band.
+    /// </summary>
+    public string? HostKeyFingerprint { get; set; }
+
+    /// <summary>
+    /// True when <c>KeyPassphrase</c> is stored as a DPAPI blob. An explicit flag, never inferred
+    /// from the value's shape — a passphrase that happens to start with "dpapi:" must survive
+    /// (audit finding 38). In memory the passphrase is always cleartext and this is false.
+    /// </summary>
+    public bool KeyPassphraseProtected { get; set; }
+
     /// <summary>SSH username on the VPS that owns the releases folder.</summary>
     public string User { get; set; } = "";
+
+    /// <summary>
+    /// Filesystem path of the catalog web root on the VPS — where plugin-registry.json, its
+    /// signature, and plugins/&lt;id&gt;/index.json are served from. Publishing writes here via
+    /// staged uploads and atomic renames. Absent in old configs → the known default.
+    /// </summary>
+    public string RemoteCatalogRoot { get; set; } = "/var/www/accessibilitymods.com/registry";
 
     /// <summary>
     /// Path to the OpenSSH-format private key on the local machine. SSH.NET reads this
@@ -83,6 +104,16 @@ public sealed class RecentProject
     /// </summary>
     public Dictionary<string, GameScriptSources> GameScriptSources { get; set; } = new();
     public DateTime LastOpenedAt { get; set; }
+
+    /// <summary>
+    /// SHA256 of the index.json bytes this machine last successfully published for this project.
+    /// It exists to tell two very different situations apart when the local file and the live one
+    /// disagree at open time: if the local file still matches what was last published, the LIVE
+    /// copy moved on (published elsewhere) and is the one to keep; if it doesn't, the local file
+    /// carries edits that were never published, and taking the live copy would destroy them.
+    /// Null before this machine has ever published the project.
+    /// </summary>
+    public string? LastPublishedIndexSha256 { get; set; }
 }
 
 /// <summary>

@@ -35,7 +35,10 @@
                    Foreground="#666"
                    Margin="0,0,0,12"/>
 
-        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Focusable="False">
+        <!-- Locked while a publish is in flight: editing the version or the fingerprint mid-upload
+             would make the saved release describe something other than the file that went up. -->
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Focusable="False"
+                      IsEnabled="{Binding IsNotBusy}">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -225,6 +228,16 @@
                     <sys:String>My server</sys:String>
                 </ComboBox>
 
+                <!-- Stands in for the selector when there's no server configured, so the choice
+                     is discoverable instead of silently absent. -->
+                <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3"
+                           Text="{Binding HostingHintText}"
+                           TextWrapping="Wrap"
+                           Foreground="#666"
+                           AutomationProperties.Name="{Binding HostingHintText}"
+                           Visibility="{Binding IsHostingHintVisible, Converter={StaticResource BoolToVisConverter}}"
+                           Margin="0,4"/>
+
                 <TextBlock Grid.Row="3" Grid.Column="0"
                            Visibility="{Binding IsHostingOnGitHub, Converter={StaticResource BoolToVisConverter}}"
                            Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
@@ -353,11 +366,13 @@
                     Command="{Binding UploadAndSaveCommand}"
                     AutomationProperties.Name="{Binding UploadButtonAutomationName}"
                     IsDefault="True"
+                    IsEnabled="{Binding IsNotBusy}"
                     Visibility="{Binding IsPublicRelease, Converter={StaticResource BoolToVisConverter}}"
                     Margin="0,0,8,0" MinWidth="120"/>
             <Button Content="{Binding SaveButtonText}"
                     Command="{Binding SaveWithoutUploadCommand}"
                     AutomationProperties.Name="{Binding SaveButtonText}"
+                    IsEnabled="{Binding IsNotBusy}"
                     Margin="0,0,8,0" MinWidth="140"/>
             <Button Content="Cancel"
                     Command="{Binding CancelCommand}"

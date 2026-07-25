@@ -280,6 +280,42 @@ public sealed class DependencyChecker : IDependencyChecker
                 };
             }
 
+            // No value name but a minimum version: the key's VALUE NAMES are the versions.
+            // That's how .NET records installed runtimes — e.g. the x64 desktop runtime's key
+            // (under the 32-bit view!) holds values literally named "10.0.8", "9.0.8", ... —
+            // and it's why the old preset's version rule was dead (audit finding 10). The
+            // highest version-shaped name decides.
+            if (string.IsNullOrEmpty(dep.Check!.RegistryValue) && !string.IsNullOrEmpty(dep.MinVersion))
+            {
+                var best = key.GetValueNames()
+                    .Where(LooksLikeVersion)
+                    .OrderByDescending(v => v, VersionComparer.Instance)
+                    .FirstOrDefault();
+                if (best is null)
+                {
+                    return new DependencyStatus
+                    {
+                        Dependency = dep,
+                        Status = DependencyStatusKind.Missing,
+                        Details = "Key exists but holds no version entries"
+                    };
+                }
+                if (VersionComparer.Instance.Compare(best, dep.MinVersion) < 0)
+                {
+                    return new DependencyStatus
+                    {
+                        Dependency = dep,
+                        Status = DependencyStatusKind.Incompatible,
+                        Details = $"Installed: {best}, required: >= {dep.MinVersion}"
+                    };
+                }
+                return new DependencyStatus
+                {
+                    Dependency = dep,
+                    Status = DependencyStatusKind.Installed
+                };
+            }
+
             // If a specific value name is specified, check it
             if (!string.IsNullOrEmpty(dep.Check.RegistryValue))
             {
