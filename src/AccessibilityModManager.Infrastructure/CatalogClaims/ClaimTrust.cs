@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -25,6 +26,26 @@ public sealed record ClaimTrustAnchor
 }
 
 /// <summary>
+/// One key size, everywhere: creating, importing, signing and verifying.
+///
+/// Pinned rather than "at least 4096" so signature length and verification cost are the same for
+/// every consumer forever. The gap this closes was the other direction, though — the contract said
+/// 4096 while the verifier accepted 3072 and the signing side checked nothing at all, so a weak key
+/// would have been discovered only when a manager refused the first publication made with it.
+/// </summary>
+public static class ClaimKeyPolicy
+{
+    public const int KeySizeBits = 4096;
+
+    public static void Require(RSA key)
+    {
+        if (key.KeySize != KeySizeBits)
+            throw new ClaimFormatException(
+                $"claim signing keys must be RSA {KeySizeBits}; this one is {key.KeySize}");
+    }
+}
+
+/// <summary>
 /// Computes the value bound into every claim, tying it to one plugin, one exact index address, and
 /// one key.
 ///
@@ -41,7 +62,12 @@ public static class ClaimTrustContext
     {
         // Length-prefixed parts, so no combination of values can be rearranged into a different
         // tuple that hashes the same.
-        var sb = new StringBuilder();
+        //
+        // The length is the member's UTF-8 BYTE count, not .NET's UTF-16 char count. That
+        // distinction is invisible until someone outside .NET implements this — the server is a
+        // second implementation of the same contract — and it diverges for any character outside
+        // the basic multilingual plane, where .NET counts two and the bytes number four.
+        using var buffer = new MemoryStream();
         foreach (var part in new[]
                  {
                      anchor.PluginId,
@@ -52,10 +78,14 @@ public static class ClaimTrustContext
                      PublicKeyFingerprint(anchor.PublicKeyPem)
                  })
         {
-            sb.Append(part.Length).Append(':').Append(part).Append('\n');
+            var bytes = Encoding.UTF8.GetBytes(part);
+            buffer.Write(Encoding.UTF8.GetBytes(bytes.Length.ToString(CultureInfo.InvariantCulture)));
+            buffer.WriteByte((byte)':');
+            buffer.Write(bytes);
+            buffer.WriteByte((byte)'\n');
         }
 
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+        return Convert.ToHexStringLower(SHA256.HashData(buffer.ToArray()));
     }
 
     /// <summary>

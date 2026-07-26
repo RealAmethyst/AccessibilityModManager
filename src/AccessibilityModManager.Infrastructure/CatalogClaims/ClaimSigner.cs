@@ -23,6 +23,16 @@ public sealed class ClaimSigner : IDisposable
         _privateKey.ImportFromEncryptedPem(encryptedPrivateKeyPem, passphrase);
         _anchor = anchor;
 
+        try
+        {
+            ClaimKeyPolicy.Require(_privateKey);
+        }
+        catch
+        {
+            _privateKey.Dispose();
+            throw;
+        }
+
         var declared = ClaimTrustContext.PublicKeyFingerprint(anchor.PublicKeyPem);
         var actual = Convert.ToHexStringLower(SHA256.HashData(_privateKey.ExportSubjectPublicKeyInfo()));
         if (!string.Equals(declared, actual, StringComparison.Ordinal))
@@ -63,6 +73,34 @@ public sealed class ClaimSigner : IDisposable
             // If anything we can emit is something the verifier would refuse, that must fail here,
             // at authoring time, and not on a user's machine after publication.
             Payload = ClaimCodec.Parse(payloadBytes)
+        };
+    }
+
+    /// <summary>
+    /// Signs the commitment to a whole claim set. Round-trips through the strict reader for the
+    /// same reason claims do: anything this can emit that a verifier would refuse must fail here,
+    /// while the author is standing in front of it.
+    /// </summary>
+    public SignedManifest SignManifest(long generation, string? parent, string claimsDigest)
+    {
+        var manifest = new ProofManifest
+        {
+            V = ManifestCodec.SupportedVersion,
+            TrustContext = _trustContext,
+            Generation = generation,
+            Parent = parent,
+            ClaimsDigest = claimsDigest
+        };
+
+        var payloadBytes = ManifestCodec.Serialize(manifest);
+        var signature = _privateKey.SignData(ManifestCodec.BytesToSign(payloadBytes),
+            HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+
+        return new SignedManifest
+        {
+            PayloadBytes = payloadBytes,
+            Signature = signature,
+            Manifest = ManifestCodec.Parse(payloadBytes)
         };
     }
 

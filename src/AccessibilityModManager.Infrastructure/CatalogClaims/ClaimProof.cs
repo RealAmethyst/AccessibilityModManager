@@ -12,45 +12,66 @@ namespace AccessibilityModManager.Infrastructure.CatalogClaims;
 public sealed class ClaimProofDocument
 {
     [JsonPropertyName("scheme")]
-    public string Scheme { get; set; } = ClaimTrustAnchor.SchemeV1;
+    public required string Scheme { get; init; }
 
     /// <summary>
-    /// Informational only. Verification uses the key id from the SIGNED REGISTRY — this one is
-    /// unsigned, and trusting it would let anyone relabel a claim set into a different key's
-    /// namespace.
+    /// Must equal the key id the SIGNED REGISTRY names. Nothing is ever taken from here — the
+    /// anchor is the registry's — but a disagreement means the file and the registry describe
+    /// different keys, and publishing or trusting either reading is worse than stopping.
     /// </summary>
     [JsonPropertyName("keyId")]
-    public string KeyId { get; set; } = "";
+    public required string KeyId { get; init; }
+
+    [JsonPropertyName("algorithm")]
+    public required string Algorithm { get; init; }
+
+    /// <summary>
+    /// The publisher's commitment to the whole set. Absent in responses the server has filtered:
+    /// a manager must never require it, because the API strips it from every reply. The publisher
+    /// requires it, because for the publisher its absence is the attack.
+    /// </summary>
+    [JsonPropertyName("manifest")]
+    public ClaimProofEntry? Manifest { get; init; }
 
     [JsonPropertyName("claims")]
-    public List<ClaimProofEntry> Claims { get; set; } = [];
+    public required IReadOnlyList<ClaimProofEntry> Claims { get; init; }
 }
 
-public sealed class ClaimProofEntry
-{
-    /// <summary>The exact signed bytes. Base64 so they survive JSON transport unchanged — a
-    /// verifier checks the signature over these bytes, never over a re-serialization.</summary>
-    [JsonPropertyName("payload")]
-    public string PayloadBase64 { get; set; } = "";
+/// <summary>Exact signed bytes plus the signature over them, both base64.</summary>
+public sealed record ClaimProofEntry(
+    [property: JsonPropertyName("payload")] string PayloadBase64,
+    [property: JsonPropertyName("signature")] string SignatureBase64);
 
-    [JsonPropertyName("signature")]
-    public string SignatureBase64 { get; set; } = "";
-}
+/// <summary>A proof that has been verified end to end, with the manifest it arrived under.</summary>
+public sealed record VerifiedProof(IReadOnlyList<SignedClaim> Claims, SignedManifest? Manifest);
 
 public static class ClaimProof
 {
     /// <summary>Bounds a hostile proof block before any signature work is attempted.</summary>
     public const int MaxClaims = 10_000;
 
-    public static ClaimProofDocument Write(string keyId, IEnumerable<SignedClaim> claims) => new()
+    /// <summary>
+    /// Total transported size of a proof. The per-claim limit alone was not a limit: ten thousand
+    /// claims at 256 KiB each is gigabytes, all of it buffered and base64-decoded before a single
+    /// signature is checked.
+    /// </summary>
+    public const int MaxProofBytes = 8 * 1024 * 1024;
+
+    /// <summary>The whole index, before it is parsed at all.</summary>
+    public const int MaxIndexBytes = 16 * 1024 * 1024;
+
+    public static ClaimProofDocument Write(
+        ClaimTrustAnchor anchor, SignedManifest manifest, IEnumerable<SignedClaim> claims) => new()
     {
         Scheme = ClaimTrustAnchor.SchemeV1,
-        KeyId = keyId,
-        Claims = claims.Select(c => new ClaimProofEntry
-        {
-            PayloadBase64 = Convert.ToBase64String(c.PayloadBytes),
-            SignatureBase64 = Convert.ToBase64String(c.Signature)
-        }).ToList()
+        KeyId = anchor.KeyId,
+        Algorithm = anchor.Algorithm,
+        Manifest = new ClaimProofEntry(
+            Convert.ToBase64String(manifest.PayloadBytes),
+            Convert.ToBase64String(manifest.Signature)),
+        Claims = claims.Select(c => new ClaimProofEntry(
+            Convert.ToBase64String(c.PayloadBytes),
+            Convert.ToBase64String(c.Signature))).ToList()
     };
 
     /// <summary>
@@ -60,47 +81,160 @@ public static class ClaimProof
     /// or tampering, and "use the ones that verified" would let an attacker choose which parts of a
     /// catalog a reader sees simply by corrupting the rest.
     /// </summary>
-    public static IReadOnlyList<SignedClaim> ReadVerified(ClaimProofDocument document, ClaimTrustAnchor anchor)
+    /// <param name="requireManifest">
+    /// True for a publisher extending its own history, where a missing manifest is exactly the
+    /// omission attack. False for a consumer, where the server has legitimately stripped it.
+    /// </param>
+    public static VerifiedProof ReadVerified(
+        ClaimProofDocument document, ClaimTrustAnchor anchor, bool requireManifest)
     {
         if (!string.Equals(document.Scheme, ClaimTrustAnchor.SchemeV1, StringComparison.Ordinal))
             throw new ClaimFormatException($"unsupported proof scheme '{document.Scheme}'");
+        if (!string.Equals(document.KeyId, anchor.KeyId, StringComparison.Ordinal))
+            throw new ClaimFormatException(
+                $"the proof names key '{document.KeyId}' but the registry names '{anchor.KeyId}'");
+        if (!string.Equals(document.Algorithm, anchor.Algorithm, StringComparison.Ordinal))
+            throw new ClaimFormatException(
+                $"the proof names algorithm '{document.Algorithm}' but the registry names '{anchor.Algorithm}'");
 
         if (document.Claims.Count > MaxClaims)
             throw new ClaimFormatException($"proof carries more than {MaxClaims} claims");
 
-        var verifier = new ClaimVerifier(anchor);
+        var transported = document.Claims.Sum(c => (long)c.PayloadBase64.Length + c.SignatureBase64.Length);
+        if (document.Manifest is not null)
+            transported += document.Manifest.PayloadBase64.Length + document.Manifest.SignatureBase64.Length;
+        if (transported > MaxProofBytes)
+            throw new ClaimFormatException($"proof exceeds {MaxProofBytes} bytes");
+
+        using var verifier = new ClaimVerifier(anchor);
         var verified = new List<SignedClaim>(document.Claims.Count);
 
         foreach (var entry in document.Claims)
         {
-            byte[] payload, signature;
-            try
-            {
-                payload = Convert.FromBase64String(entry.PayloadBase64);
-                signature = Convert.FromBase64String(entry.SignatureBase64);
-            }
-            catch (FormatException ex)
-            {
-                throw new ClaimFormatException("a claim in the proof is not valid base64", ex);
-            }
-
+            var (payload, signature) = Decode(entry, "a claim");
             verified.Add(verifier.Verify(payload, signature));
         }
 
         ClaimVerifier.ValidateSet(verified);
-        return verified;
+
+        SignedManifest? manifest = null;
+        if (document.Manifest is not null)
+        {
+            var (payload, signature) = Decode(document.Manifest, "the proof manifest");
+            manifest = verifier.VerifyManifest(payload, signature);
+
+            var actual = ClaimDigest.Compute(verified);
+            if (!string.Equals(manifest.Manifest.ClaimsDigest, actual, StringComparison.Ordinal))
+            {
+                throw new ClaimFormatException(
+                    "the claims in this proof are not the ones its manifest was signed over — one " +
+                    "has been added, removed or replaced since it was published");
+            }
+        }
+        else if (requireManifest)
+        {
+            throw new ClaimFormatException(
+                "this proof carries no manifest, so there is no way to tell whether any of it was " +
+                "removed");
+        }
+
+        return new VerifiedProof(verified, manifest);
     }
 
     /// <summary>
-    /// Pulls the proof block out of a raw index document, or null when there is none — which is the
-    /// normal state for an index published before claims existed.
+    /// Base64 has more than one spelling of the same bytes — embedded whitespace, non-canonical
+    /// trailing bits. Re-encoding and comparing pins one, so two implementations decoding the same
+    /// transport reach the same bytes or neither does.
+    /// </summary>
+    private static (byte[] Payload, byte[] Signature) Decode(ClaimProofEntry entry, string what)
+    {
+        return (One(entry.PayloadBase64, "payload"), One(entry.SignatureBase64, "signature"));
+
+        byte[] One(string text, string field)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = Convert.FromBase64String(text);
+            }
+            catch (FormatException ex)
+            {
+                throw new ClaimFormatException($"{what} has a {field} that is not valid base64", ex);
+            }
+
+            if (!string.Equals(Convert.ToBase64String(bytes), text, StringComparison.Ordinal))
+                throw new ClaimFormatException($"{what} has a {field} whose base64 is not canonical");
+
+            return bytes;
+        }
+    }
+
+    /// <summary>
+    /// Pulls the proof block out of a raw index document, or null when there is genuinely none —
+    /// the normal state for an index published before claims existed.
+    ///
+    /// Read as strictly as the payloads inside it. An index carrying two <c>proof</c> members lets
+    /// one implementation select the first and another the last, each internally valid, each with a
+    /// manifest that commits only to decoded claim payloads and says nothing about which outer
+    /// member a parser picked. And only a genuinely ABSENT proof may be reported as absent: null, a
+    /// scalar, an array or a malformed object are trust violations, because "there is no proof
+    /// here" is the one answer that leads to starting a history over.
     /// </summary>
     public static ClaimProofDocument? TryExtract(string indexJson)
     {
-        using var document = JsonDocument.Parse(indexJson);
-        if (!document.RootElement.TryGetProperty("proof", out var proof)) return null;
-        if (proof.ValueKind != JsonValueKind.Object) return null;
+        if (indexJson.Length > MaxIndexBytes)
+            throw new ClaimFormatException($"the index exceeds {MaxIndexBytes} bytes");
 
-        return JsonSerializer.Deserialize<ClaimProofDocument>(proof.GetRawText());
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(indexJson,
+                new JsonDocumentOptions { AllowDuplicateProperties = false });
+        }
+        catch (JsonException ex)
+        {
+            throw new ClaimFormatException("the index is not valid JSON, or repeats a member", ex);
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                throw new ClaimFormatException("the index is not a JSON object");
+            if (!document.RootElement.TryGetProperty("proof", out var proof)) return null;
+            if (proof.ValueKind != JsonValueKind.Object)
+                throw new ClaimFormatException(
+                    $"the index has a 'proof' member that is not an object (it is {proof.ValueKind})");
+
+            ClaimCodec.RejectUnknownMembers(proof, "proof",
+                ["scheme", "keyId", "algorithm", "manifest", "claims"]);
+
+            if (!proof.TryGetProperty("claims", out var claims) || claims.ValueKind != JsonValueKind.Array)
+                throw new ClaimFormatException("the proof has no 'claims' array");
+            if (claims.GetArrayLength() > MaxClaims)
+                throw new ClaimFormatException($"proof carries more than {MaxClaims} claims");
+
+            return new ClaimProofDocument
+            {
+                Scheme = ClaimCodec.RequireString(proof, "scheme"),
+                KeyId = ClaimCodec.RequireString(proof, "keyId"),
+                Algorithm = ClaimCodec.RequireString(proof, "algorithm"),
+                Manifest = proof.TryGetProperty("manifest", out var manifest)
+                    ? ReadEntry(manifest, "manifest")
+                    : null,
+                Claims = claims.EnumerateArray().Select(c => ReadEntry(c, "claim")).ToList()
+            };
+        }
+    }
+
+    private static ClaimProofEntry ReadEntry(JsonElement element, string what)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+            throw new ClaimFormatException($"a proof {what} is not an object");
+
+        ClaimCodec.RejectUnknownMembers(element, what, ["payload", "signature"]);
+
+        return new ClaimProofEntry(
+            ClaimCodec.RequireString(element, "payload"),
+            ClaimCodec.RequireString(element, "signature"));
     }
 }

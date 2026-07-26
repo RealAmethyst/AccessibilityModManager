@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -8,14 +9,17 @@ using Serilog;
 namespace AccessibilityModManager.AuthorTool.Services;
 
 /// <summary>
-/// Attaches the signed <c>proof</c> block to an index about to be published.
+/// Attaches the signed <c>proof</c> block to an index about to be published, and owns the rule
+/// that makes it safe to do so: publishing extends exactly the history this machine last confirmed,
+/// or it does not happen.
 ///
-/// Deliberately does no I/O. The publish flow already fetches the signed registry (to check it
-/// still points at this address) and the live index (to detect a third-party change), so both inputs
-/// are handed in. Keeping this pure makes the sequencing and revocation logic — the part where a
-/// mistake would be expensive and invisible — directly testable.
+/// Deliberately does no network I/O. The publish flow already fetches the signed registry (to check
+/// it still points at this address) and the live index, so both inputs are handed in. Keeping this
+/// pure makes the sequencing and revocation logic — the part where a mistake would be expensive and
+/// invisible — directly testable.
 /// </summary>
-public sealed class IndexProofService(ClaimSigningKeyStore keyStore, ILogger logger)
+public sealed class IndexProofService(
+    ClaimSigningKeyStore keyStore, PublisherHeadStore headStore, ILogger logger)
 {
     private static readonly JsonSerializerOptions IndexOptions = new()
     {
@@ -71,20 +75,53 @@ public sealed class IndexProofService(ClaimSigningKeyStore keyStore, ILogger log
         return value.GetString()!;
     }
 
-    public sealed record ProofResult(byte[] IndexJson, ClaimSetBuilder.BuildResult Build);
+    /// <summary>
+    /// A prepared publish: the exact bytes to send, what changed, and what this machine has already
+    /// written down about the attempt.
+    /// </summary>
+    public sealed record PreparedPublish(
+        byte[] IndexJson,
+        ClaimSetBuilder.BuildResult Build,
+        PendingPublish Pending);
 
     /// <summary>
-    /// Returns the index bytes with a freshly built proof block attached.
+    /// What an interrupted publish turned out to be, once the live index could be looked at again.
+    /// </summary>
+    public enum PendingOutcome
+    {
+        /// <summary>It landed. Commit the head and carry on.</summary>
+        Landed,
+
+        /// <summary>It never landed; the server still holds the head it was extending.</summary>
+        NotSent,
+
+        /// <summary>Neither — something else is published under this key.</summary>
+        Diverged
+    }
+
+    /// <summary>
+    /// Builds the index bytes with a fresh proof attached, and journals the attempt before
+    /// returning them. Nothing else may upload a proof: the journal has to exist first, or a crash
+    /// between the remote rename and the local commit erases the evidence that this machine may
+    /// already have published — which is precisely what lets a rolled-back server walk the signer
+    /// into issuing a second, different publish under one generation.
     /// </summary>
     /// <param name="localIndexJson">The index about to be published.</param>
     /// <param name="anchor">From the VERIFIED registry — never from the index being published.</param>
     /// <param name="liveIndexJson">
-    /// What is currently published, or null if nothing is. This is the authority for sequence
-    /// numbers: taking them from local state instead would let a restored backup or a second
-    /// machine reissue a number already in use, which reads as the author asserting two different
-    /// truths about one version and is refused by every verifier.
+    /// What is currently published, fetched over SFTP so the manifest is present — after the raw
+    /// route closes, an HTTPS fetch returns a filtered response with the manifest stripped, which
+    /// is indistinguishable from a server that deleted it. Null means the file genuinely is not
+    /// there, PROVEN, not "the fetch failed": those two must never collapse into one value, because
+    /// one of them leads to starting a history over.
     /// </param>
-    public ProofResult AttachProof(byte[] localIndexJson, ClaimTrustAnchor anchor, byte[]? liveIndexJson)
+    /// <param name="allowBootstrap">
+    /// The author has confirmed, deliberately and once, that this is the beginning of this
+    /// catalog's signed history. Never inferred from the absence of a proof, which is also exactly
+    /// what a server that deleted one looks like.
+    /// </param>
+    public PreparedPublish PreparePublish(
+        byte[] localIndexJson, ClaimTrustAnchor anchor, byte[]? liveIndexJson, bool allowBootstrap)
     {
         var indexText = Encoding.UTF8.GetString(localIndexJson);
         var index = JsonSerializer.Deserialize<PluginRepoIndex>(indexText, IndexOptions)
@@ -97,70 +134,241 @@ public sealed class IndexProofService(ClaimSigningKeyStore keyStore, ILogger log
                 $"is '{anchor.PluginId}'. Publishing it would produce claims no manager would accept.");
         }
 
-        var previous = ReadPreviousClaims(liveIndexJson, anchor);
+        var trustContext = ClaimTrustContext.Compute(anchor);
+        var record = headStore.TryLoad(trustContext);
+
+        if (record?.Pending is not null)
+        {
+            throw new InvalidOperationException(
+                "A previous publish was interrupted before this machine could confirm whether it " +
+                "landed. That has to be settled first — publishing on top of it could sign a second " +
+                "version of the same publish.");
+        }
+
+        var live = ReadLiveProof(liveIndexJson, anchor);
+        var previous = RequireExpectedHead(live, record, allowBootstrap);
 
         using var signer = keyStore.OpenSigner(anchor);
         var built = ClaimSetBuilder.Build(index, previous, signer);
 
-        // Sanity-check our own output before it goes anywhere. If the set we just produced would be
-        // refused by a verifier, that must surface here rather than after publication.
-        ClaimVerifier.ValidateSet(built.Claims);
+        var generation = (live?.Manifest?.Manifest.Generation ?? 0) + 1;
+        var manifest = signer.SignManifest(generation, live?.Manifest?.PayloadHash, ClaimDigest.Compute(built.Claims));
 
         var root = JsonNode.Parse(indexText)?.AsObject()
             ?? throw new InvalidOperationException("The index is not a JSON object.");
         root["proof"] = JsonSerializer.SerializeToNode(
-            ClaimProof.Write(anchor.KeyId, built.Claims), IndexOptions);
+            ClaimProof.Write(anchor, manifest, built.Claims), IndexOptions);
 
-        var withProof = root.ToJsonString(IndexOptions);
+        var bytes = Encoding.UTF8.GetBytes(root.ToJsonString(IndexOptions));
+
+        // Read our own output back the way a consumer would, rather than through a lighter check
+        // that can drift away from it. If what we just built is something a verifier would refuse,
+        // that has to surface here, while the author is standing in front of it.
+        SelfCheck(bytes, anchor);
+
+        var pending = new PendingPublish
+        {
+            BaseManifestHash = record?.Committed?.ManifestHash,
+            Generation = generation,
+            ManifestHash = manifest.PayloadHash,
+            IndexSha256 = Convert.ToHexStringLower(SHA256.HashData(bytes))
+        };
+
+        headStore.WritePending(trustContext, anchor.PluginId, record?.Committed, pending, bytes);
 
         logger.Information(
-            "Attached proof for {PluginId}: {Unchanged} unchanged, {Added} added, {Updated} updated, {Revoked} revoked",
-            index.PluginId, built.Unchanged, built.Added, built.Updated, built.Revoked);
+            "Prepared publish {Generation} for {PluginId}: {Unchanged} unchanged, {Added} added, " +
+            "{Updated} updated, {Revoked} revoked",
+            generation, index.PluginId, built.Unchanged, built.Added, built.Updated, built.Revoked);
 
-        return new ProofResult(Encoding.UTF8.GetBytes(withProof), built);
+        return new PreparedPublish(bytes, built, pending);
     }
 
     /// <summary>
-    /// Verified claims from the live index, or an empty set when it carries no proof yet.
-    ///
-    /// A proof that exists but does NOT verify stops the publish. It means one of two things: the
-    /// registry now names a different key, or the live file was tampered with. Neither is safe to
-    /// paper over — and treating it as "no previous claims" would restart sequences from one, which
-    /// is exactly the equivocation the sequence rules exist to prevent.
+    /// Confirms that what is now live is exactly what was sent, and only then records it as this
+    /// machine's head. Comparing the whole document rather than the manifest alone: the manifest
+    /// commits to the claims, and the rest of the index — the compatibility plaintext every current
+    /// manager actually reads — is not covered by it.
     /// </summary>
-    private IReadOnlyList<SignedClaim> ReadPreviousClaims(byte[]? liveIndexJson, ClaimTrustAnchor anchor)
+    public void ConfirmPublished(ClaimTrustAnchor anchor, byte[] liveIndexJson)
     {
-        if (liveIndexJson is null or []) return [];
+        var trustContext = ClaimTrustContext.Compute(anchor);
+        var record = headStore.TryLoad(trustContext)
+            ?? throw new InvalidOperationException("There is no record of a publish to confirm.");
+        var pending = record.Pending
+            ?? throw new InvalidOperationException("There is no pending publish to confirm.");
+
+        var actual = Convert.ToHexStringLower(SHA256.HashData(liveIndexJson));
+        if (!string.Equals(actual, pending.IndexSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The index now on the server is not the one that was just published. Something else " +
+                "wrote to it, or the upload did not complete. Nothing has been recorded on this " +
+                "machine, so the publish can be repeated once that is understood.");
+        }
+
+        headStore.Commit(trustContext, anchor.PluginId,
+            new PublisherHead { Generation = pending.Generation, ManifestHash = pending.ManifestHash });
+    }
+
+    /// <summary>
+    /// Works out what an interrupted publish actually did, by comparing what is live against the
+    /// journal. The caller acts on the answer: a landed publish is committed, an unsent one is
+    /// retried by re-sending the journaled bytes VERBATIM — never by rebuilding, because RSA-PSS is
+    /// randomised and a rebuild produces different bytes under the same generation, which is the
+    /// fork this all exists to prevent arriving through the recovery path.
+    /// </summary>
+    public PendingOutcome ResolvePending(ClaimTrustAnchor anchor, byte[]? liveIndexJson)
+    {
+        var trustContext = ClaimTrustContext.Compute(anchor);
+        var record = headStore.TryLoad(trustContext)
+            ?? throw new InvalidOperationException("There is no record of a publish to resolve.");
+        var pending = record.Pending
+            ?? throw new InvalidOperationException("There is no pending publish to resolve.");
+
+        var live = ReadLiveProof(liveIndexJson, anchor);
+        var liveHead = live?.Manifest?.PayloadHash;
+
+        if (string.Equals(liveHead, pending.ManifestHash, StringComparison.Ordinal)) return PendingOutcome.Landed;
+        if (string.Equals(liveHead, pending.BaseManifestHash, StringComparison.Ordinal)) return PendingOutcome.NotSent;
+        return PendingOutcome.Diverged;
+    }
+
+    /// <summary>Commits a pending publish that <see cref="ResolvePending"/> found had landed.</summary>
+    public void CommitPending(ClaimTrustAnchor anchor)
+    {
+        var trustContext = ClaimTrustContext.Compute(anchor);
+        var record = headStore.TryLoad(trustContext)
+            ?? throw new InvalidOperationException("There is no record of a publish to commit.");
+        var pending = record.Pending
+            ?? throw new InvalidOperationException("There is no pending publish to commit.");
+
+        headStore.Commit(trustContext, anchor.PluginId,
+            new PublisherHead { Generation = pending.Generation, ManifestHash = pending.ManifestHash });
+    }
+
+    /// <summary>The exact bytes an interrupted publish had prepared, for re-sending unchanged.</summary>
+    public byte[]? TryReadPendingIndex(ClaimTrustAnchor anchor) =>
+        headStore.TryReadPendingIndex(ClaimTrustContext.Compute(anchor));
+
+    /// <summary>
+    /// The head this publish is allowed to extend — which is the one this machine confirmed, and
+    /// nothing else.
+    ///
+    /// "At or above the local generation" reads as the tolerant, sensible rule and is unsafe. A
+    /// server that hides the newest publish and serves a complete older one puts the tool back on a
+    /// head it has already moved past, and the next publish signs a second, different version of a
+    /// generation that already exists. Every claim in it verifies, the digest is whole, and the
+    /// catalog has forked under one key. So: equal, or stop and let the author decide what they are
+    /// looking at.
+    /// </summary>
+    private static IReadOnlyList<SignedClaim> RequireExpectedHead(
+        VerifiedProof? live, PublisherRecord? record, bool allowBootstrap)
+    {
+        var committed = record?.Committed;
+
+        if (live is null)
+        {
+            if (committed is not null)
+            {
+                throw new InvalidOperationException(
+                    $"This machine published generation {committed.Generation} of this catalog, but " +
+                    "the server is now offering nothing at all. That is either tampering or data " +
+                    "loss, and publishing over the top of it would restart every version counter. " +
+                    "Nothing has been changed.");
+            }
+
+            if (record is not null)
+            {
+                throw new InvalidOperationException(
+                    "This machine has a publishing record for this catalog but the server has no " +
+                    "proof at all. Publishing now would restart the history.");
+            }
+
+            if (!allowBootstrap)
+            {
+                throw new InvalidOperationException(
+                    "There is no signed history for this catalog yet. Starting one is a deliberate " +
+                    "step, because 'there is nothing published' and 'the server deleted what was " +
+                    "published' look exactly alike from here.");
+            }
+
+            return [];
+        }
+
+        if (committed is null)
+        {
+            throw new InvalidOperationException(
+                "There is a signed catalog on the server, but this machine has no record of " +
+                "publishing it. That happens on a new computer, after restoring a profile, or if " +
+                "the record was lost — and it is also what a rolled-back server looks like, so it " +
+                "cannot be adopted automatically. Bring this machine's publishing state across with " +
+                "the key, or adopt what is published as a deliberate recovery.");
+        }
+
+        var liveHead = live.Manifest?.PayloadHash;
+        if (!string.Equals(liveHead, committed.ManifestHash, StringComparison.Ordinal))
+        {
+            var liveGeneration = live.Manifest?.Manifest.Generation;
+            throw new InvalidOperationException(
+                $"The catalog on the server is not the one this machine last published. It says " +
+                $"publish {liveGeneration?.ToString() ?? "unknown"}; this machine confirmed " +
+                $"{committed.Generation}. Publishing on top of it would sign version numbers that " +
+                "may already be in use elsewhere. Nothing has been changed.");
+        }
+
+        return live.Claims;
+    }
+
+    /// <summary>
+    /// Verified claims from the live index.
+    ///
+    /// A proof that exists but does NOT verify stops everything. It means one of two things: the
+    /// registry now names a different key, or the live file was altered. Neither is safe to paper
+    /// over — and treating it as "no previous claims" would restart sequences from one, which is
+    /// exactly the equivocation the whole mechanism exists to prevent.
+    /// </summary>
+    private VerifiedProof? ReadLiveProof(byte[]? liveIndexJson, ClaimTrustAnchor anchor)
+    {
+        if (liveIndexJson is null or []) return null;
 
         ClaimProofDocument? document;
         try
         {
             document = ClaimProof.TryExtract(Encoding.UTF8.GetString(liveIndexJson));
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (ex is JsonException or ClaimFormatException)
         {
             throw new InvalidOperationException(
                 "The index currently on the server could not be read, so its claim history can't be " +
-                "continued. Publishing now could reuse sequence numbers already in use.", ex);
+                "continued. Publishing now could reuse version numbers already in use.", ex);
         }
 
         if (document is null)
         {
-            logger.Information("The live index carries no proof yet — starting a fresh claim history");
-            return [];
+            logger.Information("The live index carries no proof block");
+            return null;
         }
 
         try
         {
-            return ClaimProof.ReadVerified(document, anchor);
+            return ClaimProof.ReadVerified(document, anchor, requireManifest: true);
         }
         catch (ClaimFormatException ex)
         {
             throw new InvalidOperationException(
                 "The proof on the server's index doesn't verify against the key the registry currently " +
                 "names. Either the registry was re-pointed at a different key, or that file has been " +
-                "altered. Publishing would reissue sequence numbers and break every manager that has " +
+                "altered. Publishing would reissue version numbers and break every manager that has " +
                 $"already seen the current ones.\n\nDetail: {ex.Message}", ex);
         }
+    }
+
+    private static void SelfCheck(byte[] indexBytes, ClaimTrustAnchor anchor)
+    {
+        var document = ClaimProof.TryExtract(Encoding.UTF8.GetString(indexBytes))
+            ?? throw new InvalidOperationException("The proof just written could not be read back.");
+
+        ClaimProof.ReadVerified(document, anchor, requireManifest: true);
     }
 }

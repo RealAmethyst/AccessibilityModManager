@@ -11,8 +11,8 @@ namespace AccessibilityModManager.Tests.CatalogClaims;
 /// </summary>
 public sealed class ClaimContractTests : IDisposable
 {
-    private readonly RSA _key = RSA.Create(3072);
-    private readonly RSA _otherKey = RSA.Create(3072);
+    private readonly RSA _key = ClaimTestKeys.Primary;
+    private readonly RSA _otherKey = ClaimTestKeys.Secondary;
     private readonly ClaimTrustAnchor _anchor;
     private readonly ClaimSigner _signer;
     private const string Passphrase = "test-passphrase";
@@ -25,9 +25,8 @@ public sealed class ClaimContractTests : IDisposable
 
     public void Dispose()
     {
+        // The keys are shared across the assembly and outlive any one test.
         _signer.Dispose();
-        _key.Dispose();
-        _otherKey.Dispose();
     }
 
     private static ClaimTrustAnchor NewAnchor(RSA key, string url, string pluginId = "amethyst", string keyId = "k1") => new()
@@ -165,8 +164,9 @@ public sealed class ClaimContractTests : IDisposable
     }
 
     [Theory]
-    [InlineData("\"kind\":\"Release\"", "\"kind\":\"release\"")]
-    [InlineData("\"kind\":\"Release\"", "\"kind\":\"Nonsense\"")]
+    [InlineData("\"kind\":\"release\"", "\"kind\":\"Release\"")]
+    [InlineData("\"kind\":\"release\"", "\"kind\":\"RELEASE\"")]
+    [InlineData("\"kind\":\"release\"", "\"kind\":\"Nonsense\"")]
     public void Claim_kinds_are_matched_exactly(string from, string to)
     {
         var claim = SignRelease();

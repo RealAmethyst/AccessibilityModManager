@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -210,7 +212,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
 
         try
         {
-            File.WriteAllBytes(indexPath, live);
+            File.WriteAllBytes(indexPath, KeepLocalAuthoringFields(live, local));
             _index = LoadOrThrow();
             RebuildGameList();
             if (Games.Count > 0) SelectedGame = Games[0];
@@ -225,6 +227,41 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             _logger.Error(ex, "Couldn't adopt the live index for {Project}", _projectPath);
             _showInfoDialog("Couldn't take the published copy",
                 $"{ex.Message}\n\nThis folder's copy is unchanged.");
+        }
+    }
+
+    /// <summary>
+    /// Adopting the published index takes its catalog, never its authoring data.
+    ///
+    /// <c>dependencyPresets</c> is author-only — the manager never reads it, and no signed claim
+    /// will ever cover it, so no amount of verification downstream protects it. It is also the one
+    /// piece of the file that feeds a dropdown the author picks from: a server that edited a preset
+    /// would put an attacker-chosen download URL and SHA-256 in front of the author, and one
+    /// plausible click later the offline signing key vouches for it and every manager installs it.
+    /// That is the signing-oracle attack the claim design exists to prevent, arriving through
+    /// authoring data instead of catalog data.
+    ///
+    /// So the presets in this folder stay the presets in this folder.
+    /// </summary>
+    private byte[] KeepLocalAuthoringFields(byte[] live, byte[] local)
+    {
+        try
+        {
+            var adopted = JsonNode.Parse(live)?.AsObject();
+            var mine = JsonNode.Parse(local)?.AsObject();
+            if (adopted is null || mine is null) return live;
+
+            adopted.Remove("dependencyPresets");
+            if (mine["dependencyPresets"] is { } presets)
+                adopted["dependencyPresets"] = presets.DeepClone();
+
+            return Encoding.UTF8.GetBytes(adopted.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (JsonException ex)
+        {
+            // Neither copy is readable as JSON, which the caller is about to discover anyway.
+            _logger.Warning(ex, "Couldn't separate authoring fields while adopting the published index");
+            return live;
         }
     }
 

@@ -15,7 +15,7 @@ namespace AccessibilityModManager.Tests.CatalogClaims;
 /// </summary>
 public sealed class ClaimSetBuilderTests : IDisposable
 {
-    private readonly RSA _key = RSA.Create(3072);
+    private readonly RSA _key = ClaimTestKeys.Primary;
     private readonly ClaimTrustAnchor _anchor;
     private readonly ClaimSigner _signer;
     private const string Passphrase = "pp";
@@ -40,7 +40,6 @@ public sealed class ClaimSetBuilderTests : IDisposable
     public void Dispose()
     {
         _signer.Dispose();
-        _key.Dispose();
     }
 
     private static ModRelease NewRelease(string version, string channel = "stable", PatreonGate? gate = null) => new()
@@ -280,22 +279,40 @@ public sealed class ClaimSetBuilderTests : IDisposable
     }
 
     [Fact]
-    public void A_sequence_is_never_reused_after_a_deletion_and_a_republish()
+    public void A_withdrawn_release_version_is_never_re_asserted()
     {
-        // Reusing a sequence would be equivocation, and a manager that saw the old claim would
-        // reject the new one.
+        // This used to be allowed, and asserted that the resurrected claim simply took a higher
+        // sequence. Higher sequences are not the problem: after the deletion the proof keeps the
+        // revocation but not the withdrawn body or its package hash, and a server holding the only
+        // copy of the ZIP can drop that too — so "this version is already published, with these
+        // bytes" has nothing left to compare against, and the same version could be re-signed over
+        // entirely different bytes. That is the one invariant a release has.
         var v1 = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
         var deleted = ClaimSetBuilder.Build(NewIndex(), v1.Claims, _signer);
-        var restored = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), deleted.Claims, _signer);
 
-        ClaimVerifier.ValidateSet(restored.Claims);
+        var ex = Assert.Throws<ClaimFormatException>(() =>
+            ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), deleted.Claims, _signer));
+        Assert.Contains("withdrawn", ex.Message);
+    }
 
-        var seqs = restored.Claims
-            .Where(c => c.Payload.Identity.Kind == ClaimKind.Release)
-            .Select(c => c.Payload.Seq)
-            .ToList();
-        Assert.Equal(seqs.Count, seqs.Distinct().Count());
-        Assert.True(seqs.Max() > v1.Claims.Single(c => c.Payload.Identity.Kind == ClaimKind.Release).Payload.Seq);
+    [Fact]
+    public void Narrowing_is_not_mistaken_for_a_resurrection()
+    {
+        // Within one publish, narrowing emits a revocation and then a higher-sequence live claim for
+        // the same identity — which looks exactly like a resurrection to anyone reading the finished
+        // set. Only the builder can tell them apart, and it must not refuse this one.
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t3"))), [], _signer);
+        var narrowed = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), first.Claims, _signer);
+
+        // And the publish after that, with the release unchanged, is still fine.
+        var again = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), narrowed.Claims, _signer);
+
+        Assert.Equal(1, narrowed.Revoked);
+        ClaimVerifier.ValidateSet(again.Claims);
+        Assert.Contains(ClaimVerifier.ResolveVisible(again.Claims, "c1", ["t3"]),
+            c => c.Payload.Identity.Version == "1.0.0");
     }
 
     [Fact]
@@ -304,10 +321,10 @@ public sealed class ClaimSetBuilderTests : IDisposable
         var built = ClaimSetBuilder.Build(
             NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0", gate: Gate("t3"))), [], _signer);
 
-        var document = ClaimProof.Write(_anchor.KeyId, built.Claims);
-        var verified = ClaimProof.ReadVerified(document, _anchor);
+        var document = ClaimProof.Write(_anchor, Manifest(built.Claims), built.Claims);
+        var verified = ClaimProof.ReadVerified(document, _anchor, requireManifest: true);
 
-        Assert.Equal(built.Claims.Count, verified.Count);
+        Assert.Equal(built.Claims.Count, verified.Claims.Count);
     }
 
     [Fact]
@@ -316,9 +333,63 @@ public sealed class ClaimSetBuilderTests : IDisposable
         // All-or-nothing: "use the ones that verified" would let an attacker choose which parts of
         // a catalog a reader sees just by corrupting the rest.
         var built = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
-        var document = ClaimProof.Write(_anchor.KeyId, built.Claims);
-        document.Claims[^1].SignatureBase64 = Convert.ToBase64String(new byte[384]);
+        var document = ClaimProof.Write(_anchor, Manifest(built.Claims), built.Claims);
+        var broken = new ClaimProofDocument
+        {
+            Scheme = document.Scheme,
+            KeyId = document.KeyId,
+            Algorithm = document.Algorithm,
+            Manifest = document.Manifest,
+            Claims = [.. document.Claims.SkipLast(1),
+                document.Claims[^1] with { SignatureBase64 = Convert.ToBase64String(new byte[512]) }]
+        };
 
-        Assert.Throws<ClaimFormatException>(() => ClaimProof.ReadVerified(document, _anchor));
+        Assert.Throws<ClaimFormatException>(() =>
+            ClaimProof.ReadVerified(broken, _anchor, requireManifest: true));
     }
+
+    /// <summary>
+    /// A consumer never receives a manifest — the server strips it — so it must not treat the
+    /// absence as tampering. Only the publisher, which is entitled to the whole set, requires one.
+    /// </summary>
+    [Fact]
+    public void A_consumer_accepts_a_proof_whose_manifest_has_been_stripped()
+    {
+        var built = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var document = ClaimProof.Write(_anchor, Manifest(built.Claims), built.Claims);
+        var filtered = new ClaimProofDocument
+        {
+            Scheme = document.Scheme,
+            KeyId = document.KeyId,
+            Algorithm = document.Algorithm,
+            Manifest = null,
+            Claims = document.Claims
+        };
+
+        var verified = ClaimProof.ReadVerified(filtered, _anchor, requireManifest: false);
+
+        Assert.Equal(built.Claims.Count, verified.Claims.Count);
+        Assert.Null(verified.Manifest);
+    }
+
+    [Fact]
+    public void A_proof_whose_key_id_disagrees_with_the_registry_is_refused()
+    {
+        var built = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var document = ClaimProof.Write(_anchor, Manifest(built.Claims), built.Claims);
+        var relabelled = new ClaimProofDocument
+        {
+            Scheme = document.Scheme,
+            KeyId = "some-other-key",
+            Algorithm = document.Algorithm,
+            Manifest = document.Manifest,
+            Claims = document.Claims
+        };
+
+        Assert.Throws<ClaimFormatException>(() =>
+            ClaimProof.ReadVerified(relabelled, _anchor, requireManifest: true));
+    }
+
+    private SignedManifest Manifest(IReadOnlyList<SignedClaim> claims) =>
+        _signer.SignManifest(1, null, ClaimDigest.Compute(claims));
 }

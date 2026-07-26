@@ -10,7 +10,7 @@ namespace AccessibilityModManager.Infrastructure.CatalogClaims;
 /// another index address, or another key; a claim whose declared kind disagrees with its identity;
 /// two claims contending for one object. Each of those is a trust violation, not a warning.
 /// </summary>
-public sealed class ClaimVerifier
+public sealed class ClaimVerifier : IDisposable
 {
     private readonly ClaimTrustAnchor _anchor;
     private readonly string _expectedTrustContext;
@@ -26,13 +26,21 @@ public sealed class ClaimVerifier
         _anchor = anchor;
         _expectedTrustContext = ClaimTrustContext.Compute(anchor);
         _publicKey = RSA.Create();
-        _publicKey.ImportFromPem(anchor.PublicKeyPem);
-
-        if (_publicKey.KeySize < 3072)
-            throw new ClaimFormatException($"claim signing key is only {_publicKey.KeySize} bits");
+        try
+        {
+            _publicKey.ImportFromPem(anchor.PublicKeyPem);
+            ClaimKeyPolicy.Require(_publicKey);
+        }
+        catch
+        {
+            _publicKey.Dispose();
+            throw;
+        }
     }
 
     public string ExpectedTrustContext => _expectedTrustContext;
+
+    public void Dispose() => _publicKey.Dispose();
 
     /// <summary>
     /// Verifies one claim's signature and envelope. Throws <see cref="ClaimFormatException"/> on any
@@ -42,6 +50,7 @@ public sealed class ClaimVerifier
     /// </summary>
     public SignedClaim Verify(ReadOnlySpan<byte> payloadBytes, ReadOnlySpan<byte> signature)
     {
+        RequireSignatureLength(signature);
         var payload = ClaimCodec.Parse(payloadBytes);
 
         if (!string.Equals(payload.TrustContext, _expectedTrustContext, StringComparison.Ordinal))
@@ -65,6 +74,52 @@ public sealed class ClaimVerifier
             Signature = signature.ToArray(),
             Payload = payload
         };
+    }
+
+    /// <summary>
+    /// Verifies the publisher's commitment to a whole claim set. Same anchor, same trust context,
+    /// different signing domain — so a claim can never be presented as a manifest.
+    ///
+    /// This does not check the digest against anything; that is the caller's job, because it needs
+    /// the claims the manifest is supposed to cover.
+    /// </summary>
+    public SignedManifest VerifyManifest(ReadOnlySpan<byte> payloadBytes, ReadOnlySpan<byte> signature)
+    {
+        RequireSignatureLength(signature);
+        var manifest = ManifestCodec.Parse(payloadBytes);
+
+        if (!string.Equals(manifest.TrustContext, _expectedTrustContext, StringComparison.Ordinal))
+        {
+            throw new ClaimFormatException(
+                "the proof manifest is not bound to this plugin, index address and key — it may " +
+                "have been lifted from another source or from before a re-point");
+        }
+
+        if (!_publicKey.VerifyData(ManifestCodec.BytesToSign(payloadBytes), signature,
+                HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+        {
+            throw new ClaimFormatException("the proof manifest's signature does not verify");
+        }
+
+        return new SignedManifest
+        {
+            PayloadBytes = payloadBytes.ToArray(),
+            Signature = signature.ToArray(),
+            Manifest = manifest
+        };
+    }
+
+    /// <summary>
+    /// An RSA-PSS signature is exactly the modulus length. Checking it here means an absurdly long
+    /// "signature" is refused before it is decoded and handed to the crypto layer, rather than
+    /// being carried around as an unbounded string inside an otherwise-bounded proof.
+    /// </summary>
+    private void RequireSignatureLength(ReadOnlySpan<byte> signature)
+    {
+        var expected = _publicKey.KeySize / 8;
+        if (signature.Length != expected)
+            throw new ClaimFormatException(
+                $"signature is {signature.Length} bytes; this key's signatures are {expected}");
     }
 
     /// <summary>

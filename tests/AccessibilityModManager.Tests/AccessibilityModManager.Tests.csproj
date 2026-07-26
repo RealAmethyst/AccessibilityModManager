@@ -27,4 +27,9 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The frozen wire vectors the server implementation is held to as well. -->
+    <None Update="CatalogClaims\golden\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

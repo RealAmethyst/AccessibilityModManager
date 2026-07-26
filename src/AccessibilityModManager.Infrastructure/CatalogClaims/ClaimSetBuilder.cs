@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AccessibilityModManager.Core.Models;
 
 namespace AccessibilityModManager.Infrastructure.CatalogClaims;
@@ -55,6 +56,29 @@ public static class ClaimSetBuilder
 
             var nextSeq = NextSequence(history);
 
+            // A withdrawn RELEASE identity is never re-asserted.
+            //
+            // After a deletion the proof keeps the revocation but not the withdrawn body or its
+            // package hash, and a server holding the only copy of the published ZIP can delete that
+            // too — so "this version is already published with these bytes" finds nothing to compare
+            // against, and the same version could be re-signed over different bytes with a perfectly
+            // valid higher sequence. That is the one invariant a release has.
+            //
+            // Games have no such invariant, so re-adding a removed game is allowed. And this can
+            // only ever be a producer-side rule: within one publish, narrowing legitimately emits a
+            // revocation followed by a higher-sequence live claim for the same identity, which is
+            // indistinguishable to a reader from a resurrection spread across two publishes. The
+            // builder can tell the difference because it holds the previous set.
+            var newest = history?.OrderByDescending(c => c.Payload.Seq).FirstOrDefault();
+            if (newest?.Payload.Kind == ClaimKind.Revocation && identity.Kind == ClaimKind.Release)
+            {
+                throw new ClaimFormatException(
+                    $"Version {identity.Version} ({identity.Channel}) of {identity.GameId} was " +
+                    "withdrawn from the published catalog, and a withdrawn version can't be " +
+                    "published again — the bytes it stood for are gone. Publish it under a new " +
+                    "version number instead.");
+            }
+
             // Outstanding revocations ride along on every publish, forever.
             //
             // They used to be dropped the moment anything else was republished, which broke the
@@ -81,7 +105,7 @@ public static class ClaimSetBuilder
             if (previous is not null && IsNarrowing(previous.Payload.Audience, audience))
             {
                 result.Add(signer.Sign(ClaimKind.Revocation, identity, nextSeq,
-                    previous.Payload.Audience, RevocationBody(previous.Payload.Seq)));
+                    previous.Payload.Audience, RevocationBody));
                 nextSeq++;
                 revoked++;
             }
@@ -91,10 +115,20 @@ public static class ClaimSetBuilder
         }
 
         // ---- header ----
+        // repoVersion is in here because the manager's model requires it to read an index at all,
+        // and the published catalog is projected from these claims — an unsigned copy of a required
+        // field would be one a server could set freely. generatedAt deliberately is NOT: a
+        // timestamp inside the signed set would either re-sign the header on every publish or
+        // announce that something hidden had changed.
         Emit(ClaimKind.Header,
             new ClaimIdentity { Kind = ClaimKind.Header },
             ClaimAudience.Everyone,
-            Canonicalise(new { pluginId = index.PluginId, author = index.Author }));
+            Canonicalise(new
+            {
+                pluginId = index.PluginId,
+                repoVersion = index.RepoVersion,
+                author = index.Author
+            }));
 
         // ---- games and their releases ----
         foreach (var game in index.Games.OrderBy(g => g.GameId, StringComparer.Ordinal))
@@ -105,7 +139,7 @@ public static class ClaimSetBuilder
                 // under it is visible, which is a serving decision, not a signing one. A game whose
                 // only builds are patron-only must not appear for someone who cannot see them.
                 ClaimAudience.Everyone,
-                Canonicalise(game));
+                PublishedGameBody(game));
 
             if (!index.ReleasesByGameId.TryGetValue(game.GameId, out var releases)) continue;
 
@@ -141,7 +175,7 @@ public static class ClaimSetBuilder
 
             // Revoke at the audience that could see it, so nobody else learns it ever existed.
             result.Add(signer.Sign(ClaimKind.Revocation, last.Payload.Identity, NextSequence(history),
-                last.Payload.Audience, RevocationBody(last.Payload.Seq)));
+                last.Payload.Audience, RevocationBody));
             revoked++;
         }
 
@@ -186,13 +220,16 @@ public static class ClaimSetBuilder
     }
 
     /// <summary>
-    /// A revocation says nothing about what it withdrew beyond which sequence it supersedes. The
-    /// object's content is deliberately absent: a revocation is disclosed to an audience that is
-    /// losing access, and restating what they are losing would hand them the very metadata the
-    /// withdrawal is taking away.
+    /// A revocation says nothing at all. Its content is deliberately absent: a revocation is
+    /// disclosed to an audience that is losing access, and restating what they are losing would
+    /// hand them the very metadata the withdrawal is taking away.
+    ///
+    /// An earlier version carried the sequence it superseded. That went, because no verifier can
+    /// check it — once the withdrawn assertion has left the current proof there is nothing to
+    /// compare against — and resolution is by identity and highest visible sequence, which never
+    /// consults it. A field that cannot be checked and is not used is a promise nobody keeps.
     /// </summary>
-    private static string RevocationBody(long supersedes) =>
-        JsonSerializer.Serialize(new { supersedes });
+    private const string RevocationBody = "{}";
 
     private static readonly JsonSerializerOptions BodyOptions = new()
     {
@@ -206,4 +243,39 @@ public static class ClaimSetBuilder
     /// produces identical bytes and keeps its existing claim.
     /// </summary>
     private static string Canonicalise<T>(T value) => JsonSerializer.Serialize(value, BodyOptions);
+
+    /// <summary>
+    /// Author-only members of a game, which never reach a published claim.
+    ///
+    /// The three <c>default*</c> scripts are templates the AuthorTool pre-fills a release form
+    /// from; the manager only ever reads a release's own manifest. A dependency's
+    /// <c>versionDiscovery</c> is documented as having no runtime effect at all. Signing them would
+    /// publish authoring state to every user and re-sign the game claim whenever the author
+    /// adjusted a template — churn that, on a public claim, is exactly the signal this design keeps
+    /// out of the anonymous view.
+    /// </summary>
+    private static readonly string[] AuthorOnlyGameMembers =
+        ["defaultPreInstall", "defaultPostInstall", "defaultPostUninstall"];
+
+    /// <summary>
+    /// The published projection of a game: everything the model carries, minus the author-only
+    /// members. Built by stripping rather than by copying into a hand-written subset, so a field
+    /// added to <see cref="GameDefinition"/> tomorrow is published rather than silently dropped
+    /// from every catalog until someone notices.
+    /// </summary>
+    private static string PublishedGameBody(GameDefinition game)
+    {
+        var node = JsonSerializer.SerializeToNode(game, BodyOptions)?.AsObject()
+            ?? throw new InvalidOperationException($"Game '{game.GameId}' could not be serialized.");
+
+        foreach (var member in AuthorOnlyGameMembers) node.Remove(member);
+
+        if (node["dependencies"] is JsonArray dependencies)
+        {
+            foreach (var dependency in dependencies.OfType<JsonObject>())
+                dependency.Remove("versionDiscovery");
+        }
+
+        return node.ToJsonString(BodyOptions);
+    }
 }

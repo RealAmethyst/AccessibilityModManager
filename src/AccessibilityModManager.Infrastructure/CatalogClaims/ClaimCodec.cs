@@ -28,6 +28,29 @@ public static class ClaimCodec
     /// <summary>Bounds a hostile or corrupt payload before any parsing work happens.</summary>
     public const int MaxPayloadBytes = 256 * 1024;
 
+    /// <summary>
+    /// Upper bound on <c>seq</c> and on a manifest's <c>generation</c>. Well below where anything
+    /// real lands, and low enough that "one past the highest" can never overflow.
+    /// </summary>
+    public const long MaxCounter = 1_000_000_000_000L;
+
+    /// <summary>
+    /// How a kind is spelled on the wire: lowercase, one spelling only.
+    ///
+    /// The first implementation wrote .NET enum names because that is what <c>ToString</c> gives.
+    /// The wire format is JSON and everything else in it is camelCase, so a second implementation
+    /// following the written contract would have produced <c>"release"</c> and been refused by every
+    /// claim this tool signs. Nothing has been published, so the contract wins.
+    /// </summary>
+    public static string KindToWire(ClaimKind kind) => kind switch
+    {
+        ClaimKind.Header => "header",
+        ClaimKind.Game => "game",
+        ClaimKind.Release => "release",
+        ClaimKind.Revocation => "revocation",
+        _ => throw new ClaimFormatException($"unknown claim kind {kind}")
+    };
+
     public static byte[] BytesToSign(ReadOnlySpan<byte> payloadBytes)
     {
         var buffer = new byte[DomainPrefix.Length + payloadBytes.Length];
@@ -49,10 +72,10 @@ public static class ClaimCodec
             w.WriteStartObject();
             w.WriteNumber("v", payload.V);
             w.WriteString("trustContext", payload.TrustContext);
-            w.WriteString("kind", payload.Kind.ToString());
+            w.WriteString("kind", KindToWire(payload.Kind));
 
             w.WriteStartObject("identity");
-            w.WriteString("kind", payload.Identity.Kind.ToString());
+            w.WriteString("kind", KindToWire(payload.Identity.Kind));
             if (payload.Identity.GameId is not null) w.WriteString("gameId", payload.Identity.GameId);
             if (payload.Identity.Channel is not null) w.WriteString("channel", payload.Identity.Channel);
             if (payload.Identity.Version is not null) w.WriteString("version", payload.Identity.Version);
@@ -199,8 +222,12 @@ public static class ClaimCodec
             if (!root.TryGetProperty("body", out var body) || body.ValueKind != JsonValueKind.Object)
                 throw new ClaimFormatException("claim payload has no object body");
 
+            // Counters start at one. Zero used to be accepted, which left "no sequence yet" and
+            // "sequence zero" sharing a value; and an upper bound matters because the builder takes
+            // max+1, so a hostile long.MaxValue would otherwise overflow into a negative sequence.
             var seq = RequireLong(root, "seq");
-            if (seq < 0) throw new ClaimFormatException("seq is negative");
+            if (seq is < 1 or > MaxCounter)
+                throw new ClaimFormatException($"seq must be between 1 and {MaxCounter}");
 
             return new ClaimPayload
             {
@@ -221,7 +248,7 @@ public static class ClaimCodec
     /// ignores could carry meaning to a laxer one — an "excludeTierIds" that one implementation
     /// honours and another does not is a disclosure bug with a valid signature on it.
     /// </summary>
-    private static void RejectUnknownMembers(JsonElement element, string where, string[] allowed)
+    internal static void RejectUnknownMembers(JsonElement element, string where, string[] allowed)
     {
         foreach (var member in element.EnumerateObject())
         {
@@ -230,21 +257,21 @@ public static class ClaimCodec
         }
     }
 
-    private static JsonElement RequireObject(JsonElement parent, string name)
+    internal static JsonElement RequireObject(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Object)
             throw new ClaimFormatException($"'{name}' is missing or not an object");
         return value;
     }
 
-    private static string RequireString(JsonElement parent, string name)
+    internal static string RequireString(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
             throw new ClaimFormatException($"'{name}' is missing or not a string");
         return value.GetString()!;
     }
 
-    private static string? OptionalString(JsonElement parent, string name)
+    internal static string? OptionalString(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value)) return null;
         if (value.ValueKind != JsonValueKind.String)
@@ -252,7 +279,7 @@ public static class ClaimCodec
         return value.GetString();
     }
 
-    private static bool RequireBool(JsonElement parent, string name)
+    internal static bool RequireBool(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) ||
             (value.ValueKind != JsonValueKind.True && value.ValueKind != JsonValueKind.False))
@@ -260,7 +287,7 @@ public static class ClaimCodec
         return value.GetBoolean();
     }
 
-    private static int RequireInt(JsonElement parent, string name)
+    internal static int RequireInt(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number ||
             !value.TryGetInt32(out var number))
@@ -268,7 +295,7 @@ public static class ClaimCodec
         return number;
     }
 
-    private static long RequireLong(JsonElement parent, string name)
+    internal static long RequireLong(JsonElement parent, string name)
     {
         if (!parent.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number ||
             !value.TryGetInt64(out var number))
@@ -283,10 +310,10 @@ public static class ClaimCodec
         // bytes could be classified differently by two readers.
         return text switch
         {
-            "Header" => ClaimKind.Header,
-            "Game" => ClaimKind.Game,
-            "Release" => ClaimKind.Release,
-            "Revocation" => ClaimKind.Revocation,
+            "header" => ClaimKind.Header,
+            "game" => ClaimKind.Game,
+            "release" => ClaimKind.Release,
+            "revocation" => ClaimKind.Revocation,
             _ => throw new ClaimFormatException($"'{name}' is not a known claim kind: '{text}'")
         };
     }

@@ -103,7 +103,7 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         // registry names, every claim signed with it would verify nowhere — so it fails here.
         var signing = _store.Create("amethyst", Passphrase);
 
-        using var otherKey = System.Security.Cryptography.RSA.Create(3072);
+        var otherKey = ClaimTestKeys.Secondary;
         var wrongAnchor = AnchorFor(signing) with { PublicKeyPem = otherKey.ExportSubjectPublicKeyInfoPem() };
 
         Assert.Throws<ClaimFormatException>(() => _store.OpenSigner(wrongAnchor));
