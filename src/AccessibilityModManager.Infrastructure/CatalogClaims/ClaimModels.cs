@@ -86,11 +86,16 @@ public sealed record ClaimAudience
         return TierIds.Any(t => entitledTierIds.Contains(t, StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// True set equality. The earlier version compared counts and then a one-way Except, which
+    /// reported ["t1","t1"] equal to ["t1","t2"] — and that is not a cosmetic bug: an audience change
+    /// judged "unchanged" emits no revocation, so a tier silently loses access while still holding a
+    /// claim it believes. The reader now rejects duplicate tiers as well, so this is belt and braces.
+    /// </summary>
     public bool SameAs(ClaimAudience other) =>
         Public == other.Public &&
         string.Equals(CampaignId, other.CampaignId, StringComparison.Ordinal) &&
-        TierIds.Count == other.TierIds.Count &&
-        !TierIds.Except(other.TierIds, StringComparer.Ordinal).Any();
+        new HashSet<string>(TierIds, StringComparer.Ordinal).SetEquals(other.TierIds);
 }
 
 /// <summary>

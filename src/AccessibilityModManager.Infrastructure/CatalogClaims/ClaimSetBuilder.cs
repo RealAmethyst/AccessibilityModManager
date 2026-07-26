@@ -55,6 +55,16 @@ public static class ClaimSetBuilder
 
             var nextSeq = NextSequence(history);
 
+            // Outstanding revocations ride along on every publish, forever.
+            //
+            // They used to be dropped the moment anything else was republished, which broke the
+            // narrowing case during ordinary honest publishing: a patron who was offline for the one
+            // publish that carried their revocation would never see it again, and would go on
+            // trusting a release they are no longer entitled to. A revocation is only useful once its
+            // audience has actually received it, and we cannot know when that has happened.
+            foreach (var carried in history?.Where(c => c.Payload.Kind == ClaimKind.Revocation) ?? [])
+                result.Add(carried);
+
             if (previous is not null &&
                 string.Equals(previous.Payload.BodyJson, bodyJson, StringComparison.Ordinal) &&
                 previous.Payload.Audience.SameAs(audience))

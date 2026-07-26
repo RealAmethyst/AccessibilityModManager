@@ -199,6 +199,50 @@ public sealed class ClaimSetBuilderTests : IDisposable
     }
 
     [Fact]
+    public void A_narrowing_revocation_survives_later_publishes()
+    {
+        // The failure this pins happens during ordinary honest publishing, with no attacker at all.
+        // Revocations used to be dropped the moment anything else was republished, so a patron who
+        // was offline for the single publish carrying their revocation would never see it again and
+        // would go on trusting a release they are no longer entitled to.
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t3"))), [], _signer);
+        var narrowed = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), first.Claims, _signer);
+
+        // Two further publishes that do not touch the release at all.
+        var later = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), narrowed.Claims, _signer);
+        var laterStill = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), later.Claims, _signer);
+
+        ClaimVerifier.ValidateSet(laterStill.Claims);
+        Assert.Contains(laterStill.Claims, c => c.Payload.Kind == ClaimKind.Revocation);
+
+        // A tier-1 patron catching up only now still learns the release is gone for them.
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(laterStill.Claims, "c1", ["t1"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+
+        // And tier 3 still has it.
+        Assert.Contains(ClaimVerifier.ResolveVisible(laterStill.Claims, "c1", ["t3"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
+    public void Successive_narrowings_keep_a_revocation_for_each_audience_that_lost_access()
+    {
+        var v1 = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t2", "t3"))), [], _signer);
+        var v2 = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t2", "t3"))), v1.Claims, _signer);
+        var v3 = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), v2.Claims, _signer);
+
+        ClaimVerifier.ValidateSet(v3.Claims);
+
+        // Both demoted tiers are still told; only tier 3 keeps the release.
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(v3.Claims, "c1", ["t1"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(v3.Claims, "c1", ["t2"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+        Assert.Contains(ClaimVerifier.ResolveVisible(v3.Claims, "c1", ["t3"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
     public void Widening_a_release_needs_no_revocation()
     {
         // Nobody loses access, so there is nothing to tell anyone: the newer claim simply reaches

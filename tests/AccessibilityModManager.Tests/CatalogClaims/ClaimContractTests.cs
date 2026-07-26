@@ -320,13 +320,21 @@ public sealed class ClaimContractTests : IDisposable
     }
 
     [Fact]
-    public void Two_revocations_for_one_object_are_refused()
+    public void Several_revocations_for_one_object_are_allowed()
     {
+        // One per former audience. Successive narrowings each leave a revocation aimed at whoever
+        // lost access that time, and all of them are retained so a patron who was offline for that
+        // publish still learns about it later.
         var header = _signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header }, 1, ClaimAudience.Everyone, "{}");
-        var first = _signer.Sign(ClaimKind.Revocation, Release(), 8, ClaimAudience.Everyone, "{}");
-        var second = _signer.Sign(ClaimKind.Revocation, Release(), 9, ClaimAudience.Everyone, "{}");
+        var tier1 = new ClaimAudience { Public = false, CampaignId = "c1", TierIds = ["t1"] };
+        var tier2 = new ClaimAudience { Public = false, CampaignId = "c1", TierIds = ["t2"] };
+        var first = _signer.Sign(ClaimKind.Revocation, Release(), 8, tier1, "{}");
+        var second = _signer.Sign(ClaimKind.Revocation, Release(), 9, tier2, "{}");
 
-        Assert.Throws<ClaimFormatException>(() => ClaimVerifier.ValidateSet([header, first, second]));
+        ClaimVerifier.ValidateSet([header, first, second]);
+
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible([header, first, second], "c1", ["t1"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
     }
 
     [Fact]

@@ -94,9 +94,12 @@ public static class ClaimCodec
         JsonDocument doc;
         try
         {
-            // Comments and trailing commas are rejected by default; duplicate members are caught
-            // explicitly below because System.Text.Json keeps the last one silently.
-            doc = JsonDocument.Parse(payloadBytes.ToArray());
+            // AllowDuplicateProperties=false applies RECURSIVELY, which matters: a hand-rolled check
+            // at the top level would still have let a release body carry two packageUrl or sha256
+            // members, readable as first-wins by one parser and last-wins by another while a single
+            // valid signature covered both readings.
+            doc = JsonDocument.Parse(payloadBytes.ToArray(),
+                new JsonDocumentOptions { AllowDuplicateProperties = false });
         }
         catch (JsonException ex)
         {
@@ -108,8 +111,6 @@ public static class ClaimCodec
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 throw new ClaimFormatException("claim payload is not a JSON object");
-
-            RejectDuplicateMembers(root, "payload");
 
             var known = new HashSet<string>(StringComparer.Ordinal)
                 { "v", "trustContext", "kind", "identity", "seq", "audience", "body" };
@@ -130,7 +131,7 @@ public static class ClaimCodec
 
             var kind = RequireEnum(root, "kind");
             var identityElement = RequireObject(root, "identity");
-            RejectDuplicateMembers(identityElement, "identity");
+            RejectUnknownMembers(identityElement, "identity", ["kind", "gameId", "channel", "version"]);
 
             var identity = new ClaimIdentity
             {
@@ -155,7 +156,7 @@ public static class ClaimCodec
             }
 
             var audienceElement = RequireObject(root, "audience");
-            RejectDuplicateMembers(audienceElement, "audience");
+            RejectUnknownMembers(audienceElement, "audience", ["public", "campaignId", "tierIds"]);
 
             var isPublic = RequireBool(audienceElement, "public");
             var tierIds = new List<string>();
@@ -167,7 +168,16 @@ public static class ClaimCodec
                 {
                     if (tier.ValueKind != JsonValueKind.String)
                         throw new ClaimFormatException("audience.tierIds contains a non-string");
-                    tierIds.Add(tier.GetString()!);
+
+                    var tierId = tier.GetString()!;
+                    // A blank tier id can never match a real entitlement, and a duplicate makes
+                    // audience comparison ambiguous — which is how a narrowing gets mistaken for
+                    // "unchanged" and nobody is told they lost access.
+                    if (string.IsNullOrWhiteSpace(tierId))
+                        throw new ClaimFormatException("audience.tierIds contains a blank tier id");
+                    if (tierIds.Contains(tierId, StringComparer.Ordinal))
+                        throw new ClaimFormatException($"audience.tierIds repeats '{tierId}'");
+                    tierIds.Add(tierId);
                 }
             }
 
@@ -178,13 +188,16 @@ public static class ClaimCodec
                 TierIds = tierIds
             };
 
-            if (!audience.Public && (string.IsNullOrEmpty(audience.CampaignId) || audience.TierIds.Count == 0))
+            if (!audience.Public && (string.IsNullOrWhiteSpace(audience.CampaignId) || audience.TierIds.Count == 0))
                 throw new ClaimFormatException("a non-public audience must name a campaign and at least one tier");
             if (audience.Public && (audience.CampaignId is not null || audience.TierIds.Count > 0))
                 throw new ClaimFormatException("a public audience must not carry campaign or tier restrictions");
 
-            if (!root.TryGetProperty("body", out var body))
-                throw new ClaimFormatException("claim payload has no body");
+            // An object specifically: a body that is a bare string or array has no room for the
+            // identity fields the verifier cross-checks against, and allowing it would mean two
+            // shapes of "valid" claim to reason about.
+            if (!root.TryGetProperty("body", out var body) || body.ValueKind != JsonValueKind.Object)
+                throw new ClaimFormatException("claim payload has no object body");
 
             var seq = RequireLong(root, "seq");
             if (seq < 0) throw new ClaimFormatException("seq is negative");
@@ -203,17 +216,17 @@ public static class ClaimCodec
     }
 
     /// <summary>
-    /// System.Text.Json keeps the LAST of two members with the same name and says nothing. A
-    /// payload carrying "seq" twice would then be read one way here and possibly another way by a
-    /// different parser, while its signature stayed valid for both readings.
+    /// Envelope objects get an exact allowlist. Unknown members are tolerated inside <c>body</c> for
+    /// forward compatibility, but identity and audience are envelope data: a member a strict reader
+    /// ignores could carry meaning to a laxer one — an "excludeTierIds" that one implementation
+    /// honours and another does not is a disclosure bug with a valid signature on it.
     /// </summary>
-    private static void RejectDuplicateMembers(JsonElement element, string where)
+    private static void RejectUnknownMembers(JsonElement element, string where, string[] allowed)
     {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var member in element.EnumerateObject())
         {
-            if (!seen.Add(member.Name))
-                throw new ClaimFormatException($"duplicate member '{member.Name}' in {where}");
+            if (!allowed.Contains(member.Name, StringComparer.Ordinal))
+                throw new ClaimFormatException($"unknown member '{member.Name}' in {where}");
         }
     }
 

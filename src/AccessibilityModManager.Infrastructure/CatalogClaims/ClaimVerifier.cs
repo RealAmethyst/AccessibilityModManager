@@ -144,9 +144,10 @@ public sealed class ClaimVerifier
             if (live > 1)
                 throw new ClaimFormatException($"two claims describe the same object ({key})");
 
-            var revoked = group.Count(c => c.Payload.Kind == ClaimKind.Revocation);
-            if (revoked > 1)
-                throw new ClaimFormatException($"two revocations for the same object ({key})");
+            // Several revocations for one object is legitimate and necessary: each narrowing leaves
+            // one aimed at the audience that lost access, and they are all retained so a patron who
+            // was offline for that publish still learns about it later. Requiring at most one made
+            // successive narrowings impossible to represent.
 
             // Distinct sequences within one object. Sharing one would make "highest wins"
             // ambiguous, and two different payloads under one sequence is equivocation — the author
