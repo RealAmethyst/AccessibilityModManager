@@ -127,9 +127,15 @@ public sealed class IndexProofService(
     /// catalog's signed history. Never inferred from the absence of a proof, which is also exactly
     /// what a server that deleted one looks like.
     /// </param>
+    /// <param name="acknowledgeRestoredState">
+    /// The author has been shown which publish this machine believes it is on, and has confirmed it
+    /// is the latest one. Only consulted when the state came out of a backup and has not been
+    /// confirmed by a publish since — see <see cref="PublisherHeadStore.IsRestoredAndUnconfirmed"/>
+    /// for why a restore cannot authorise itself.
+    /// </param>
     public PreparedPublish PreparePublish(
         byte[] localIndexJson, string verifiedRegistryJson, string pluginId,
-        byte[]? liveIndexJson, bool allowBootstrap)
+        byte[]? liveIndexJson, bool allowBootstrap, bool acknowledgeRestoredState = false)
     {
         headStore.RequireRegistryNotOlder(verifiedRegistryJson);
 
@@ -158,6 +164,22 @@ public sealed class IndexProofService(
                 "A previous publish was interrupted before this machine could confirm whether it " +
                 "landed. That has to be settled first — publishing on top of it could sign a second " +
                 "version of the same publish.");
+        }
+
+        // Restored state is authentic but not necessarily current, and nothing local can tell the
+        // difference. If two publishes happened after the backup was taken, this machine believes
+        // the earlier one — and a server replaying that same publish matches it exactly, so every
+        // check below passes and the key signs a second version of a generation that already
+        // exists. The author is the only one who knows whether the number they are looking at is
+        // the latest, so they are asked once, and a confirmed publish clears it.
+        if (headStore.IsRestoredAndUnconfirmed(trustContext) && !acknowledgeRestoredState)
+        {
+            throw new InvalidOperationException(
+                $"This machine's publishing history was restored from a backup and hasn't been used " +
+                $"to publish since. It believes the catalog is at publish " +
+                $"{record?.Committed?.Generation.ToString() ?? "unknown"}. If you published again after " +
+                "taking that backup, continuing from here would sign a second version of a publish " +
+                "that already exists. Confirm this is where you left off before going on.");
         }
 
         var live = ReadLiveProof(liveIndexJson, anchor);

@@ -188,7 +188,7 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var otherRoot = Path.Combine(_root, "other-machine");
         var otherStore = NewStore(otherRoot);
 
-        var restored = otherStore.Import(backup, "backup passphrase", expectedFingerprint: original.PublicKeyFingerprint);
+        var restored = otherStore.Import(backup, "backup passphrase", "amethyst", expectedFingerprint: original.PublicKeyFingerprint);
 
         Assert.Equal(original.PublicKeyFingerprint, restored.PublicKeyFingerprint);
 
@@ -212,9 +212,9 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var otherStore = NewStore(Path.Combine(_root, "elsewhere"));
 
         Assert.Throws<InvalidOperationException>(() =>
-            otherStore.Import(backup, Passphrase));
+            otherStore.Import(backup, Passphrase, "amethyst"));
 
-        var ok = otherStore.Import(backup, "different passphrase");
+        var ok = otherStore.Import(backup, "different passphrase", "amethyst");
         Assert.Equal(signing.PublicKeyFingerprint, ok.PublicKeyFingerprint);
     }
 
@@ -234,7 +234,7 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var target = NewStore(Path.Combine(_root, "target"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            target.Import(strangerBackup, "theirs",
+            target.Import(strangerBackup, "theirs", "amethyst",
                 expectedFingerprint: "0000000000000000000000000000000000000000000000000000000000000000"));
         Assert.Contains("not the one the registry", ex.Message);
     }
@@ -261,7 +261,7 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         }));
 
         Assert.Throws<ClaimFormatException>(() =>
-            _store.Import(weakBackup, "theirs"));
+            _store.Import(weakBackup, "theirs", "amethyst"));
 
         // And the key that was already there is untouched.
         Assert.Equal(original.PublicKeyFingerprint,
@@ -278,7 +278,7 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var other = NewStore(Path.Combine(_root, "other"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            other.Import(backup, "wrong"));
+            other.Import(backup, "wrong", "amethyst"));
         Assert.Contains("passphrase is wrong", ex.Message);
     }
 

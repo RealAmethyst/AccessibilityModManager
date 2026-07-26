@@ -1,11 +1,27 @@
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Serilog;
 
 namespace AccessibilityModManager.AuthorTool.Services;
+
+/// <summary>
+/// The registry this machine has acted on: which version, and exactly which document.
+///
+/// The content hash is not optional. Raising the version when the content changes is what the
+/// publishing side already enforces, so two different validly-signed registries at one version is
+/// a contradiction — and a restored machine that knew only the number would accept whichever of
+/// them a replaying server offered first.
+/// </summary>
+public sealed record RegistryHighWater
+{
+    [JsonPropertyName("version")]
+    public required long Version { get; init; }
+
+    [JsonPropertyName("sha256")]
+    public required string Sha256 { get; init; }
+}
 
 /// <summary>What this machine last confirmed live for one trust context.</summary>
 public sealed record PublisherHead
@@ -79,7 +95,7 @@ public sealed record PublisherRecord
 /// URL, changing a key id, or rotating a key all change what claims are bound to, and each one
 /// starts a namespace of its own rather than inheriting a head that no longer means anything.
 /// </summary>
-public sealed partial class PublisherHeadStore(AuthorConfigService configService, ILogger logger)
+public sealed class PublisherHeadStore(AuthorConfigService configService, ILogger logger)
 {
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -178,12 +194,7 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
                     "signing key that has since been retired, so publishing against it is refused.");
             }
 
-            // A recorded version with no recorded content comes from a restored backup: the
-            // version travelled, the bytes did not. That is "I know how far I had got", not "I know
-            // exactly what I saw", and treating the two the same would leave a restored machine
-            // unable to publish against the very registry it is up to date with.
-            if (version == seen.Version && seen.Sha256 is not null &&
-                !string.Equals(hash, seen.Sha256, StringComparison.Ordinal))
+            if (version == seen.Version && !string.Equals(hash, seen.Sha256, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     $"The registry on the server is different from the one this machine saw at version " +
@@ -191,10 +202,10 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
             }
         }
 
-        if (seen is null || version > seen.Version || seen.Sha256 is null)
+        if (seen is null || version > seen.Version)
         {
             System.IO.Directory.CreateDirectory(Directory);
-            WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(
+            DurableFile.Write(path, System.Text.Encoding.UTF8.GetBytes(
                 JsonSerializer.Serialize(new RegistryHighWater { Version = version, Sha256 = hash }, Json)));
         }
     }
@@ -241,15 +252,7 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
         }
     }
 
-    private sealed record RegistryHighWater
-    {
-        [JsonPropertyName("version")]
-        public required long Version { get; init; }
 
-        /// <summary>Null when only the version is known — see the restore path.</summary>
-        [JsonPropertyName("sha256")]
-        public string? Sha256 { get; init; }
-    }
 
     /// <summary>
     /// Every publishing record belonging to one plugin, for a key backup to carry.
@@ -275,9 +278,9 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
         return records;
     }
 
-    /// <summary>The registry version this machine has acted on, or 0 when it has acted on none.</summary>
-    public long RegistryHighWaterVersion() =>
-        TryLoadHighWater(Path.Combine(Directory, "registry-highwater.json"))?.Version ?? 0;
+    /// <summary>The registry this machine has acted on, or null when it has acted on none.</summary>
+    public RegistryHighWater? CurrentRegistryHighWater() =>
+        TryLoadHighWater(Path.Combine(Directory, "registry-highwater.json"));
 
     /// <summary>
     /// Takes the publishing state out of a key backup.
@@ -287,30 +290,116 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
     /// published since knows more than the backup does. The registry high-water moves the same way,
     /// forwards only.
     /// </summary>
-    public void RestoreFromBackup(IReadOnlyList<PublisherRecord> records, long registryVersion)
+    public void RestoreFromBackup(
+        string pluginId, IReadOnlyList<PublisherRecord> records, RegistryHighWater? registry)
     {
         System.IO.Directory.CreateDirectory(Directory);
 
         foreach (var record in records)
         {
-            var existing = TryLoad(record.TrustContext);
-            if (existing?.Committed is not null && record.Committed is not null &&
-                existing.Committed.Generation >= record.Committed.Generation)
+            if (!string.Equals(record.PluginId, pluginId, StringComparison.Ordinal))
             {
+                throw new InvalidOperationException(
+                    $"That backup carries publishing state for '{record.PluginId}', which is not the " +
+                    $"plugin it says it is for ('{pluginId}').");
+            }
+        }
+
+        // The freshness guard goes down first, and the heads after it. The other order leaves a
+        // crash window with a usable key and a retired head restored, and nothing yet in place to
+        // stop a replayed registry putting the two back into service together.
+        var path = Path.Combine(Directory, "registry-highwater.json");
+        if (registry is not null && registry.Version > (TryLoadHighWater(path)?.Version ?? 0))
+            DurableFile.Write(path, JsonSerializer.Serialize(registry, Json));
+
+        var restored = new List<string>();
+        foreach (var record in records)
+        {
+            if (!MovesForward(TryLoad(record.TrustContext), record))
+            {
+                logger.Information("Kept this machine's newer publishing state for {PluginId}", pluginId);
                 continue;
             }
 
             Write(record);
+            restored.Add(record.TrustContext);
             logger.Information(
                 "Restored publishing state for {PluginId} at generation {Generation}",
                 record.PluginId, record.Committed?.Generation ?? 0);
         }
 
-        var path = Path.Combine(Directory, "registry-highwater.json");
-        if (registryVersion > (TryLoadHighWater(path)?.Version ?? 0))
+        if (restored.Count > 0) MarkRestored(restored);
+    }
+
+    /// <summary>
+    /// Whether a restored record is worth taking over what is already here.
+    ///
+    /// A backup is a photograph of an earlier moment, so a machine that has published since knows
+    /// more than it does. The comparison has to cover the empty cases too: an incoming record with
+    /// no committed head, or none of the pending journal, must never erase one that exists — which
+    /// the first version allowed by comparing only when both sides were populated.
+    /// </summary>
+    private static bool MovesForward(PublisherRecord? existing, PublisherRecord incoming)
+    {
+        if (existing is null) return true;
+        if (existing.Pending is not null && incoming.Pending is null) return false;
+        if (existing.Committed is null) return true;
+        if (incoming.Committed is null) return false;
+
+        return incoming.Committed.Generation > existing.Committed.Generation;
+    }
+
+    /// <summary>
+    /// Trust contexts whose state came out of a backup and has not been confirmed against reality
+    /// since.
+    ///
+    /// This is the honest answer to what a backup cannot do. Restoring one proves the state is
+    /// AUTHENTIC; nothing in a file can prove it is CURRENT. If the author published twice after
+    /// taking that backup, a restored machine believes the earlier of the two — and a server
+    /// replaying that same earlier publish matches it exactly, so the ordinary head check passes
+    /// and the key signs a second, different version of a generation that already exists.
+    ///
+    /// Nothing local can detect that. So the machine remembers where its state came from, and the
+    /// first publish afterwards is a decision the author makes with the generation in front of
+    /// them, rather than something that happens quietly.
+    /// </summary>
+    public bool IsRestoredAndUnconfirmed(string trustContext) =>
+        ReadRestoredMarks().Contains(trustContext);
+
+    private void MarkRestored(IEnumerable<string> trustContexts)
+    {
+        var marks = ReadRestoredMarks();
+        foreach (var context in trustContexts) marks.Add(context);
+        DurableFile.Write(RestoredMarkPath, JsonSerializer.Serialize(marks.Order(StringComparer.Ordinal), Json));
+    }
+
+    private void ClearRestoredMark(string trustContext)
+    {
+        var marks = ReadRestoredMarks();
+        if (!marks.Remove(trustContext)) return;
+        DurableFile.Write(RestoredMarkPath, JsonSerializer.Serialize(marks.Order(StringComparer.Ordinal), Json));
+    }
+
+    private string RestoredMarkPath => Path.Combine(Directory, "restored.json");
+
+    private HashSet<string> ReadRestoredMarks()
+    {
+        try
         {
-            WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(
-                new RegistryHighWater { Version = registryVersion }, Json)));
+            return new HashSet<string>(
+                JsonSerializer.Deserialize<List<string>>(File.ReadAllText(RestoredMarkPath), Json) ?? [],
+                StringComparer.Ordinal);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "This machine's record of restored publishing state can't be read. Publishing is " +
+                "blocked until it is: without it there is no way to tell state this machine " +
+                "confirmed from state that came out of a backup.", ex);
         }
     }
 
@@ -329,7 +418,7 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
         string trustContext, string pluginId, PublisherHead? committed, PendingPublish pending, byte[] indexBytes)
     {
         System.IO.Directory.CreateDirectory(Directory);
-        WriteAtomic(PendingIndexPathFor(trustContext), indexBytes);
+        DurableFile.Write(PendingIndexPathFor(trustContext), indexBytes);
 
         Write(new PublisherRecord
         {
@@ -359,6 +448,10 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
         });
 
         TryDelete(PendingIndexPathFor(trustContext));
+
+        // A confirmed publish is what turns restored state into state this machine has seen work.
+        ClearRestoredMark(trustContext);
+
         logger.Information("Publishing head for {PluginId} is now generation {Generation}",
             pluginId, head.Generation);
     }
@@ -394,49 +487,9 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
             catch (Exception ex) { logger.Warning(ex, "Couldn't keep a copy of the previous publishing record"); }
         }
 
-        WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record, Json)));
+        DurableFile.Write(path, System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record, Json)));
     }
 
-    /// <summary>
-    /// Writes so that a machine which loses power has either the old record or the new one, and not
-    /// a cache's promise of the new one.
-    ///
-    /// `File.WriteAllBytes` followed by a move survives a process dying, which is the common case,
-    /// but it does not survive the machine dying: the bytes can still be sitting in the filesystem
-    /// cache. That distinction matters more here than almost anywhere else in the tool, because a
-    /// pending record that evaporates is precisely what lets a rolled-back server walk the signer
-    /// into publishing a second, different version of a generation that already exists.
-    ///
-    /// Both halves have to be durable, and flushing only the first half was the mistake in the
-    /// first attempt at this: the CONTENT was written through, and then `File.Move` committed the
-    /// rename through the ordinary cache. .NET's move calls `MoveFileEx` with
-    /// `MOVEFILE_COPY_ALLOWED` and `MOVEFILE_REPLACE_EXISTING`, never `MOVEFILE_WRITE_THROUGH` —
-    /// which is the flag Windows documents as "do not return until the move is on the disk". So a
-    /// perfectly flushed temp file could still be followed by a lost rename, leaving exactly the
-    /// window the flush was there to close.
-    /// </summary>
-    private static void WriteAtomic(string path, byte[] bytes)
-    {
-        var temp = path + ".tmp";
-
-        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None,
-                   bufferSize: 4096, FileOptions.WriteThrough))
-        {
-            stream.Write(bytes);
-            stream.Flush(flushToDisk: true);
-        }
-
-        if (!MoveFileExW(temp, path, MoveFileReplaceExisting | MoveFileWriteThrough))
-            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-    }
-
-    private const uint MoveFileReplaceExisting = 0x1;
-    private const uint MoveFileWriteThrough = 0x8;
-
-    [LibraryImport("kernel32.dll", EntryPoint = "MoveFileExW",
-        StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool MoveFileExW(string existingFileName, string newFileName, uint flags);
 
     private void TryDelete(string path)
     {

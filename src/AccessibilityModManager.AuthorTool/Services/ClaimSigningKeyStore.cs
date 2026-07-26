@@ -45,10 +45,26 @@ public sealed record ClaimKeyBackup
     [JsonPropertyName("publisherState")]
     public IReadOnlyList<PublisherRecord> PublisherState { get; init; } = [];
 
-    /// <summary>The registry version this machine had acted on, so a restored machine does not
-    /// accept an older registry than the one it left off at.</summary>
-    [JsonPropertyName("registryVersion")]
-    public long RegistryVersion { get; init; }
+    /// <summary>The registry this machine had acted on, exactly — version AND content hash, so a
+    /// restored machine is no more accepting than the one it came from.</summary>
+    [JsonPropertyName("registryHighWater")]
+    public RegistryHighWater? RegistryHighWater { get; init; }
+
+    /// <summary>
+    /// A signature by the key inside this bundle, over every other field.
+    ///
+    /// Without it the encrypted key is the only authenticated thing here and everything around it
+    /// is editable plaintext: the publishing history, which plugin slot the bundle lands in, the
+    /// registry high-water. Rewriting the recorded head to an older generation is enough to make
+    /// the restored machine sign a second version of a publish that already exists, which is the
+    /// exact equivocation the whole journal exists to prevent — with the genuine key untouched, so
+    /// every check that looks only at the key passes.
+    ///
+    /// It authenticates; it does not make the contents FRESH. Nothing in a file can, which is why a
+    /// restore is treated as uncertain state until the author says otherwise.
+    /// </summary>
+    [JsonPropertyName("signature")]
+    public string Signature { get; init; } = "";
 }
 
 /// <summary>
@@ -72,6 +88,13 @@ public sealed class ClaimSigningKeyStore(
     /// <summary>Iteration count for the key file's passphrase derivation.</summary>
     private static readonly PbeParameters KeyEncryption =
         new(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 600_000);
+
+    /// <summary>Bounds a hostile or corrupt backup before it is parsed at all. A real one is a few
+    /// kilobytes.</summary>
+    private const long MaxBackupBytes = 4 * 1024 * 1024;
+
+    /// <summary>One record per trust context a key has published in — a handful, ever.</summary>
+    private const int MaxBackupRecords = 256;
 
     private static readonly JsonSerializerOptions BackupJson = new()
     {
@@ -241,6 +264,20 @@ public sealed class ClaimSigningKeyStore(
         var signing = TryGet(pluginId)
             ?? throw new InvalidOperationException($"No signing key is set up for plugin '{pluginId}'.");
 
+        var records = headStore.RecordsFor(pluginId);
+
+        // A backup taken mid-publish would carry the pending marker but not the exact bytes it
+        // refers to, and those bytes cannot be rebuilt — the signatures are randomised, so a
+        // rebuild at the same generation is the fork this all exists to prevent. A restored machine
+        // would be permanently stuck on a publish it cannot finish or abandon. Settle it first.
+        if (records.Any(r => r.Pending is not null))
+        {
+            throw new InvalidOperationException(
+                "There is a publish in progress that hasn't been confirmed yet. Finish or resolve it " +
+                "before taking a backup — a backup taken now would remember the attempt without the " +
+                "file it was going to send.");
+        }
+
         using var rsa = LoadPrivateKey(signing);
 
         var backup = new ClaimKeyBackup
@@ -249,8 +286,14 @@ public sealed class ClaimSigningKeyStore(
             KeyId = signing.KeyId,
             PublicKeyFingerprint = signing.PublicKeyFingerprint,
             PrivateKeyPem = rsa.ExportEncryptedPkcs8PrivateKeyPem(exportPassphrase, KeyEncryption),
-            PublisherState = headStore.RecordsFor(pluginId),
-            RegistryVersion = headStore.RegistryHighWaterVersion()
+            PublisherState = records,
+            RegistryHighWater = headStore.CurrentRegistryHighWater()
+        };
+
+        backup = backup with
+        {
+            Signature = Convert.ToBase64String(rsa.SignData(
+                BackupBytesToSign(backup), HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
         };
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(destinationPath));
@@ -262,18 +305,41 @@ public sealed class ClaimSigningKeyStore(
     }
 
     /// <summary>
+    /// What the bundle's signature covers: everything except the signature itself, under a domain
+    /// prefix of its own so a backup signature can never be presented as a catalog claim, or the
+    /// reverse.
+    /// </summary>
+    private static byte[] BackupBytesToSign(ClaimKeyBackup backup)
+    {
+        var body = JsonSerializer.SerializeToUtf8Bytes(backup with { Signature = "" }, BackupJson);
+        return [.. "amm-key-backup-v1\n"u8, .. body];
+    }
+
+    /// <summary>
     /// Installs a backup on this machine — the other half of <see cref="Export"/>, for a new
     /// computer or a restored disk. Brings the publishing state with it, which is what lets the new
     /// machine carry on publishing rather than refusing to.
     /// </summary>
+    /// <param name="pluginId">
+    /// Which plugin the caller means to restore. The bundle does NOT get to choose its own slot:
+    /// it is a file that can be edited, and a bundle that named its destination could be pointed at
+    /// another plugin's configuration and history.
+    /// </param>
     /// <param name="expectedFingerprint">
     /// Whatever the signed registry currently publishes, when the caller has it. Importing a key
     /// the registry does not vouch for produces claims that verify nowhere, so it is refused here
     /// rather than discovered after a publish.
     /// </param>
     public ClaimSigningConfig Import(
-        string sourcePath, ReadOnlySpan<char> sourcePassphrase, string? expectedFingerprint = null)
+        string sourcePath, ReadOnlySpan<char> sourcePassphrase, string pluginId,
+        string? expectedFingerprint = null)
     {
+        PathSafety.EnsureSafeId(pluginId, "plugin id");
+
+        var length = new FileInfo(sourcePath).Length;
+        if (length > MaxBackupBytes)
+            throw new InvalidOperationException($"That backup file is larger than {MaxBackupBytes} bytes.");
+
         ClaimKeyBackup backup;
         try
         {
@@ -287,7 +353,13 @@ public sealed class ClaimSigningKeyStore(
         }
 
         if (backup.V != 1) throw new InvalidOperationException("That backup was written by a newer version.");
-        PathSafety.EnsureSafeId(backup.PluginId, "plugin id");
+        if (backup.PublisherState.Count > MaxBackupRecords)
+            throw new InvalidOperationException("That backup carries an implausible number of publishing records.");
+        if (!string.Equals(backup.PluginId, pluginId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"That backup is for plugin '{backup.PluginId}', not '{pluginId}'.");
+        }
 
         using var rsa = RSA.Create();
         try
@@ -311,6 +383,19 @@ public sealed class ClaimSigningKeyStore(
         if (!string.Equals(fingerprint, backup.PublicKeyFingerprint, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("That backup's key does not match the fingerprint recorded in it.");
 
+        // Everything OUTSIDE the encrypted key is ordinary editable text: which plugin, which key
+        // id, the publishing history, the registry high-water. Checking only the key leaves all of
+        // it forgeable by anyone who can write to the file — and rewinding the recorded head by one
+        // generation is enough to make this machine sign a second version of a publish that already
+        // exists, with the genuine key untouched and every key-only check passing.
+        if (!rsa.VerifyData(BackupBytesToSign(backup), Convert.FromBase64String(backup.Signature),
+                HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+        {
+            throw new InvalidOperationException(
+                "That backup has been altered since it was written — the key inside it is genuine, but " +
+                "the details around it no longer match what was signed. Publishing from it is refused.");
+        }
+
         if (!string.IsNullOrEmpty(expectedFingerprint) &&
             !string.Equals(fingerprint, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
         {
@@ -320,7 +405,22 @@ public sealed class ClaimSigningKeyStore(
         }
 
         var config = configService.Load();
-        var previous = config.ClaimSigningKeys.GetValueOrDefault(backup.PluginId);
+        var previous = config.ClaimSigningKeys.GetValueOrDefault(pluginId);
+
+        // One key belongs to one plugin. Two plugins sharing a fingerprint would share a file name
+        // — so importing the same key under a second plugin would write over the first plugin's
+        // copy under a different passphrase, leaving that plugin unable to open its own key — and it
+        // would also undo the isolation that having a key per plugin is for.
+        var owner = config.ClaimSigningKeys
+            .FirstOrDefault(entry =>
+                !string.Equals(entry.Key, pluginId, StringComparison.Ordinal) &&
+                string.Equals(entry.Value.PublicKeyFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase));
+        if (owner.Key is not null)
+        {
+            throw new InvalidOperationException(
+                $"That key is already the signing key for plugin '{owner.Key}'. Each plugin needs its " +
+                "own key, so that one compromise cannot reach the others.");
+        }
 
         // New file first, and prove it opens before anything starts depending on it. Writing over
         // the live key and saving the config afterwards is how a crash in between leaves a key file
@@ -332,7 +432,7 @@ public sealed class ClaimSigningKeyStore(
 
         var signing = new ClaimSigningConfig
         {
-            PluginId = backup.PluginId,
+            PluginId = pluginId,
             KeyId = backup.KeyId,
             PrivateKeyPath = path,
             Passphrase = sourcePassphrase.ToString(),
@@ -340,12 +440,13 @@ public sealed class ClaimSigningKeyStore(
             PublicKeyFingerprint = fingerprint
         };
 
-        config.ClaimSigningKeys[backup.PluginId] = signing;
-        configService.Save(config);
+        // Publishing state before the key is usable, not after. A crash between the two used to
+        // leave a working key beside a restored, retired head with no freshness guard yet written —
+        // the one arrangement that lets a replayed registry put them back into service together.
+        headStore.RestoreFromBackup(pluginId, backup.PublisherState, backup.RegistryHighWater);
 
-        // Only once the config points at the new file: publishing state is useless without the key
-        // it belongs to, and a half-restored machine should look un-restored rather than partly so.
-        headStore.RestoreFromBackup(backup.PublisherState, backup.RegistryVersion);
+        config.ClaimSigningKeys[pluginId] = signing;
+        configService.Save(config);
 
         if (previous is not null &&
             !string.Equals(previous.PrivateKeyPath, path, StringComparison.OrdinalIgnoreCase))
@@ -429,9 +530,7 @@ public sealed class ClaimSigningKeyStore(
     /// </summary>
     private static void WriteKeyFile(string path, string pem)
     {
-        var temp = path + ".tmp";
-        File.WriteAllText(temp, pem);
-        File.Move(temp, path, overwrite: true);
+        DurableFile.Write(path, pem);
     }
 
     private void TryDelete(string path)

@@ -129,9 +129,10 @@ public sealed class AuthorConfigService
             var json = JsonSerializer.Serialize(config, JsonOptions);
             // Atomic: a crash mid-write must not leave a truncated config that loses the recorded
             // key identity — recovering that costs a registry re-sign.
-            var temp = ConfigFile + ".tmp";
-            File.WriteAllText(temp, json);
-            File.Move(temp, ConfigFile, overwrite: true);
+            // Durable, not merely atomic: this file says which key file belongs to which plugin
+            // and how to unlock it, so losing the switch to a power cut is how a key becomes
+            // unopenable — the one failure that costs a registry re-sign.
+            DurableFile.Write(ConfigFile, json);
         }
         finally
         {

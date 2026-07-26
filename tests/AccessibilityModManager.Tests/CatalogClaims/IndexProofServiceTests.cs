@@ -356,13 +356,98 @@ public sealed class IndexProofServiceTests : IDisposable
             otherService.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", live, false));
         Assert.Contains("no record of publishing it", refused.Message);
 
-        otherKeys.Import(backupPath, "backup passphrase");
+        otherKeys.Import(backupPath, "backup passphrase", "amethyst");
 
-        // And now it continues the history rather than starting a new one.
+        // Restored state is authentic but not provably current, so the first publish after a
+        // restore is a decision rather than a default.
+        var unconfirmed = Assert.Throws<InvalidOperationException>(() =>
+            otherService.PreparePublish(
+                IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false));
+        Assert.Contains("restored from a backup", unconfirmed.Message);
+
+        // Once the author confirms this is where they left off, it continues the history rather
+        // than starting a new one.
         var next = otherService.PreparePublish(
-            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live,
+            allowBootstrap: false, acknowledgeRestoredState: true);
 
         Assert.Equal(2, next.Pending.Generation);
+    }
+
+    [Fact]
+    public void A_stale_backup_on_a_clean_machine_does_not_quietly_authorise_publishing()
+    {
+        // The attack a backup cannot answer on its own. Publish twice, but take the backup after
+        // the first — then restore it somewhere with no history and let the server replay the
+        // publish the backup remembers. Everything matches, because the backup is authentic and the
+        // replayed index is genuine; it is simply a year out of date. Nothing local can tell.
+        var v1 = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "stale.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), v1);
+
+        var cleanRoot = Path.Combine(_root, "clean-machine");
+        var cleanConfig = new AuthorConfigService(TestLogger.Create(), cleanRoot);
+        var cleanHeads = new PublisherHeadStore(cleanConfig, TestLogger.Create());
+        var cleanKeys = new ClaimSigningKeyStore(cleanConfig, cleanHeads, TestLogger.Create());
+        var cleanService = new IndexProofService(cleanKeys, cleanHeads, TestLogger.Create());
+
+        cleanKeys.Import(backupPath, "pp2", "amethyst");
+
+        // The server serves v1 back. The restored head matches it exactly, so without the restored
+        // mark this would sign a second, different generation 2 — a fork under the genuine key.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            cleanService.PreparePublish(
+                IndexBytes("amethyst", Release("1.0.0"), Release("2.0.0")), Registry(), "amethyst", v1, false));
+
+        Assert.Contains("restored from a backup", ex.Message);
+        Assert.Contains("publish 1", ex.Message);
+    }
+
+    [Fact]
+    public void A_backup_edited_after_it_was_written_is_refused()
+    {
+        // Everything outside the encrypted key is ordinary text. Rewinding the recorded head by one
+        // generation is enough to make a restored machine sign over a publish that already exists,
+        // with the genuine key untouched — so the whole bundle is signed, not just the key.
+        Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "tampered.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var bundle = JsonNode.Parse(File.ReadAllText(backupPath))!.AsObject();
+        bundle["publisherState"]![0]!["committed"]!["generation"] = 99;
+        File.WriteAllText(backupPath, bundle.ToJsonString());
+
+        var elsewhere = NewKeyStore(Path.Combine(_root, "victim"));
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            elsewhere.Import(backupPath, "pp2", "amethyst"));
+        Assert.Contains("altered since it was written", ex.Message);
+    }
+
+    [Fact]
+    public void A_backup_cannot_choose_which_plugin_it_lands_in()
+    {
+        Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "backup.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var elsewhere = NewKeyStore(Path.Combine(_root, "victim"));
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            elsewhere.Import(backupPath, "pp2", "someone-else"));
+        Assert.Contains("is for plugin 'amethyst'", ex.Message);
+    }
+
+    private static ClaimSigningKeyStore NewKeyStore(string root)
+    {
+        var config = new AuthorConfigService(TestLogger.Create(), root);
+        return new ClaimSigningKeyStore(config, new PublisherHeadStore(config, TestLogger.Create()),
+            TestLogger.Create());
     }
 
     [Fact]
@@ -377,7 +462,7 @@ public sealed class IndexProofServiceTests : IDisposable
 
         var v2 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), v1);
 
-        _keyStore.Import(backupPath, "pp2");
+        _keyStore.Import(backupPath, "pp2", "amethyst");
 
         // Still at generation 2, so the next publish is 3 — not a second generation 2.
         var next = _service.PreparePublish(
