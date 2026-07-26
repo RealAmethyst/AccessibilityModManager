@@ -250,34 +250,83 @@ public sealed class ClaimContractTests : IDisposable
     }
 
     [Fact]
-    public void Equivocation_at_the_same_sequence_is_refused()
+    public void Two_claims_sharing_a_sequence_for_one_object_are_refused()
     {
+        // Sharing a sequence makes "highest wins" ambiguous, and two different payloads under one
+        // sequence is the author asserting two truths about one version of one thing.
         var header = _signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header }, 1, ClaimAudience.Everyone, "{}");
         var a = SignRelease(seq: 4, body: """{"packageUrl":"https://example.com/a.zip"}""");
-        var revocationOfSame = _signer.Sign(ClaimKind.Revocation, Release(), 4, ClaimAudience.Everyone, "{}");
+        var revocationAtSameSeq = _signer.Sign(ClaimKind.Revocation, Release(), 4, ClaimAudience.Everyone, "{}");
 
-        Assert.Throws<ClaimFormatException>(() => ClaimVerifier.ValidateSet([header, a, revocationOfSame]));
+        var ex = Assert.Throws<ClaimFormatException>(() => ClaimVerifier.ValidateSet([header, a, revocationAtSameSeq]));
+        Assert.Contains("share a sequence", ex.Message);
     }
 
     [Fact]
-    public void A_revocation_must_be_newer_than_what_it_withdraws()
+    public void A_deleted_release_leaves_only_a_revocation_and_disappears()
     {
         var header = _signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header }, 1, ClaimAudience.Everyone, "{}");
-        var release = SignRelease(seq: 7);
-        var staleRevocation = _signer.Sign(ClaimKind.Revocation, Release(), 3, ClaimAudience.Everyone, "{}");
+        var revocation = _signer.Sign(ClaimKind.Revocation, Release(), 9, ClaimAudience.Everyone, "{}");
 
-        var ex = Assert.Throws<ClaimFormatException>(() => ClaimVerifier.ValidateSet([header, release, staleRevocation]));
-        Assert.Contains("not newer", ex.Message);
+        ClaimVerifier.ValidateSet([header, revocation]);
+
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible([header, revocation], null, null),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
     }
 
     [Fact]
-    public void A_newer_revocation_alongside_its_release_is_accepted()
+    public void Narrowing_a_release_to_a_higher_tier_hides_it_from_the_demoted_tier()
+    {
+        // The case this design exists for, and the one my first ordering rule made impossible to
+        // express: a tier-1 release becomes tier-3-only. Tier 1 must stop seeing it AND be told so,
+        // because they already hold a claim for it. Tier 3 must see the replacement.
+        var header = _signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header }, 1, ClaimAudience.Everyone, "{}");
+        var oldAudience = new ClaimAudience { Public = false, CampaignId = "c1", TierIds = ["t1", "t3"] };
+        var narrowed = new ClaimAudience { Public = false, CampaignId = "c1", TierIds = ["t3"] };
+
+        var revocationToOldAudience = _signer.Sign(ClaimKind.Revocation, Release(), 5, oldAudience, "{}");
+        var replacementForTier3 = _signer.Sign(ClaimKind.Release, Release(), 6, narrowed,
+            """{"version":"1.0.0","note":"patron build"}""");
+
+        SignedClaim[] set = [header, revocationToOldAudience, replacementForTier3];
+        ClaimVerifier.ValidateSet(set);
+
+        // Tier 1 sees the revocation aimed at them and never the replacement, so it is gone.
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(set, "c1", ["t1"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+
+        // Tier 3 sees both; the newer claim wins, so the release is still there.
+        var forTier3 = ClaimVerifier.ResolveVisible(set, "c1", ["t3"])
+            .Where(c => c.Payload.Identity.Kind == ClaimKind.Release);
+        Assert.Equal(6, Assert.Single(forTier3).Payload.Seq);
+
+        // Signed out: never learns it existed, before or after.
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(set, null, null),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
+    public void A_republished_object_beats_an_older_revocation()
     {
         var header = _signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header }, 1, ClaimAudience.Everyone, "{}");
-        var release = SignRelease(seq: 7);
-        var revocation = _signer.Sign(ClaimKind.Revocation, Release(), 8, ClaimAudience.Everyone, "{}");
+        var oldRevocation = _signer.Sign(ClaimKind.Revocation, Release(), 2, ClaimAudience.Everyone, "{}");
+        var republished = SignRelease(seq: 7, body: """{"version":"1.0.0","again":true}""");
 
-        ClaimVerifier.ValidateSet([header, release, revocation]);
+        SignedClaim[] set = [header, oldRevocation, republished];
+        ClaimVerifier.ValidateSet(set);
+
+        Assert.Single(ClaimVerifier.ResolveVisible(set, null, null),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
+    public void Two_revocations_for_one_object_are_refused()
+    {
+        var header = _signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header }, 1, ClaimAudience.Everyone, "{}");
+        var first = _signer.Sign(ClaimKind.Revocation, Release(), 8, ClaimAudience.Everyone, "{}");
+        var second = _signer.Sign(ClaimKind.Revocation, Release(), 9, ClaimAudience.Everyone, "{}");
+
+        Assert.Throws<ClaimFormatException>(() => ClaimVerifier.ValidateSet([header, first, second]));
     }
 
     [Fact]

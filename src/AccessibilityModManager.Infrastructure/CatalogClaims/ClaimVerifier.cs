@@ -104,12 +104,22 @@ public sealed class ClaimVerifier
     }
 
     /// <summary>
-    /// Applies the whole-set rules that a single claim cannot express: one header, no duplicate
-    /// identities, and no two claims contending for the same object.
+    /// Applies the whole-set rules that a single claim cannot express: exactly one header, at most
+    /// one live claim and one revocation per object, and no two claims sharing a sequence.
     ///
-    /// A revocation is allowed to share an identity with the release it withdraws — that is its
-    /// purpose — but only from a strictly higher sequence, so a stale revocation can never suppress
-    /// a newer republication.
+    /// State is resolved by HIGHEST SEQUENCE WINS, which is what lets one mechanism cover both
+    /// things a revocation has to do:
+    ///
+    /// - A deletion leaves only a revocation for that identity, carrying the audience that could
+    ///   previously see the object. Anyone else never learns it existed.
+    /// - Narrowing a release's tier leaves a revocation at the OLD audience and a new claim at the
+    ///   NEW one, with the new claim's sequence higher. The demoted tier sees only the revocation
+    ///   and stops trusting the claim it already holds; the remaining tier sees both and the newer
+    ///   claim wins.
+    ///
+    /// An earlier version of this required a revocation to be newer than any claim it shared an
+    /// identity with. That reads as obviously correct and makes narrowing impossible to express —
+    /// the exact case the design exists to handle.
     /// </summary>
     public static void ValidateSet(IReadOnlyList<SignedClaim> claims)
     {
@@ -130,31 +140,48 @@ public sealed class ClaimVerifier
         {
             if (group.Count == 1) continue;
 
-            var live = group.Where(c => c.Payload.Kind != ClaimKind.Revocation).ToList();
-            var revocations = group.Where(c => c.Payload.Kind == ClaimKind.Revocation).ToList();
-
-            if (live.Count > 1)
+            var live = group.Count(c => c.Payload.Kind != ClaimKind.Revocation);
+            if (live > 1)
                 throw new ClaimFormatException($"two claims describe the same object ({key})");
 
-            // Two claims at the same sequence with different content is equivocation: the author
-            // has signed two different truths under one version of one object.
-            var seqs = group.Select(c => (c.Payload.Seq, Hash: ClaimCodec.ContentHash(c.PayloadBytes)))
-                .GroupBy(x => x.Seq);
-            foreach (var bySeq in seqs)
-            {
-                if (bySeq.Select(x => x.Hash).Distinct(StringComparer.Ordinal).Count() > 1)
-                    throw new ClaimFormatException($"two different claims share sequence {bySeq.Key} for {key}");
-            }
+            var revoked = group.Count(c => c.Payload.Kind == ClaimKind.Revocation);
+            if (revoked > 1)
+                throw new ClaimFormatException($"two revocations for the same object ({key})");
 
-            foreach (var revocation in revocations)
-            {
-                foreach (var current in live)
-                {
-                    if (revocation.Payload.Seq <= current.Payload.Seq)
-                        throw new ClaimFormatException(
-                            $"a revocation for {key} is not newer than the claim it withdraws");
-                }
-            }
+            // Distinct sequences within one object. Sharing one would make "highest wins"
+            // ambiguous, and two different payloads under one sequence is equivocation — the author
+            // asserting two truths about one version of one thing.
+            if (group.Select(c => c.Payload.Seq).Distinct().Count() != group.Count)
+                throw new ClaimFormatException($"two claims share a sequence for {key}");
         }
+    }
+
+    /// <summary>
+    /// Resolves what a caller should actually see: for each object, the highest-sequence claim that
+    /// caller's entitlements admit, dropping objects whose newest visible claim is a revocation.
+    ///
+    /// Filtering happens BEFORE resolution, which is the whole point. A tier-1 caller who cannot see
+    /// a tier-3 replacement resolves to the revocation that was aimed at them and correctly treats
+    /// the object as gone, rather than resolving to a claim they are not entitled to know about.
+    /// </summary>
+    public static IReadOnlyList<SignedClaim> ResolveVisible(
+        IReadOnlyList<SignedClaim> claims,
+        string? campaignId,
+        IReadOnlyCollection<string>? entitledTierIds)
+    {
+        var current = new Dictionary<string, SignedClaim>(StringComparer.Ordinal);
+
+        foreach (var claim in claims)
+        {
+            if (!claim.Payload.Audience.Admits(campaignId, entitledTierIds)) continue;
+
+            var key = claim.Payload.Identity.ToStorageKey();
+            if (!current.TryGetValue(key, out var existing) || claim.Payload.Seq > existing.Payload.Seq)
+                current[key] = claim;
+        }
+
+        return current.Values
+            .Where(c => c.Payload.Kind != ClaimKind.Revocation)
+            .ToList();
     }
 }
