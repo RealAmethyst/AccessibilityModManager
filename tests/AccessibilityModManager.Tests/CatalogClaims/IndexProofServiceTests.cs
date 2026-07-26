@@ -407,6 +407,42 @@ public sealed class IndexProofServiceTests : IDisposable
     }
 
     [Fact]
+    public void Restored_state_is_marked_in_the_same_write_that_restores_it()
+    {
+        // The provenance lives inside the record rather than in a file beside it, so there is no
+        // interleaving where a head is restored and the fact that it is only BELIEVED has not been
+        // written yet. Kept separately, a crash between the two writes left a restored head nobody
+        // would question — and a retry would skip it, because the record was already there at the
+        // same generation, so it never got marked either.
+        var v1 = Publish(IndexBytes(releases: Release("1.0.0")), null);
+        var backupPath = Path.Combine(_root, "b.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var otherRoot = Path.Combine(_root, "other");
+        var otherConfig = new AuthorConfigService(TestLogger.Create(), otherRoot);
+        var otherHeads = new PublisherHeadStore(otherConfig, TestLogger.Create());
+        var otherKeys = new ClaimSigningKeyStore(otherConfig, otherHeads, TestLogger.Create());
+        otherKeys.Import(backupPath, "pp2", "amethyst");
+
+        var trustContext = ClaimTrustContext.Compute(Anchor());
+        Assert.True(otherHeads.IsRestoredAndUnconfirmed(trustContext));
+
+        // Importing the same backup again finds an equal-generation record and skips it — the flag
+        // has to still be there afterwards, since nothing has been published in between.
+        otherKeys.Import(backupPath, "pp2", "amethyst");
+        Assert.True(otherHeads.IsRestoredAndUnconfirmed(trustContext));
+
+        // And a confirmed publish is what clears it.
+        var otherService = new IndexProofService(otherKeys, otherHeads, TestLogger.Create());
+        var prepared = otherService.PreparePublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", v1,
+            allowBootstrap: false, acknowledgeRestoredState: true);
+        otherService.ConfirmPublished(Anchor(), prepared.IndexJson);
+
+        Assert.False(otherHeads.IsRestoredAndUnconfirmed(trustContext));
+    }
+
+    [Fact]
     public void A_backup_edited_after_it_was_written_is_refused()
     {
         // Everything outside the encrypted key is ordinary text. Rewinding the recorded head by one

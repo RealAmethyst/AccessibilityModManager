@@ -79,6 +79,21 @@ public sealed record PublisherRecord
 
     [JsonPropertyName("pending")]
     public PendingPublish? Pending { get; init; }
+
+    /// <summary>
+    /// True when this state came out of a backup and has not been confirmed by a publish since.
+    ///
+    /// Part of the record rather than a file beside it, so the head and the fact that it is only
+    /// *believed* land in one atomic write. Kept separately, they could not: whichever went first,
+    /// a crash between them left either a restored head nobody would question, or a question about
+    /// a head that was never restored. Only the first of those is dangerous, and it is the one that
+    /// happens if the head is written first.
+    ///
+    /// A restore always sets this, whatever the bundle says — a backup does not get to tell a
+    /// machine that its contents are current.
+    /// </summary>
+    [JsonPropertyName("restoredUnconfirmed")]
+    public bool RestoredUnconfirmed { get; init; }
 }
 
 /// <summary>
@@ -312,7 +327,6 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
         if (registry is not null && registry.Version > (TryLoadHighWater(path)?.Version ?? 0))
             DurableFile.Write(path, JsonSerializer.Serialize(registry, Json));
 
-        var restored = new List<string>();
         foreach (var record in records)
         {
             if (!MovesForward(TryLoad(record.TrustContext), record))
@@ -321,14 +335,11 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
                 continue;
             }
 
-            Write(record);
-            restored.Add(record.TrustContext);
+            Write(record with { RestoredUnconfirmed = true });
             logger.Information(
                 "Restored publishing state for {PluginId} at generation {Generation}",
                 record.PluginId, record.Committed?.Generation ?? 0);
         }
-
-        if (restored.Count > 0) MarkRestored(restored);
     }
 
     /// <summary>
@@ -364,44 +375,7 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
     /// them, rather than something that happens quietly.
     /// </summary>
     public bool IsRestoredAndUnconfirmed(string trustContext) =>
-        ReadRestoredMarks().Contains(trustContext);
-
-    private void MarkRestored(IEnumerable<string> trustContexts)
-    {
-        var marks = ReadRestoredMarks();
-        foreach (var context in trustContexts) marks.Add(context);
-        DurableFile.Write(RestoredMarkPath, JsonSerializer.Serialize(marks.Order(StringComparer.Ordinal), Json));
-    }
-
-    private void ClearRestoredMark(string trustContext)
-    {
-        var marks = ReadRestoredMarks();
-        if (!marks.Remove(trustContext)) return;
-        DurableFile.Write(RestoredMarkPath, JsonSerializer.Serialize(marks.Order(StringComparer.Ordinal), Json));
-    }
-
-    private string RestoredMarkPath => Path.Combine(Directory, "restored.json");
-
-    private HashSet<string> ReadRestoredMarks()
-    {
-        try
-        {
-            return new HashSet<string>(
-                JsonSerializer.Deserialize<List<string>>(File.ReadAllText(RestoredMarkPath), Json) ?? [],
-                StringComparer.Ordinal);
-        }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
-        {
-            return new HashSet<string>(StringComparer.Ordinal);
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException(
-                "This machine's record of restored publishing state can't be read. Publishing is " +
-                "blocked until it is: without it there is no way to tell state this machine " +
-                "confirmed from state that came out of a backup.", ex);
-        }
-    }
+        TryLoad(trustContext)?.RestoredUnconfirmed == true;
 
     /// <summary>The exact bytes a pending publish prepared, if they are still on disk.</summary>
     public byte[]? TryReadPendingIndex(string trustContext)
@@ -447,10 +421,9 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
             Pending = null
         });
 
+        // The record written above carries no restored flag, which is the point: a confirmed
+        // publish is what turns state this machine merely believed into state it has seen work.
         TryDelete(PendingIndexPathFor(trustContext));
-
-        // A confirmed publish is what turns restored state into state this machine has seen work.
-        ClearRestoredMark(trustContext);
 
         logger.Information("Publishing head for {PluginId} is now generation {Generation}",
             pluginId, head.Generation);
