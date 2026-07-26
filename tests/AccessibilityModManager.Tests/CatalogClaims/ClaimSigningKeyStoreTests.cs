@@ -106,7 +106,11 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var otherKey = ClaimTestKeys.Secondary;
         var wrongAnchor = AnchorFor(signing) with { PublicKeyPem = otherKey.ExportSubjectPublicKeyInfoPem() };
 
-        Assert.Throws<ClaimFormatException>(() => _store.OpenSigner(wrongAnchor));
+        // Refused on the stored fingerprint, before the key file is even opened — the mismatch is
+        // knowable from config alone, and the author gets told which of the two is out of date
+        // rather than a cryptographic complaint.
+        var ex = Assert.Throws<InvalidOperationException>(() => _store.OpenSigner(wrongAnchor));
+        Assert.Contains("not the one the registry currently publishes", ex.Message);
     }
 
     // ---- the recovery path ----
@@ -175,6 +179,29 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
             target.Import(strangerBackup, "theirs", "amethyst", strangerKey.KeyId,
                 expectedFingerprint: "0000000000000000000000000000000000000000000000000000000000000000"));
         Assert.Contains("not the one the registry", ex.Message);
+    }
+
+    [Fact]
+    public void Importing_a_key_of_the_wrong_size_is_refused_before_anything_is_written()
+    {
+        // The size rule held at creation, signing and verification but not here — so an import
+        // could report success, replace a working key with an unsupported one, and only fail at
+        // the next publish, with the original already gone.
+        var original = _store.Create("amethyst", Passphrase);
+
+        using var weak = System.Security.Cryptography.RSA.Create(3072);
+        var weakBackup = Path.Combine(_root, "weak.pem");
+        File.WriteAllText(weakBackup, weak.ExportEncryptedPkcs8PrivateKeyPem("theirs",
+            new System.Security.Cryptography.PbeParameters(
+                System.Security.Cryptography.PbeEncryptionAlgorithm.Aes256Cbc,
+                System.Security.Cryptography.HashAlgorithmName.SHA256, 100_000)));
+
+        Assert.Throws<ClaimFormatException>(() =>
+            _store.Import(weakBackup, "theirs", "amethyst", original.KeyId));
+
+        // And the key that was already there is untouched.
+        Assert.Equal(original.PublicKeyFingerprint,
+            new AuthorConfigService(TestLogger.Create(), _root).Load().ClaimSigning!.PublicKeyFingerprint);
     }
 
     [Fact]

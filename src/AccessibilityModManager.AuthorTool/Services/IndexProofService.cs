@@ -107,7 +107,14 @@ public sealed class IndexProofService(
     /// into issuing a second, different publish under one generation.
     /// </summary>
     /// <param name="localIndexJson">The index about to be published.</param>
-    /// <param name="anchor">From the VERIFIED registry — never from the index being published.</param>
+    /// <param name="verifiedRegistryJson">
+    /// The registry, with its signature ALREADY VERIFIED by the caller. The anchor is derived from
+    /// it here rather than passed in beside it, so the two can never describe different things —
+    /// and the registry's own freshness is checked first, because a replayed old registry is
+    /// cryptographically perfect and names whatever address and key were current before a
+    /// re-point or a rotation retired them.
+    /// </param>
+    /// <param name="pluginId">Which entry in that registry this index belongs to.</param>
     /// <param name="liveIndexJson">
     /// What is currently published, fetched over SFTP so the manifest is present — after the raw
     /// route closes, an HTTPS fetch returns a filtered response with the manifest stripped, which
@@ -121,8 +128,16 @@ public sealed class IndexProofService(
     /// what a server that deleted one looks like.
     /// </param>
     public PreparedPublish PreparePublish(
-        byte[] localIndexJson, ClaimTrustAnchor anchor, byte[]? liveIndexJson, bool allowBootstrap)
+        byte[] localIndexJson, string verifiedRegistryJson, string pluginId,
+        byte[]? liveIndexJson, bool allowBootstrap)
     {
+        headStore.RequireRegistryNotOlder(verifiedRegistryJson);
+
+        var anchor = TryReadAnchor(verifiedRegistryJson, pluginId)
+            ?? throw new InvalidOperationException(
+                $"The registry has no signing key recorded for plugin '{pluginId}', so there is nothing " +
+                "to sign this index against yet.");
+
         var indexText = Encoding.UTF8.GetString(localIndexJson);
         var index = JsonSerializer.Deserialize<PluginRepoIndex>(indexText, IndexOptions)
             ?? throw new InvalidOperationException("The index could not be read.");
@@ -229,7 +244,19 @@ public sealed class IndexProofService(
         var live = ReadLiveProof(liveIndexJson, anchor);
         var liveHead = live?.Manifest?.PayloadHash;
 
-        if (string.Equals(liveHead, pending.ManifestHash, StringComparison.Ordinal)) return PendingOutcome.Landed;
+        // "Landed" has to mean the whole document, not just the proof inside it. The manifest
+        // commits to the claims; the compatibility plaintext beside them — which is what every
+        // current manager actually reads — is not covered by it, so a server could keep the proof
+        // intact, rewrite the plaintext, and have an interrupted publish committed as though it had
+        // gone out unaltered.
+        if (string.Equals(liveHead, pending.ManifestHash, StringComparison.Ordinal))
+        {
+            var actual = liveIndexJson is null ? null : Convert.ToHexStringLower(SHA256.HashData(liveIndexJson));
+            return string.Equals(actual, pending.IndexSha256, StringComparison.Ordinal)
+                ? PendingOutcome.Landed
+                : PendingOutcome.Diverged;
+        }
+
         if (string.Equals(liveHead, pending.BaseManifestHash, StringComparison.Ordinal)) return PendingOutcome.NotSent;
         return PendingOutcome.Diverged;
     }
@@ -247,9 +274,35 @@ public sealed class IndexProofService(
             new PublisherHead { Generation = pending.Generation, ManifestHash = pending.ManifestHash });
     }
 
-    /// <summary>The exact bytes an interrupted publish had prepared, for re-sending unchanged.</summary>
-    public byte[]? TryReadPendingIndex(ClaimTrustAnchor anchor) =>
-        headStore.TryReadPendingIndex(ClaimTrustContext.Compute(anchor));
+    /// <summary>
+    /// The exact bytes an interrupted publish had prepared, for re-sending unchanged — checked
+    /// against the hash journalled beside them, so bytes that were damaged on disk are refused
+    /// rather than re-uploaded as though they were the ones that were signed.
+    /// </summary>
+    public byte[] ReadPendingIndex(ClaimTrustAnchor anchor)
+    {
+        var trustContext = ClaimTrustContext.Compute(anchor);
+        var record = headStore.TryLoad(trustContext)
+            ?? throw new InvalidOperationException("There is no record of a publish to resume.");
+        var pending = record.Pending
+            ?? throw new InvalidOperationException("There is no pending publish to resume.");
+
+        var bytes = headStore.TryReadPendingIndex(trustContext)
+            ?? throw new InvalidOperationException(
+                "The prepared index for the interrupted publish is missing, so it can't be re-sent. " +
+                "It must not be rebuilt — a rebuild signs different bytes under a number that may " +
+                "already be published.");
+
+        if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(bytes)), pending.IndexSha256,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The prepared index for the interrupted publish is not the one that was prepared. " +
+                "It can't be re-sent, and rebuilding it is not safe.");
+        }
+
+        return bytes;
+    }
 
     /// <summary>
     /// The head this publish is allowed to extend — which is the one this machine confirmed, and
@@ -330,12 +383,15 @@ public sealed class IndexProofService(
     /// </summary>
     private VerifiedProof? ReadLiveProof(byte[]? liveIndexJson, ClaimTrustAnchor anchor)
     {
-        if (liveIndexJson is null or []) return null;
+        // Null means the file is proven absent. A file that exists and is empty is not an absence —
+        // it is a damaged or truncated index, and letting it reach the same branch would let a
+        // zero-byte write become "there is no history here".
+        if (liveIndexJson is null) return null;
 
         ClaimProofDocument? document;
         try
         {
-            document = ClaimProof.TryExtract(Encoding.UTF8.GetString(liveIndexJson));
+            document = ClaimProof.TryExtract(liveIndexJson);
         }
         catch (Exception ex) when (ex is JsonException or ClaimFormatException)
         {
@@ -366,7 +422,7 @@ public sealed class IndexProofService(
 
     private static void SelfCheck(byte[] indexBytes, ClaimTrustAnchor anchor)
     {
-        var document = ClaimProof.TryExtract(Encoding.UTF8.GetString(indexBytes))
+        var document = ClaimProof.TryExtract(indexBytes)
             ?? throw new InvalidOperationException("The proof just written could not be read back.");
 
         ClaimProof.ReadVerified(document, anchor, requireManifest: true);

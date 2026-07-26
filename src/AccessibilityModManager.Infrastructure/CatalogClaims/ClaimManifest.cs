@@ -170,7 +170,15 @@ public static class ManifestCodec
             if (generation is < 1 or > ClaimCodec.MaxCounter)
                 throw new ClaimFormatException($"generation must be between 1 and {ClaimCodec.MaxCounter}");
 
+            // A parent belongs to every manifest except the very first, and to no other. Leaving
+            // that unstated let a first publish name an ancestor it cannot have, and a later one
+            // omit the link that makes the history a chain at all — a second implementation reading
+            // only the document would have had to guess which was meant.
             var parent = ClaimCodec.OptionalString(root, "parent");
+            if (generation == 1 && parent is not null)
+                throw new ClaimFormatException("the first manifest must not name a parent");
+            if (generation > 1 && parent is null)
+                throw new ClaimFormatException($"manifest generation {generation} names no parent");
             if (parent is not null) RequireHash(parent, "parent");
 
             var digest = ClaimCodec.RequireString(root, "claimsDigest");

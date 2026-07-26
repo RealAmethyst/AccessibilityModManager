@@ -213,6 +213,28 @@ public sealed class ClaimVerifier : IDisposable
     }
 
     /// <summary>
+    /// Everything currently asserted, with no audience filtering at all: the newest claim for each
+    /// object, minus the ones a revocation withdrew. This is the publisher's own view, and the view
+    /// the acceptance rules are applied to — a set has to be coherent as a whole before any subset
+    /// of it is shown to anyone.
+    /// </summary>
+    public static IReadOnlyList<SignedClaim> ResolveAll(IReadOnlyList<SignedClaim> claims)
+    {
+        var current = new Dictionary<string, SignedClaim>(StringComparer.Ordinal);
+
+        foreach (var claim in claims)
+        {
+            var key = claim.Payload.Identity.ToStorageKey();
+            if (!current.TryGetValue(key, out var existing) || claim.Payload.Seq > existing.Payload.Seq)
+                current[key] = claim;
+        }
+
+        return current.Values
+            .Where(c => c.Payload.Kind != ClaimKind.Revocation)
+            .ToList();
+    }
+
+    /// <summary>
     /// Resolves what a caller should actually see: for each object, the highest-sequence claim that
     /// caller's entitlements admit, dropping objects whose newest visible claim is a revocation.
     ///

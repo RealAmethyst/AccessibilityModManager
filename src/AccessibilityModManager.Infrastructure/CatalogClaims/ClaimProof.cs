@@ -117,6 +117,11 @@ public static class ClaimProof
 
         ClaimVerifier.ValidateSet(verified);
 
+        // A valid signature is necessary and nowhere near sufficient. Everything the author's own
+        // rules say about content is applied here, after the cryptography and before anyone acts on
+        // it — same implementation the manager runs, so the two cannot drift apart.
+        ClaimAcceptance.Accept(verified, anchor);
+
         SignedManifest? manifest = null;
         if (document.Manifest is not null)
         {
@@ -180,20 +185,33 @@ public static class ClaimProof
     /// scalar, an array or a malformed object are trust violations, because "there is no proof
     /// here" is the one answer that leads to starting a history over.
     /// </summary>
-    public static ClaimProofDocument? TryExtract(string indexJson)
+    public static ClaimProofDocument? TryExtract(ReadOnlyMemory<byte> indexBytes)
     {
-        if (indexJson.Length > MaxIndexBytes)
+        // Bytes, not a string. Decoding first with .NET's default replacement fallback would turn
+        // invalid UTF-8 in an unsigned outer field into U+FFFD and carry on — this implementation
+        // accepting what another one rejects, over the same file. Parsing the bytes directly gets
+        // strict UTF-8 validation from the parser itself. It also means the size cap counts the
+        // bytes it advertises rather than UTF-16 characters, which a multi-byte document can hide
+        // behind.
+        if (indexBytes.Length > MaxIndexBytes)
             throw new ClaimFormatException($"the index exceeds {MaxIndexBytes} bytes");
+        if (indexBytes.Length == 0)
+            throw new ClaimFormatException("the index is empty");
+
+        var span = indexBytes.Span;
+        if (span.Length >= 3 && span[0] == 0xEF && span[1] == 0xBB && span[2] == 0xBF)
+            throw new ClaimFormatException("the index has a UTF-8 BOM");
 
         JsonDocument document;
         try
         {
-            document = JsonDocument.Parse(indexJson,
+            document = JsonDocument.Parse(indexBytes,
                 new JsonDocumentOptions { AllowDuplicateProperties = false });
         }
         catch (JsonException ex)
         {
-            throw new ClaimFormatException("the index is not valid JSON, or repeats a member", ex);
+            throw new ClaimFormatException(
+                "the index is not valid UTF-8 JSON, or repeats a member", ex);
         }
 
         using (document)

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Serilog;
@@ -113,12 +114,19 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
     public PublisherRecord? TryLoad(string trustContext)
     {
         var path = PathFor(trustContext);
-        if (!File.Exists(path)) return null;
 
         PublisherRecord? record;
         try
         {
             record = JsonSerializer.Deserialize<PublisherRecord>(File.ReadAllText(path), Json);
+        }
+        // Only a definite "it is not there" counts as absence. File.Exists answers false for a
+        // permission failure or an unreadable volume too, and collapsing those into "this key has
+        // never published" hands back the most permissive state there is at exactly the moment
+        // something is already wrong.
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
         }
         catch (Exception ex)
         {
@@ -137,6 +145,103 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
         }
 
         return record;
+    }
+
+    /// <summary>
+    /// Refuses a registry older than one this machine has already acted on, and records it.
+    ///
+    /// The registry is signed, so a replayed old one is cryptographically perfect — and it is the
+    /// document that says which index URL and which key a plugin publishes under. Re-pointing a
+    /// plugin, or rotating its key, is how a compromised source gets disowned; replaying the
+    /// registry from before that change puts the tool back into the retired context, where its
+    /// still-retained head for that context matches and publishing proceeds as if nothing had
+    /// happened. The head rules cannot catch it, because each trust context keeps its own head and
+    /// both of them are genuinely this machine's.
+    ///
+    /// Kept outside any one trust context on purpose: it is what orders the contexts themselves.
+    /// </summary>
+    public void RequireRegistryNotOlder(string registryJson)
+    {
+        var version = ReadRegistryVersion(registryJson);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(registryJson)));
+        var path = Path.Combine(Directory, "registry-highwater.json");
+
+        var seen = TryLoadHighWater(path);
+        if (seen is not null)
+        {
+            if (version < seen.Version)
+            {
+                throw new InvalidOperationException(
+                    $"The registry on the server says version {version}, but this machine has already " +
+                    $"seen version {seen.Version}. An older registry can name an index address or a " +
+                    "signing key that has since been retired, so publishing against it is refused.");
+            }
+
+            if (version == seen.Version && !string.Equals(hash, seen.Sha256, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"The registry on the server is different from the one this machine saw at version " +
+                    $"{version}, and the version was not raised. Publishing against it is refused.");
+            }
+        }
+
+        if (seen is null || version > seen.Version)
+        {
+            System.IO.Directory.CreateDirectory(Directory);
+            WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(
+                JsonSerializer.Serialize(new RegistryHighWater { Version = version, Sha256 = hash }, Json)));
+        }
+    }
+
+    /// <summary>
+    /// The registry's version, as a number.
+    ///
+    /// It is a free-form string in the schema and every published one has been an integer, which
+    /// the publishing side already relies on when it refuses to publish content without raising it.
+    /// Anything that is not a number cannot be ordered, and something that cannot be ordered cannot
+    /// be a high-water mark — so it is refused rather than silently treated as "fine".
+    /// </summary>
+    private static long ReadRegistryVersion(string registryJson)
+    {
+        using var document = JsonDocument.Parse(registryJson);
+        if (!document.RootElement.TryGetProperty("registryVersion", out var element) ||
+            element.ValueKind != JsonValueKind.String ||
+            !long.TryParse(element.GetString(), out var version) ||
+            version < 1)
+        {
+            throw new InvalidOperationException(
+                "The registry has no whole-number registryVersion, so there is no way to tell whether " +
+                "it is the current one. Publishing against it is refused.");
+        }
+
+        return version;
+    }
+
+    private RegistryHighWater? TryLoadHighWater(string path)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<RegistryHighWater>(File.ReadAllText(path), Json);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"This machine's record of the registry version can't be read ({path}). Publishing is " +
+                "blocked until it is: without it, an older registry cannot be told from the current one.", ex);
+        }
+    }
+
+    private sealed record RegistryHighWater
+    {
+        [JsonPropertyName("version")]
+        public required long Version { get; init; }
+
+        [JsonPropertyName("sha256")]
+        public required string Sha256 { get; init; }
     }
 
     /// <summary>The exact bytes a pending publish prepared, if they are still on disk.</summary>
@@ -222,10 +327,28 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
         WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(record, Json)));
     }
 
+    /// <summary>
+    /// Writes so that a machine which loses power has either the old record or the new one, and not
+    /// a cache's promise of the new one.
+    ///
+    /// `File.WriteAllBytes` followed by a move survives a process dying, which is the common case,
+    /// but it does not survive the machine dying: the bytes can still be sitting in the filesystem
+    /// cache. That distinction matters more here than almost anywhere else in the tool, because a
+    /// pending record that evaporates is precisely what lets a rolled-back server walk the signer
+    /// into publishing a second, different version of a generation that already exists. So the data
+    /// is flushed to the device before the rename makes it the record.
+    /// </summary>
     private static void WriteAtomic(string path, byte[] bytes)
     {
         var temp = path + ".tmp";
-        File.WriteAllBytes(temp, bytes);
+
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None,
+                   bufferSize: 4096, FileOptions.WriteThrough))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+
         File.Move(temp, path, overwrite: true);
     }
 

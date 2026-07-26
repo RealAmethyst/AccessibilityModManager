@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.CatalogClaims;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
@@ -233,15 +234,16 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// <summary>
     /// Adopting the published index takes its catalog, never its authoring data.
     ///
-    /// <c>dependencyPresets</c> is author-only — the manager never reads it, and no signed claim
-    /// will ever cover it, so no amount of verification downstream protects it. It is also the one
-    /// piece of the file that feeds a dropdown the author picks from: a server that edited a preset
-    /// would put an attacker-chosen download URL and SHA-256 in front of the author, and one
-    /// plausible click later the offline signing key vouches for it and every manager installs it.
-    /// That is the signing-oracle attack the claim design exists to prevent, arriving through
-    /// authoring data instead of catalog data.
+    /// Presets, default lifecycle scripts and dependency version-discovery rules are author-only.
+    /// No signed claim will ever cover them, so nothing downstream protects them — and each one
+    /// feeds something the author later signs: a preset fills in a dependency's download URL and
+    /// hash, a default script fills in a release form, a discovery rule decides which upstream
+    /// build a dependency points at. A server that edited any of them would be choosing content for
+    /// the author to put their signing key behind, and one plausible click later every manager
+    /// installs it. That is the signing-oracle attack the claim design exists to prevent, arriving
+    /// through authoring data instead of catalog data.
     ///
-    /// So the presets in this folder stay the presets in this folder.
+    /// So what is in this folder stays in this folder.
     /// </summary>
     private byte[] KeepLocalAuthoringFields(byte[] live, byte[] local)
     {
@@ -251,9 +253,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             var mine = JsonNode.Parse(local)?.AsObject();
             if (adopted is null || mine is null) return live;
 
-            adopted.Remove("dependencyPresets");
-            if (mine["dependencyPresets"] is { } presets)
-                adopted["dependencyPresets"] = presets.DeepClone();
+            AuthoringOnlyFields.RestoreFromLocal(adopted, mine);
 
             return Encoding.UTF8.GetBytes(adopted.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }

@@ -50,17 +50,37 @@ public sealed class IndexProofServiceTests : IDisposable
         PublicKeyPem = _signing.PublicKeyPem
     };
 
+
+    /// <summary>
+    /// A signed registry as the caller would hand it over — already signature-verified, which is
+    /// the precondition, not something this class checks.
+    /// </summary>
+    private string Registry(string? publicKeyPem = null, int version = 1) => $$"""
+        {
+          "registryVersion": "{{version}}",
+          "plugins": [
+            { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}",
+              "indexTrust": {
+                "scheme": "signed-claims-v1",
+                "keyId": "{{_signing.KeyId}}",
+                "algorithm": "rsa-pss-sha256",
+                "publicKeyPem": {{JsonSerializer.Serialize(publicKeyPem ?? _signing.PublicKeyPem)}}
+              } }
+          ]
+        }
+        """;
+
     /// <summary>A whole publish: prepare, then confirm what came back is what went out.</summary>
     private byte[] Publish(byte[] index, byte[]? live)
     {
-        var prepared = _service.PreparePublish(index, Anchor(), live, allowBootstrap: live is null);
+        var prepared = _service.PreparePublish(index, Registry(), "amethyst", live, allowBootstrap: live is null);
         _service.ConfirmPublished(Anchor(), prepared.IndexJson);
         return prepared.IndexJson;
     }
 
     private IReadOnlyList<SignedClaim> ClaimsIn(byte[] indexJson) =>
         ClaimProof.ReadVerified(
-            ClaimProof.TryExtract(Encoding.UTF8.GetString(indexJson))!, Anchor(), requireManifest: true).Claims;
+            ClaimProof.TryExtract(indexJson)!, Anchor(), requireManifest: true).Claims;
 
     private static byte[] IndexBytes(string pluginId = "amethyst", params ModRelease[] releases) =>
         IndexBytes(pluginId, ["game1"], releases);
@@ -140,7 +160,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var index = IndexBytes(releases: Release("1.0.0"));
         var first = Publish(index, null);
 
-        var prepared = _service.PreparePublish(index, Anchor(), first, allowBootstrap: false);
+        var prepared = _service.PreparePublish(index, Registry(), "amethyst", first, allowBootstrap: false);
 
         Assert.Equal(3, prepared.Build.Unchanged);
         Assert.Equal(0, prepared.Build.Added + prepared.Build.Updated + prepared.Build.Revoked);
@@ -163,7 +183,7 @@ public sealed class IndexProofServiceTests : IDisposable
 
     private SignedManifest ManifestOf(byte[] indexJson) =>
         ClaimProof.ReadVerified(
-            ClaimProof.TryExtract(Encoding.UTF8.GetString(indexJson))!, Anchor(), requireManifest: true).Manifest!;
+            ClaimProof.TryExtract(indexJson)!, Anchor(), requireManifest: true).Manifest!;
 
     [Fact]
     public void Sequences_continue_from_what_is_published()
@@ -183,7 +203,7 @@ public sealed class IndexProofServiceTests : IDisposable
     public void An_index_for_a_different_plugin_is_refused()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(pluginId: "someoneelse"), Anchor(), null, allowBootstrap: true));
+            _service.PreparePublish(IndexBytes(pluginId: "someoneelse"), Registry(), "amethyst", null, allowBootstrap: true));
         Assert.Contains("no manager would accept", ex.Message);
     }
 
@@ -205,7 +225,7 @@ public sealed class IndexProofServiceTests : IDisposable
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
             _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")),
-                Anchor(), trimmed, allowBootstrap: false));
+                Registry(), "amethyst", trimmed, allowBootstrap: false));
         Assert.Contains("added, removed or replaced", ex.Message);
     }
 
@@ -221,7 +241,7 @@ public sealed class IndexProofServiceTests : IDisposable
         });
 
         Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), doubled, false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", doubled, false));
     }
 
     [Fact]
@@ -232,7 +252,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var stripped = Tamper(live, root => root["proof"]!.AsObject().Remove("manifest"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), stripped, false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", stripped, false));
         Assert.Contains("no way to tell whether any of it was removed", ex.Message);
     }
 
@@ -245,7 +265,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var stripped = Tamper(live, root => root.Remove("proof"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), stripped, false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", stripped, false));
         Assert.Contains("nothing at all", ex.Message);
     }
 
@@ -256,7 +276,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var wrongShape = Tamper(live, root => root["proof"] = JsonValue.Create("gone"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), wrongShape, false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", wrongShape, false));
         Assert.Contains("could not be read", ex.Message);
     }
 
@@ -272,7 +292,7 @@ public sealed class IndexProofServiceTests : IDisposable
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
             _service.PreparePublish(IndexBytes(releases: Release("1.0.0")),
-                Anchor(), Encoding.UTF8.GetBytes(doubled), false));
+                Registry(), "amethyst", Encoding.UTF8.GetBytes(doubled), false));
         Assert.Contains("could not be read", ex.Message);
     }
 
@@ -290,7 +310,7 @@ public sealed class IndexProofServiceTests : IDisposable
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
             _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")),
-                Anchor(), v1, allowBootstrap: false));
+                Registry(), "amethyst", v1, allowBootstrap: false));
         Assert.Contains("not the one this machine last published", ex.Message);
     }
 
@@ -308,7 +328,7 @@ public sealed class IndexProofServiceTests : IDisposable
             TestLogger.Create());
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            elsewhere.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), published, false));
+            elsewhere.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", published, false));
         Assert.Contains("no record of publishing it", ex.Message);
     }
 
@@ -316,7 +336,7 @@ public sealed class IndexProofServiceTests : IDisposable
     public void Starting_a_history_takes_a_deliberate_confirmation()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), null, allowBootstrap: false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", null, allowBootstrap: false));
         Assert.Contains("deliberate step", ex.Message);
     }
 
@@ -326,7 +346,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var legacy = IndexBytes(releases: Release("1.0.0"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), legacy, allowBootstrap: false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", legacy, allowBootstrap: false));
         Assert.Contains("deliberate step", ex.Message);
     }
 
@@ -335,12 +355,56 @@ public sealed class IndexProofServiceTests : IDisposable
     {
         var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
 
-        using var strangerKey = System.Security.Cryptography.RSA.Create(4096);
-        var strangerAnchor = Anchor() with { PublicKeyPem = strangerKey.ExportSubjectPublicKeyInfoPem() };
+        // A rotation: the registry moves on to a different key, at a higher version, so the
+        // freshness check passes and it is the proof itself that cannot be continued.
+        var strangerKey = ClaimTestKeys.Secondary;
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), strangerAnchor, live, false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")),
+                Registry(strangerKey.ExportSubjectPublicKeyInfoPem(), version: 2), "amethyst", live, false));
         Assert.Contains("doesn't verify", ex.Message);
+    }
+
+    // ---- the registry is a document that can be replayed too ----
+
+    [Fact]
+    public void A_registry_older_than_one_this_machine_has_acted_on_is_refused()
+    {
+        // Re-pointing a plugin's index address, or rotating its key, is how a compromised source
+        // gets disowned — and both live in the registry, which is signed and therefore replays
+        // perfectly. The head rules cannot catch it: each trust context keeps its own head, and the
+        // retired one's head is genuinely this machine's.
+        _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(version: 5), "amethyst",
+            null, allowBootstrap: true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(version: 4), "amethyst",
+                null, allowBootstrap: true));
+
+        Assert.Contains("already seen version 5", ex.Message);
+    }
+
+    [Fact]
+    public void A_registry_changed_without_raising_its_version_is_refused()
+    {
+        Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")),
+                Registry(ClaimTestKeys.Secondary.ExportSubjectPublicKeyInfoPem()), "amethyst", null, true));
+
+        Assert.Contains("was not raised", ex.Message);
+    }
+
+    [Fact]
+    public void A_registry_with_no_orderable_version_is_refused()
+    {
+        var unorderable = Registry().Replace("\"registryVersion\": \"1\"", "\"registryVersion\": \"spring\"");
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), unorderable, "amethyst", null, true));
+
+        Assert.Contains("no way to tell whether it is the current one", ex.Message);
     }
 
     // ---- the crash window ----
@@ -349,10 +413,10 @@ public sealed class IndexProofServiceTests : IDisposable
     public void An_unconfirmed_publish_blocks_the_next_one()
     {
         var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
-        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), live, false);
+        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Anchor(), live, false));
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", live, false));
         Assert.Contains("interrupted", ex.Message);
     }
 
@@ -361,7 +425,7 @@ public sealed class IndexProofServiceTests : IDisposable
     {
         var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
         var prepared = _service.PreparePublish(
-            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), live, false);
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
 
         // The rename happened; the process died before the local commit.
         Assert.Equal(IndexProofService.PendingOutcome.Landed,
@@ -369,7 +433,7 @@ public sealed class IndexProofServiceTests : IDisposable
 
         _service.CommitPending(Anchor());
         var next = _service.PreparePublish(
-            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), prepared.IndexJson, false);
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", prepared.IndexJson, false);
         Assert.Equal(3, next.Pending.Generation);
     }
 
@@ -378,20 +442,20 @@ public sealed class IndexProofServiceTests : IDisposable
     {
         var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
         var prepared = _service.PreparePublish(
-            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), live, false);
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
 
         Assert.Equal(IndexProofService.PendingOutcome.NotSent, _service.ResolvePending(Anchor(), live));
 
         // Kept verbatim rather than rebuilt: PSS is randomised, so rebuilding would produce
         // different bytes under the same generation — the fork, arriving through recovery.
-        Assert.Equal(prepared.IndexJson, _service.TryReadPendingIndex(Anchor()));
+        Assert.Equal(prepared.IndexJson, _service.ReadPendingIndex(Anchor()));
     }
 
     [Fact]
     public void An_interrupted_publish_that_finds_something_else_live_reports_divergence()
     {
         var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
-        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), live, false);
+        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
 
         // A different publish under the same key — neither the head this attempt was extending nor
         // the one it prepared. Something happened that this machine cannot account for, and the
@@ -402,16 +466,47 @@ public sealed class IndexProofServiceTests : IDisposable
                 new AuthorConfigService(TestLogger.Create(), Path.Combine(_root, "other")), TestLogger.Create()),
             TestLogger.Create());
         var theirs = elsewhere.PreparePublish(
-            IndexBytes(releases: Release("2.0.0")), Anchor(), null, allowBootstrap: true).IndexJson;
+            IndexBytes(releases: Release("2.0.0")), Registry(), "amethyst", null, allowBootstrap: true).IndexJson;
 
         Assert.Equal(IndexProofService.PendingOutcome.Diverged, _service.ResolvePending(Anchor(), theirs));
+    }
+
+    [Fact]
+    public void An_interrupted_publish_whose_plaintext_was_rewritten_is_not_landed()
+    {
+        // The manifest commits to the claims. The compatibility plaintext beside them — which is
+        // what every current manager actually reads — is not covered by it, so a server can keep
+        // the proof intact and rewrite the rest. Matching manifests are not the same as "this is
+        // the document I sent".
+        var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
+        var prepared = _service.PreparePublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
+
+        var rewritten = Tamper(prepared.IndexJson, root => root["repoVersion"] = "9");
+
+        Assert.Equal(IndexProofService.PendingOutcome.Diverged, _service.ResolvePending(Anchor(), rewritten));
+    }
+
+    [Fact]
+    public void Prepared_bytes_that_were_damaged_on_disk_are_refused_rather_than_re_sent()
+    {
+        var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
+        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
+
+        var pendingPath = Directory
+            .EnumerateFiles(Path.Combine(_root, "publisher"), "*.pending-index.json")
+            .Single();
+        File.WriteAllText(pendingPath, "{}");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.ReadPendingIndex(Anchor()));
+        Assert.Contains("not the one that was prepared", ex.Message);
     }
 
     [Fact]
     public void Confirming_a_publish_that_is_not_what_went_out_is_refused()
     {
         var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
-        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), live, false);
+        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
 
         var ex = Assert.Throws<InvalidOperationException>(() => _service.ConfirmPublished(Anchor(), live));
         Assert.Contains("not the one that was just published", ex.Message);
@@ -426,7 +521,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var v2 = Publish(IndexBytes(releases: Release("1.0.0")), v1);
 
         var ex = Assert.Throws<ClaimFormatException>(() =>
-            _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Anchor(), v2, false));
+            _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", v2, false));
         Assert.Contains("withdrawn", ex.Message);
     }
 
@@ -452,7 +547,7 @@ public sealed class IndexProofServiceTests : IDisposable
         var before = Publish(IndexBytes(releases: Release("1.0.0")), null);
         var after = Publish(
             IndexBytes("amethyst", Release("1.0.0"),
-                Release("1.1.0", new PatreonGate { CampaignId = "c1", TierIds = ["t3"] })),
+                Release("1.1.0", new PatreonGate { CampaignId = "c1", TierIds = ["t3"], ServerUrl = "https://example.com/g.zip" })),
             before);
 
         var publicBefore = ClaimVerifier.ResolveVisible(ClaimsIn(before), null, null);
@@ -510,9 +605,9 @@ public sealed class IndexProofServiceTests : IDisposable
 
         // And it is usable: claims signed under it verify.
         var prepared = _service.PreparePublish(
-            IndexBytes(releases: Release("1.0.0")), anchor, null, allowBootstrap: true);
+            IndexBytes(releases: Release("1.0.0")), registry, "amethyst", null, allowBootstrap: true);
         ClaimProof.ReadVerified(
-            ClaimProof.TryExtract(Encoding.UTF8.GetString(prepared.IndexJson))!, anchor, requireManifest: true);
+            ClaimProof.TryExtract(prepared.IndexJson)!, anchor, requireManifest: true);
     }
 
     [Fact]

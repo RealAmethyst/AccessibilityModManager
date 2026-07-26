@@ -71,10 +71,13 @@ public sealed class ClaimSetBuilderTests : IDisposable
         return index;
     }
 
+    // A gate needs a way to actually get the file — an author server or a numeric post — or the
+    // manager refuses the release as unobtainable, and so now does claim acceptance.
     private static PatreonGate Gate(params string[] tiers) => new()
     {
         CampaignId = "c1",
-        TierIds = [.. tiers]
+        TierIds = [.. tiers],
+        ServerUrl = "https://example.com/gated/pkg.zip"
     };
 
     private SignedClaim Find(IReadOnlyList<SignedClaim> claims, ClaimKind kind, string? version = null) =>
@@ -293,6 +296,36 @@ public sealed class ClaimSetBuilderTests : IDisposable
         var ex = Assert.Throws<ClaimFormatException>(() =>
             ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), deleted.Claims, _signer));
         Assert.Contains("withdrawn", ex.Message);
+    }
+
+    [Fact]
+    public void Deleting_a_narrowed_release_keeps_the_revocation_for_every_audience_it_ever_had()
+    {
+        // Public, then tier-3-only, then gone. The narrowing publish emitted a revocation aimed at
+        // the public audience; the deletion publish must not drop it. If it does, a public manager
+        // that was offline for that one publish never sees a revocation it is allowed to read, and
+        // goes on trusting a release it lost access to two publishes ago. No attacker: ordinary
+        // honest publishing does it.
+        var published = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var narrowed = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), published.Claims, _signer);
+        var deleted = ClaimSetBuilder.Build(NewIndex(), narrowed.Claims, _signer);
+
+        var forThePublic = deleted.Claims
+            .Where(c => c.Payload.Kind == ClaimKind.Revocation && c.Payload.Audience.Public)
+            .ToList();
+        Assert.Single(forThePublic);
+
+        // And an anonymous reader resolves the release as gone rather than as still there.
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(deleted.Claims, null, null),
+            c => c.Payload.Identity.Version == "1.0.0");
+
+        // Still true after another unrelated publish — revocations do not expire.
+        var later = ClaimSetBuilder.Build(NewIndex(NewRelease("2.0.0")), deleted.Claims, _signer);
+        Assert.Contains(later.Claims, c =>
+            c.Payload.Kind == ClaimKind.Revocation &&
+            c.Payload.Audience.Public &&
+            c.Payload.Identity.Version == "1.0.0");
     }
 
     [Fact]

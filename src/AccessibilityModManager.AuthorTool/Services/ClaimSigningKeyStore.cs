@@ -105,6 +105,27 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
                 $"The signing key file is missing ({signing.PrivateKeyPath}). Import your backup to restore it.");
         }
 
+        // The key on this disk must be the key the registry vouches for — all three of the things
+        // that identify it, not just whichever one happens to be checked later. Without this, a key
+        // kept for one plugin could sign for another the registry names, and a key the registry has
+        // moved on from could go on signing under a retired identity.
+        if (!string.Equals(signing.PluginId, anchor.PluginId, StringComparison.Ordinal) ||
+            !string.Equals(signing.KeyId, anchor.KeyId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"The signing key stored here is '{signing.KeyId}' for plugin '{signing.PluginId}', but the " +
+                $"registry names '{anchor.KeyId}' for '{anchor.PluginId}'. Claims signed with it would " +
+                "verify for nobody.");
+        }
+
+        if (!string.Equals(signing.PublicKeyFingerprint,
+                ClaimTrustContext.PublicKeyFingerprint(anchor.PublicKeyPem), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The signing key stored here is not the one the registry currently publishes. Either the " +
+                "registry was re-signed with a different key, or this machine's key is out of date.");
+        }
+
         var pem = File.ReadAllText(signing.PrivateKeyPath);
         return new ClaimSigner(pem, signing.Passphrase, anchor);
     }
@@ -162,6 +183,11 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
             throw new InvalidOperationException(
                 "That key couldn't be opened — the passphrase is wrong, or the file isn't an encrypted key.", ex);
         }
+
+        // Before anything is written. The size rule held at creation, signing and verification but
+        // not here, so an import could report success, replace a working key with an unsupported
+        // one, and only fail at the next publish — with the original already overwritten.
+        ClaimKeyPolicy.Require(rsa);
 
         var publicPem = rsa.ExportSubjectPublicKeyInfoPem();
         var fingerprint = ClaimTrustContext.PublicKeyFingerprint(publicPem);

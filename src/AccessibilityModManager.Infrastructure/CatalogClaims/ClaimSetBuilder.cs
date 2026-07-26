@@ -164,14 +164,17 @@ public static class ClaimSetBuilder
         {
             if (seenIdentities.Contains(key)) continue;
 
+            // Every revocation this identity has ever accumulated rides along, exactly as it does
+            // for an identity that is still present. Keeping only the newest one loses the earlier
+            // audiences: publish a release publicly, narrow it to tier 3, then delete it, and the
+            // public revocation from the narrowing disappears — so a public manager that was offline
+            // for that one publish never sees a revocation it can read, and keeps trusting a release
+            // it lost access to two publishes ago. No attacker involved; ordinary publishing does it.
+            foreach (var carried in history.Where(c => c.Payload.Kind == ClaimKind.Revocation))
+                result.Add(carried);
+
             var last = history.OrderByDescending(c => c.Payload.Seq).First();
-            if (last.Payload.Kind == ClaimKind.Revocation)
-            {
-                // Already withdrawn; carry the revocation forward so a manager that has not seen it
-                // yet still learns the object is gone.
-                result.Add(last);
-                continue;
-            }
+            if (last.Payload.Kind == ClaimKind.Revocation) continue;
 
             // Revoke at the audience that could see it, so nobody else learns it ever existed.
             result.Add(signer.Sign(ClaimKind.Revocation, last.Payload.Identity, NextSequence(history),
@@ -245,19 +248,6 @@ public static class ClaimSetBuilder
     private static string Canonicalise<T>(T value) => JsonSerializer.Serialize(value, BodyOptions);
 
     /// <summary>
-    /// Author-only members of a game, which never reach a published claim.
-    ///
-    /// The three <c>default*</c> scripts are templates the AuthorTool pre-fills a release form
-    /// from; the manager only ever reads a release's own manifest. A dependency's
-    /// <c>versionDiscovery</c> is documented as having no runtime effect at all. Signing them would
-    /// publish authoring state to every user and re-sign the game claim whenever the author
-    /// adjusted a template — churn that, on a public claim, is exactly the signal this design keeps
-    /// out of the anonymous view.
-    /// </summary>
-    private static readonly string[] AuthorOnlyGameMembers =
-        ["defaultPreInstall", "defaultPostInstall", "defaultPostUninstall"];
-
-    /// <summary>
     /// The published projection of a game: everything the model carries, minus the author-only
     /// members. Built by stripping rather than by copying into a hand-written subset, so a field
     /// added to <see cref="GameDefinition"/> tomorrow is published rather than silently dropped
@@ -268,14 +258,7 @@ public static class ClaimSetBuilder
         var node = JsonSerializer.SerializeToNode(game, BodyOptions)?.AsObject()
             ?? throw new InvalidOperationException($"Game '{game.GameId}' could not be serialized.");
 
-        foreach (var member in AuthorOnlyGameMembers) node.Remove(member);
-
-        if (node["dependencies"] is JsonArray dependencies)
-        {
-            foreach (var dependency in dependencies.OfType<JsonObject>())
-                dependency.Remove("versionDiscovery");
-        }
-
+        AuthoringOnlyFields.StripFromGame(node);
         return node.ToJsonString(BodyOptions);
     }
 }
