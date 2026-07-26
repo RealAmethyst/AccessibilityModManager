@@ -1,0 +1,280 @@
+using System.Security.Cryptography;
+using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.CatalogClaims;
+using Xunit;
+
+namespace AccessibilityModManager.Tests.CatalogClaims;
+
+/// <summary>
+/// Turning an index into claims: what gets re-signed, what keeps its existing claim, and what gets
+/// withdrawn.
+///
+/// The most important test here is the one asserting that adding a patron-only release leaves every
+/// public claim byte-identical. If public claims churned on a hidden publish, the timing of those
+/// changes would disclose the hidden activity — defeating the point of hiding it.
+/// </summary>
+public sealed class ClaimSetBuilderTests : IDisposable
+{
+    private readonly RSA _key = RSA.Create(3072);
+    private readonly ClaimTrustAnchor _anchor;
+    private readonly ClaimSigner _signer;
+    private const string Passphrase = "pp";
+
+    public ClaimSetBuilderTests()
+    {
+        _anchor = new ClaimTrustAnchor
+        {
+            PluginId = "amethyst",
+            RepoIndexUrl = "https://accessibilitymods.com/registry/plugins/amethyst/index.json",
+            Scheme = ClaimTrustAnchor.SchemeV1,
+            KeyId = "k1",
+            Algorithm = ClaimTrustAnchor.AlgorithmRsaPssSha256,
+            PublicKeyPem = _key.ExportSubjectPublicKeyInfoPem()
+        };
+
+        var pem = _key.ExportEncryptedPkcs8PrivateKeyPem(Passphrase,
+            new PbeParameters(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 100_000));
+        _signer = new ClaimSigner(pem, Passphrase, _anchor);
+    }
+
+    public void Dispose()
+    {
+        _signer.Dispose();
+        _key.Dispose();
+    }
+
+    private static ModRelease NewRelease(string version, string channel = "stable", PatreonGate? gate = null) => new()
+    {
+        GameId = "game1",
+        PluginId = "amethyst",
+        Version = version,
+        Channel = channel,
+        Sha256 = new string('a', 64),
+        PackageUrl = gate is null ? new Uri("https://example.com/pkg.zip") : null,
+        Patreon = gate
+    };
+
+    private static PluginRepoIndex NewIndex(params ModRelease[] releases)
+    {
+        var index = new PluginRepoIndex
+        {
+            PluginId = "amethyst",
+            RepoVersion = "1",
+            GeneratedAt = new DateTime(2026, 7, 26, 0, 0, 0, DateTimeKind.Utc),
+            Games =
+            [
+                new GameDefinition { GameId = "game1", DisplayName = "Game One", ModName = "Mod One" }
+            ],
+            ReleasesByGameId = new Dictionary<string, List<ModRelease>>(StringComparer.OrdinalIgnoreCase)
+        };
+
+        if (releases.Length > 0) index.ReleasesByGameId["game1"] = [.. releases];
+        return index;
+    }
+
+    private static PatreonGate Gate(params string[] tiers) => new()
+    {
+        CampaignId = "c1",
+        TierIds = [.. tiers]
+    };
+
+    private SignedClaim Find(IReadOnlyList<SignedClaim> claims, ClaimKind kind, string? version = null) =>
+        claims.Single(c => c.Payload.Identity.Kind == kind &&
+                           (version is null || c.Payload.Identity.Version == version));
+
+    [Fact]
+    public void A_first_build_signs_a_header_a_game_and_each_release()
+    {
+        var result = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+
+        Assert.Equal(3, result.Claims.Count);
+        Assert.Equal(3, result.Added);
+        Assert.Equal(0, result.Unchanged);
+        ClaimVerifier.ValidateSet(result.Claims);
+    }
+
+    [Fact]
+    public void Rebuilding_an_unchanged_index_reuses_every_claim_byte_for_byte()
+    {
+        var index = NewIndex(NewRelease("1.0.0"));
+        var first = ClaimSetBuilder.Build(index, [], _signer);
+
+        var second = ClaimSetBuilder.Build(index, first.Claims, _signer);
+
+        Assert.Equal(first.Claims.Count, second.Unchanged);
+        Assert.Equal(0, second.Added + second.Updated + second.Revoked);
+        foreach (var (a, b) in first.Claims.Zip(second.Claims))
+        {
+            Assert.Equal(a.PayloadBytes, b.PayloadBytes);
+            Assert.Equal(a.Signature, b.Signature);
+        }
+    }
+
+    [Fact]
+    public void Adding_a_patron_only_release_leaves_every_public_claim_untouched()
+    {
+        // The leak this prevents: if public claims were re-signed whenever a hidden release was
+        // added, an outside observer could infer patron-only activity from the churn alone.
+        var before = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+
+        var after = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0", gate: Gate("t3"))),
+            before.Claims, _signer);
+
+        var publicBefore = ClaimVerifier.ResolveVisible(before.Claims, null, null);
+        var publicAfter = ClaimVerifier.ResolveVisible(after.Claims, null, null);
+
+        Assert.Equal(publicBefore.Count, publicAfter.Count);
+        foreach (var claim in publicBefore)
+        {
+            var match = publicAfter.Single(c =>
+                c.Payload.Identity.ToStorageKey() == claim.Payload.Identity.ToStorageKey());
+            Assert.Equal(claim.PayloadBytes, match.PayloadBytes);
+            Assert.Equal(claim.Signature, match.Signature);
+        }
+    }
+
+    [Fact]
+    public void A_changed_release_gets_a_new_claim_at_a_higher_sequence()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var originalSeq = Find(first.Claims, ClaimKind.Release).Payload.Seq;
+
+        var changed = new ModRelease
+        {
+            GameId = "game1",
+            PluginId = "amethyst",
+            Version = "1.0.0",
+            Channel = "stable",
+            Sha256 = new string('a', 64),
+            PackageUrl = new Uri("https://example.com/pkg.zip"),
+            Notes = "now with notes"
+        };
+        var second = ClaimSetBuilder.Build(NewIndex(changed), first.Claims, _signer);
+
+        Assert.Equal(1, second.Updated);
+        Assert.True(Find(second.Claims, ClaimKind.Release).Payload.Seq > originalSeq);
+        ClaimVerifier.ValidateSet(second.Claims);
+    }
+
+    [Fact]
+    public void A_deleted_release_is_replaced_by_a_revocation_carrying_its_old_audience()
+    {
+        var first = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0", gate: Gate("t3"))), [], _signer);
+
+        var second = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), first.Claims, _signer);
+
+        Assert.Equal(1, second.Revoked);
+        var revocation = second.Claims.Single(c => c.Payload.Kind == ClaimKind.Revocation);
+        Assert.Equal("1.1.0", revocation.Payload.Identity.Version);
+
+        // Aimed only at the tier that could see it: nobody else learns it ever existed.
+        Assert.False(revocation.Payload.Audience.Public);
+        Assert.Contains("t3", revocation.Payload.Audience.TierIds);
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(second.Claims, null, null),
+            c => c.Payload.Identity.Version == "1.1.0");
+        ClaimVerifier.ValidateSet(second.Claims);
+    }
+
+    [Fact]
+    public void Narrowing_a_release_revokes_to_the_old_audience_and_republishes_to_the_new_one()
+    {
+        var first = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t3"))), [], _signer);
+
+        var second = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), first.Claims, _signer);
+
+        Assert.Equal(1, second.Revoked);
+        ClaimVerifier.ValidateSet(second.Claims);
+
+        // The demoted tier is told, and stops seeing the release.
+        Assert.DoesNotContain(ClaimVerifier.ResolveVisible(second.Claims, "c1", ["t1"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+
+        // The remaining tier still has it.
+        Assert.Contains(ClaimVerifier.ResolveVisible(second.Claims, "c1", ["t3"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
+    public void Widening_a_release_needs_no_revocation()
+    {
+        // Nobody loses access, so there is nothing to tell anyone: the newer claim simply reaches
+        // more people.
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), [], _signer);
+
+        var second = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t3"))), first.Claims, _signer);
+
+        Assert.Equal(0, second.Revoked);
+        Assert.Contains(ClaimVerifier.ResolveVisible(second.Claims, "c1", ["t1"]),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
+    public void Making_a_gated_release_public_needs_no_revocation()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t3"))), [], _signer);
+
+        var second = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), first.Claims, _signer);
+
+        Assert.Equal(0, second.Revoked);
+        Assert.Contains(ClaimVerifier.ResolveVisible(second.Claims, null, null),
+            c => c.Payload.Identity.Kind == ClaimKind.Release);
+    }
+
+    [Fact]
+    public void A_stable_and_a_beta_release_at_one_version_stay_separate_objects()
+    {
+        var result = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0"), NewRelease("1.0.0", channel: "beta")), [], _signer);
+
+        ClaimVerifier.ValidateSet(result.Claims);
+        Assert.Equal(2, result.Claims.Count(c => c.Payload.Identity.Kind == ClaimKind.Release));
+    }
+
+    [Fact]
+    public void A_sequence_is_never_reused_after_a_deletion_and_a_republish()
+    {
+        // Reusing a sequence would be equivocation, and a manager that saw the old claim would
+        // reject the new one.
+        var v1 = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var deleted = ClaimSetBuilder.Build(NewIndex(), v1.Claims, _signer);
+        var restored = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), deleted.Claims, _signer);
+
+        ClaimVerifier.ValidateSet(restored.Claims);
+
+        var seqs = restored.Claims
+            .Where(c => c.Payload.Identity.Kind == ClaimKind.Release)
+            .Select(c => c.Payload.Seq)
+            .ToList();
+        Assert.Equal(seqs.Count, seqs.Distinct().Count());
+        Assert.True(seqs.Max() > v1.Claims.Single(c => c.Payload.Identity.Kind == ClaimKind.Release).Payload.Seq);
+    }
+
+    [Fact]
+    public void A_proof_block_round_trips_and_verifies()
+    {
+        var built = ClaimSetBuilder.Build(
+            NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0", gate: Gate("t3"))), [], _signer);
+
+        var document = ClaimProof.Write(_anchor.KeyId, built.Claims);
+        var verified = ClaimProof.ReadVerified(document, _anchor);
+
+        Assert.Equal(built.Claims.Count, verified.Count);
+    }
+
+    [Fact]
+    public void A_proof_block_with_one_corrupted_claim_is_refused_entirely()
+    {
+        // All-or-nothing: "use the ones that verified" would let an attacker choose which parts of
+        // a catalog a reader sees just by corrupting the rest.
+        var built = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var document = ClaimProof.Write(_anchor.KeyId, built.Claims);
+        document.Claims[^1].SignatureBase64 = Convert.ToBase64String(new byte[384]);
+
+        Assert.Throws<ClaimFormatException>(() => ClaimProof.ReadVerified(document, _anchor));
+    }
+}
