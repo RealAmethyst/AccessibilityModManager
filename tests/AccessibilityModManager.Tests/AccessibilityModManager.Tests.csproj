@@ -18,6 +18,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
     <ProjectReference Include="..\..\src\AccessibilityModManager.Infrastructure\AccessibilityModManager.Infrastructure.csproj" />
+    <!-- The AuthorTool holds the signing-key store: security-critical, and previously untestable
+         because nothing referenced it. -->
+    <ProjectReference Include="..\..\src\AccessibilityModManager.AuthorTool\AccessibilityModManager.AuthorTool.csproj" />
   </ItemGroup>
 
   <ItemGroup>

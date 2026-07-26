@@ -8,11 +8,18 @@ namespace AccessibilityModManager.AuthorTool.Services;
 
 public sealed class AuthorConfigService
 {
-    private static readonly string ConfigDirectory = Path.Combine(
+    private static readonly string DefaultConfigDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "AccessibilityModManager-Author");
 
-    private static readonly string ConfigFile = Path.Combine(ConfigDirectory, "config.json");
+    /// <summary>
+    /// Where this instance keeps its config. Overridable so tests can exercise the real save and
+    /// load paths — including the passphrase protection — without touching the author's actual
+    /// config, which holds live credentials and a signing identity.
+    /// </summary>
+    private readonly string ConfigDirectory;
+
+    private string ConfigFile => Path.Combine(ConfigDirectory, "config.json");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -23,12 +30,16 @@ public sealed class AuthorConfigService
     private readonly ILogger _logger;
     private AuthorConfig? _cached;
 
-    public AuthorConfigService(ILogger logger)
+    public AuthorConfigService(ILogger logger, string? configDirectoryOverride = null)
     {
         _logger = logger;
+        ConfigDirectory = configDirectoryOverride ?? DefaultConfigDirectory;
     }
 
-    public static string GetReposDirectory() => Path.Combine(ConfigDirectory, "repos");
+    public static string GetReposDirectory() => Path.Combine(DefaultConfigDirectory, "repos");
+
+    /// <summary>Directory this instance stores its files in — key files live alongside the config.</summary>
+    public string StorageDirectory => ConfigDirectory;
 
     public AuthorConfig Load()
     {
@@ -55,6 +66,16 @@ public sealed class AuthorConfigService
                     : UnprotectLegacy(su.KeyPassphrase);
                 su.KeyPassphraseProtected = false; // in memory the value is always cleartext
             }
+
+            // The claim-signing passphrase has never existed unprotected, so there is no legacy
+            // shape to tolerate here: a value without the flag was never written by this code and
+            // is not treated as a passphrase.
+            if (_cached.ClaimSigning is { Passphrase.Length: > 0, PassphraseProtected: true } cs)
+            {
+                cs.Passphrase = UnprotectClaimSecret(cs.Passphrase);
+                cs.PassphraseProtected = false;
+            }
+
             return _cached;
         }
         catch (Exception ex)
@@ -85,10 +106,29 @@ public sealed class AuthorConfigService
         {
             config.ServerUpload.KeyPassphraseProtected = false;
         }
+
+        // Same treatment for the claim-signing passphrase, under its own entropy so the two blobs
+        // are not interchangeable: a copy of one must never decrypt in the other's slot.
+        var plainClaimPassphrase = config.ClaimSigning?.Passphrase;
+        var hasClaimPassphrase = config.ClaimSigning != null && !string.IsNullOrEmpty(plainClaimPassphrase);
+        if (hasClaimPassphrase)
+        {
+            config.ClaimSigning!.Passphrase = ProtectClaimSecret(plainClaimPassphrase!);
+            config.ClaimSigning.PassphraseProtected = true;
+        }
+        else if (config.ClaimSigning != null)
+        {
+            config.ClaimSigning.PassphraseProtected = false;
+        }
+
         try
         {
             var json = JsonSerializer.Serialize(config, JsonOptions);
-            File.WriteAllText(ConfigFile, json);
+            // Atomic: a crash mid-write must not leave a truncated config that loses the recorded
+            // key identity — recovering that costs a registry re-sign.
+            var temp = ConfigFile + ".tmp";
+            File.WriteAllText(temp, json);
+            File.Move(temp, ConfigFile, overwrite: true);
         }
         finally
         {
@@ -96,6 +136,11 @@ public sealed class AuthorConfigService
             {
                 config.ServerUpload!.KeyPassphrase = plainPassphrase!;
                 config.ServerUpload.KeyPassphraseProtected = false;
+            }
+            if (hasClaimPassphrase)
+            {
+                config.ClaimSigning!.Passphrase = plainClaimPassphrase!;
+                config.ClaimSigning.PassphraseProtected = false;
             }
         }
         _cached = config;
@@ -106,6 +151,42 @@ public sealed class AuthorConfigService
     // specific use; DPAPI's per-user key is the secret.
     private const string LegacyDpapiPrefix = "dpapi:";
     private static readonly byte[] PassphraseEntropy = "AMM:Author:ServerUpload:v1"u8.ToArray();
+
+    /// <summary>
+    /// Distinct entropy for the claim-signing passphrase. Without it, a DPAPI blob from the SSH
+    /// slot would decrypt in the signing slot and vice versa — the same Windows user key protects
+    /// both, so only the entropy keeps them apart.
+    /// </summary>
+    private static readonly byte[] ClaimSigningEntropy = "AMM:Author:ClaimSigning:v1"u8.ToArray();
+
+    private static string ProtectClaimSecret(string plain)
+    {
+        var bytes = ProtectedData.Protect(
+            Encoding.UTF8.GetBytes(plain), ClaimSigningEntropy, DataProtectionScope.CurrentUser);
+        return Convert.ToBase64String(bytes);
+    }
+
+    /// <summary>
+    /// Returns empty when the blob cannot be decrypted — which means the config came from another
+    /// Windows account or another machine. Signing then fails loudly and the author imports their
+    /// key backup, rather than the tool silently signing with something unexpected.
+    /// </summary>
+    private string UnprotectClaimSecret(string stored)
+    {
+        try
+        {
+            var bytes = ProtectedData.Unprotect(
+                Convert.FromBase64String(stored), ClaimSigningEntropy, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex,
+                "Couldn't decrypt the saved claim-signing passphrase (config from another user or machine?) — " +
+                "the signing key will need to be imported again on this machine");
+            return "";
+        }
+    }
 
     private static string ProtectSecret(string plain)
     {

@@ -24,6 +24,55 @@ public sealed class AuthorConfig
     /// author hasn't set up a server yet — the AuthorTool falls back to no auto-upload.
     /// </summary>
     public ServerUploadConfig? ServerUpload { get; set; }
+
+    /// <summary>
+    /// The key this author signs catalog claims with. Deliberately a separate section from
+    /// <see cref="ServerUpload"/>: that one holds an SSH credential for moving files, this one holds
+    /// a signing identity that vouches for content. Conflating a transport credential with a signing
+    /// key would throw away the separation that makes having two keys worthwhile.
+    /// </summary>
+    public ClaimSigningConfig? ClaimSigning { get; set; }
+}
+
+/// <summary>
+/// Where this author's catalog-claim signing key lives, and how to unlock it without asking.
+///
+/// The registry key it sits beside is picked from a file dialog and unlocked by typing a passphrase
+/// every time — fine for something signed a few times a year. Claims are signed on every publish,
+/// so that would put a passphrase prompt in the middle of a routine release, which the design
+/// explicitly rules out. Hence stored path plus stored passphrase.
+/// </summary>
+public sealed class ClaimSigningConfig
+{
+    /// <summary>The plugin these claims are published under. Bound into every signature.</summary>
+    public string PluginId { get; set; } = "";
+
+    /// <summary>Identifies the key in the signed registry, so rotation is expressible.</summary>
+    public string KeyId { get; set; } = "";
+
+    /// <summary>Encrypted PKCS#8 private key on this machine. Never leaves it except as an export.</summary>
+    public string PrivateKeyPath { get; set; } = "";
+
+    /// <summary>
+    /// Passphrase for the key file. DPAPI-protected at rest; always cleartext in memory, exactly
+    /// like the SSH passphrase beside it.
+    /// </summary>
+    public string Passphrase { get; set; } = "";
+
+    /// <summary>
+    /// True when <see cref="Passphrase"/> holds a DPAPI blob. An explicit flag, never inferred from
+    /// the value's shape — a passphrase that happens to look like ciphertext must survive.
+    /// </summary>
+    public bool PassphraseProtected { get; set; }
+
+    /// <summary>
+    /// Public half, as published in the registry. Kept here so the tool can prove the private key
+    /// still matches what the registry vouches for before signing anything with it.
+    /// </summary>
+    public string PublicKeyPem { get; set; } = "";
+
+    /// <summary>SHA-256 of the key's DER SubjectPublicKeyInfo, for display and comparison.</summary>
+    public string PublicKeyFingerprint { get; set; } = "";
 }
 
 /// <summary>
