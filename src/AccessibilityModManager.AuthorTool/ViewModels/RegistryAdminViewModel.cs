@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
@@ -476,7 +477,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             sigFileBytes = File.ReadAllBytes(sigPath);
             var sigBase64 = Encoding.UTF8.GetString(sigFileBytes).Trim();
             using var rsa = RSA.Create();
-            rsa.ImportFromPem(RegistryPublicKeyPem);
+            rsa.ImportFromPem(RegistryTrustKey.PublicKeyPem);
             if (!rsa.VerifyData(registryBytes, Convert.FromBase64String(sigBase64),
                     HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
             {
@@ -731,7 +732,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         try
         {
             using var rsa = RSA.Create();
-            rsa.ImportFromPem(RegistryPublicKeyPem);
+            rsa.ImportFromPem(RegistryTrustKey.PublicKeyPem);
             var sigBytes = Convert.FromBase64String(Encoding.UTF8.GetString(sig).Trim());
             if (!rsa.VerifyData(json, sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
                 return "the live signature does not verify over the live bytes";
@@ -750,22 +751,6 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
     /// on-disk .sig matches the on-disk JSON. Public keys are safe to embed; only the private
     /// key is sensitive, and it never leaves the maintainer's chosen key file.
     /// </summary>
-    private const string RegistryPublicKeyPem = """
-        -----BEGIN PUBLIC KEY-----
-        MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvPTABidJcBN5V4kWommo
-        arlzq5pKHXNXrkFX8HUHjwK+SBiqUzWuZyZOEw5vAv+X6oa3T3g8iF+h+Hu+NHQ+
-        dw/cLy+Vmmlaz3YgBJRKMrEQspySI8cM3+4ZU54YzUCpPNSwi37P5JmC1lJEeRMJ
-        KxXz3Cwots1Zr2jZOn0l39+/9Vu8lQ84mVFd4wWIAfpBvc8FNVfw2p+qsOX3xZCa
-        vhV2Q7YGXgf+N09OfCSB74pU/qBYXDZ+FP2w+2ywCMWOOKmX0t9C4EusZ28QTabj
-        XkzrPyB5lhpMigl9HhvYjmtCjqPR7uzohIpRNLir02po3FRMAuW4sSxp0rkxu6pX
-        huQsHbfgR12aX1/Cv6fR9ez3EH8/ODXrJDANoL8NDuJ0hkfsXPSEn8tv7d7ZV/S5
-        4HpK6I/uwGMhY+YrkOCtj/FKDM+JaxD1PRqLZU/4uGiOG+Z2z4Cv7oA/ZnCW4EBn
-        DI+9Ibfu1Ox+PtrLTr5hxUqiqsJfIYYLaWPJSAgzK4TkzumHp64/2kVmS0bb3xJ+
-        +tytJv054d2PwLgaLLioD0CnRPQhXK1JPKmqUVP3aCIWJIa/1vchqgIXcXUyaQzG
-        ghi2SW1UOrX1iNzJiO6CCkO0ad4V7FnvbMS2uxFpwYQ97/Mwh/iF0BhblcFM5niO
-        OrUeiLZWMTgg4PWc06FFTyECAwEAAQ==
-        -----END PUBLIC KEY-----
-        """;
 
     private static readonly string LastPublishedMarkerPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
