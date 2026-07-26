@@ -29,10 +29,10 @@ public sealed class IndexProofServiceTests : IDisposable
         _root = Path.Combine(Path.GetTempPath(), "proofsvc-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(_root);
         var config = new AuthorConfigService(TestLogger.Create(), _root);
-        _keyStore = new ClaimSigningKeyStore(config, TestLogger.Create());
+        var heads = new PublisherHeadStore(config, TestLogger.Create());
+        _keyStore = new ClaimSigningKeyStore(config, heads, TestLogger.Create());
         _signing = _keyStore.Create("amethyst", "pp");
-        _service = new IndexProofService(
-            _keyStore, new PublisherHeadStore(config, TestLogger.Create()), TestLogger.Create());
+        _service = new IndexProofService(_keyStore, heads, TestLogger.Create());
     }
 
     public void Dispose()
@@ -330,6 +330,59 @@ public sealed class IndexProofServiceTests : IDisposable
         var ex = Assert.Throws<InvalidOperationException>(() =>
             elsewhere.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", published, false));
         Assert.Contains("no record of publishing it", ex.Message);
+    }
+
+    [Fact]
+    public void A_key_backup_carries_the_publishing_state_so_another_machine_can_continue()
+    {
+        // The single-writer rule makes a bare key useless anywhere else: a machine with no history
+        // refuses to publish, deliberately, because "I am new here" and "the server is replaying an
+        // old catalog at me" look identical from the inside. So the history travels with the key,
+        // in the one file the author is told to keep safe.
+        var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "backup.json");
+        _keyStore.Export("amethyst", backupPath, "backup passphrase");
+
+        // A completely separate profile, as a new computer would be.
+        var otherRoot = Path.Combine(_root, "new-machine");
+        var otherConfig = new AuthorConfigService(TestLogger.Create(), otherRoot);
+        var otherHeads = new PublisherHeadStore(otherConfig, TestLogger.Create());
+        var otherKeys = new ClaimSigningKeyStore(otherConfig, otherHeads, TestLogger.Create());
+        var otherService = new IndexProofService(otherKeys, otherHeads, TestLogger.Create());
+
+        // Without the backup it refuses, which is the whole point.
+        var refused = Assert.Throws<InvalidOperationException>(() =>
+            otherService.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", live, false));
+        Assert.Contains("no record of publishing it", refused.Message);
+
+        otherKeys.Import(backupPath, "backup passphrase");
+
+        // And now it continues the history rather than starting a new one.
+        var next = otherService.PreparePublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", live, false);
+
+        Assert.Equal(2, next.Pending.Generation);
+    }
+
+    [Fact]
+    public void Restoring_an_older_backup_never_moves_the_history_backwards()
+    {
+        // A backup is a photograph of an earlier moment. A machine that has published since knows
+        // more than the backup does, and restoring must not talk it out of that.
+        var v1 = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "old-backup.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var v2 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), v1);
+
+        _keyStore.Import(backupPath, "pp2");
+
+        // Still at generation 2, so the next publish is 3 — not a second generation 2.
+        var next = _service.PreparePublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v2, false);
+        Assert.Equal(3, next.Pending.Generation);
     }
 
     [Fact]

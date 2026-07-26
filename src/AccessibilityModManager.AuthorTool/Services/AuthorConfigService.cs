@@ -70,10 +70,11 @@ public sealed class AuthorConfigService
             // The claim-signing passphrase has never existed unprotected, so there is no legacy
             // shape to tolerate here: a value without the flag was never written by this code and
             // is not treated as a passphrase.
-            if (_cached.ClaimSigning is { Passphrase.Length: > 0, PassphraseProtected: true } cs)
+            foreach (var signing in _cached.ClaimSigningKeys.Values)
             {
-                cs.Passphrase = UnprotectClaimSecret(cs.Passphrase);
-                cs.PassphraseProtected = false;
+                if (signing is not { Passphrase.Length: > 0, PassphraseProtected: true }) continue;
+                signing.Passphrase = UnprotectClaimSecret(signing.Passphrase);
+                signing.PassphraseProtected = false;
             }
 
             return _cached;
@@ -109,16 +110,18 @@ public sealed class AuthorConfigService
 
         // Same treatment for the claim-signing passphrase, under its own entropy so the two blobs
         // are not interchangeable: a copy of one must never decrypt in the other's slot.
-        var plainClaimPassphrase = config.ClaimSigning?.Passphrase;
-        var hasClaimPassphrase = config.ClaimSigning != null && !string.IsNullOrEmpty(plainClaimPassphrase);
-        if (hasClaimPassphrase)
+        var plainClaimPassphrases = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (pluginId, signing) in config.ClaimSigningKeys)
         {
-            config.ClaimSigning!.Passphrase = ProtectClaimSecret(plainClaimPassphrase!);
-            config.ClaimSigning.PassphraseProtected = true;
-        }
-        else if (config.ClaimSigning != null)
-        {
-            config.ClaimSigning.PassphraseProtected = false;
+            if (string.IsNullOrEmpty(signing.Passphrase))
+            {
+                signing.PassphraseProtected = false;
+                continue;
+            }
+
+            plainClaimPassphrases[pluginId] = signing.Passphrase;
+            signing.Passphrase = ProtectClaimSecret(signing.Passphrase);
+            signing.PassphraseProtected = true;
         }
 
         try
@@ -137,10 +140,11 @@ public sealed class AuthorConfigService
                 config.ServerUpload!.KeyPassphrase = plainPassphrase!;
                 config.ServerUpload.KeyPassphraseProtected = false;
             }
-            if (hasClaimPassphrase)
+            foreach (var (pluginId, plain) in plainClaimPassphrases)
             {
-                config.ClaimSigning!.Passphrase = plainClaimPassphrase!;
-                config.ClaimSigning.PassphraseProtected = false;
+                if (!config.ClaimSigningKeys.TryGetValue(pluginId, out var signing)) continue;
+                signing.Passphrase = plain;
+                signing.PassphraseProtected = false;
             }
         }
         _cached = config;

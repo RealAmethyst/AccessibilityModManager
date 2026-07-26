@@ -1,63 +1,158 @@
 using System.IO;
 using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.AuthorTool.Services;
 
 /// <summary>
-/// Creates, unlocks, backs up and rotates the key this author signs catalog claims with.
+/// A portable backup of one plugin's signing key, and the publishing state that goes with it.
+///
+/// Not a bare key file, because a bare key is not enough to publish from anywhere else. Publishing
+/// only ever extends the catalog this machine last confirmed, so a machine with the key and no
+/// history refuses to publish — deliberately, since "I am new here" and "the server is replaying an
+/// old catalog at me" are the same picture from the inside. The history has to travel with the key,
+/// and the backup is the one thing an author is told to keep safe, so it travels here.
+/// </summary>
+public sealed record ClaimKeyBackup
+{
+    [JsonPropertyName("v")]
+    public int V { get; init; } = 1;
+
+    [JsonPropertyName("what")]
+    public string What { get; init; } =
+        "Accessibility Mod Manager catalog signing key. The private key is encrypted with the " +
+        "passphrase chosen when it was exported. Keep this file safe: it is what lets you publish.";
+
+    [JsonPropertyName("pluginId")]
+    public required string PluginId { get; init; }
+
+    [JsonPropertyName("keyId")]
+    public required string KeyId { get; init; }
+
+    [JsonPropertyName("publicKeyFingerprint")]
+    public required string PublicKeyFingerprint { get; init; }
+
+    /// <summary>Encrypted PKCS#8, under the export passphrase — never this machine's DPAPI, which
+    /// would make the backup openable only where it is least needed.</summary>
+    [JsonPropertyName("privateKeyPem")]
+    public required string PrivateKeyPem { get; init; }
+
+    /// <summary>Every publishing record this key has, one per trust context it has published in.</summary>
+    [JsonPropertyName("publisherState")]
+    public IReadOnlyList<PublisherRecord> PublisherState { get; init; } = [];
+
+    /// <summary>The registry version this machine had acted on, so a restored machine does not
+    /// accept an older registry than the one it left off at.</summary>
+    [JsonPropertyName("registryVersion")]
+    public long RegistryVersion { get; init; }
+}
+
+/// <summary>
+/// Creates, unlocks, backs up and rotates the keys this author signs catalog claims with — one per
+/// plugin, never one for the author.
 ///
 /// The key never leaves the machine except as a deliberate export. Two separate protections are at
 /// work and it matters that they are not confused: the key FILE is encrypted with a passphrase
 /// (portable — an export can be restored anywhere), while the stored passphrase is DPAPI-protected
 /// (not portable — bound to this Windows user on this machine). That is why an export asks for its
 /// own passphrase: a backup that only this machine could open would be no backup at all.
+///
+/// Every write here follows the same order — write a NEW file, prove it opens, switch the config to
+/// it, and only then remove the old one. The first version wrote over the live key first and saved
+/// the config afterwards, so a crash in between left a key file the config could no longer unlock,
+/// and recovering that costs a registry re-sign.
 /// </summary>
-public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILogger logger)
+public sealed class ClaimSigningKeyStore(
+    AuthorConfigService configService, PublisherHeadStore headStore, ILogger logger)
 {
-    private const int KeySizeBits = 4096;
-
     /// <summary>Iteration count for the key file's passphrase derivation.</summary>
     private static readonly PbeParameters KeyEncryption =
         new(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 600_000);
+
+    private static readonly JsonSerializerOptions BackupJson = new()
+    {
+        WriteIndented = true,
+        AllowDuplicateProperties = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
 
     /// <summary>Keys live beside the config that points at them, so a test instance is fully
     /// self-contained and can never write into the author's real key directory.</summary>
     private string KeyDirectory => Path.Combine(configService.StorageDirectory, "keys");
 
     /// <summary>
-    /// Generates a new signing key for a plugin and records it in the author config.
+    /// File names come from the key's own fingerprint — 64 hex characters, which is its own safe
+    /// name — and never from a plugin id.
     ///
-    /// Refuses to replace an existing key: the current one is vouched for by the signed registry,
-    /// and quietly generating another would leave every published claim unverifiable until the
-    /// registry was re-signed. Rotation is a deliberate act with its own path.
+    /// A plugin id arrives from a project file or a registry entry and used to go straight into
+    /// <c>Path.Combine</c>, where <c>..\\..\\something</c> resolves happily outside the key
+    /// directory. The containment check below is belt and braces on top of a name that cannot
+    /// express a path in the first place.
+    /// </summary>
+    /// <param name="revision">
+    /// Bumped whenever the same key is rewritten under a different passphrase, so the new copy
+    /// never lands on top of the working one. That is what makes the switch atomic from the
+    /// config's point of view: at every instant the recorded path names a file the recorded
+    /// passphrase opens, whichever side of the crash you are on.
+    /// </param>
+    private string KeyPathFor(string fingerprint, int revision)
+    {
+        if (fingerprint.Length != 64 || !fingerprint.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            throw new ArgumentException("A key fingerprint is 64 lowercase hex characters.", nameof(fingerprint));
+        if (revision < 1) throw new ArgumentOutOfRangeException(nameof(revision));
+
+        var directory = Path.GetFullPath(KeyDirectory);
+        var path = Path.GetFullPath(Path.Combine(directory, $"{fingerprint}.{revision}.pem"));
+
+        if (!path.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The key path resolved outside the key directory.");
+
+        return path;
+    }
+
+    /// <summary>The revision after the one a recorded path names, or 1 when it names none.</summary>
+    private static int NextRevision(string? currentPath)
+    {
+        var parts = Path.GetFileName(currentPath ?? "").Split('.');
+        return parts.Length >= 3 && int.TryParse(parts[^2], out var revision) ? revision + 1 : 1;
+    }
+
+    /// <summary>
+    /// Generates a new signing key for one plugin and records it.
+    ///
+    /// Refuses to replace an existing one, and refuses even when its FILE is missing: the registry
+    /// vouches for that key, so quietly generating another would leave every claim already published
+    /// unverifiable until the registry was re-signed. A missing file is what the backup is for.
     /// </summary>
     public ClaimSigningConfig Create(string pluginId, ReadOnlySpan<char> passphrase, string? keyId = null)
     {
-        if (string.IsNullOrWhiteSpace(pluginId))
-            throw new ArgumentException("A plugin id is required.", nameof(pluginId));
+        PathSafety.EnsureSafeId(pluginId, "plugin id");
         if (passphrase.IsEmpty)
             throw new ArgumentException("A passphrase is required.", nameof(passphrase));
 
         var config = configService.Load();
-        if (config.ClaimSigning is { PrivateKeyPath.Length: > 0 } existing && File.Exists(existing.PrivateKeyPath))
+        if (config.ClaimSigningKeys.ContainsKey(pluginId))
         {
             throw new InvalidOperationException(
-                "A signing key already exists for this author. Replacing it would make every claim " +
-                "already published unverifiable until the registry is re-signed with the new key. " +
-                "Rotate deliberately instead.");
+                $"A signing key is already recorded for plugin '{pluginId}'. Replacing it would make " +
+                "every claim already published unverifiable until the registry is re-signed with the " +
+                "new key. If the key file is missing, import your backup instead; if you mean to " +
+                "change keys, rotate deliberately.");
         }
 
         keyId ??= $"{pluginId}-{DateTime.UtcNow:yyyy-MM}";
 
-        using var rsa = RSA.Create(KeySizeBits);
-        var encryptedPem = rsa.ExportEncryptedPkcs8PrivateKeyPem(passphrase, KeyEncryption);
+        using var rsa = RSA.Create(ClaimKeyPolicy.KeySizeBits);
         var publicPem = rsa.ExportSubjectPublicKeyInfoPem();
+        var fingerprint = ClaimTrustContext.PublicKeyFingerprint(publicPem);
 
         Directory.CreateDirectory(KeyDirectory);
-        var path = Path.Combine(KeyDirectory, $"{pluginId}-claim-signing.pem");
-        WriteKeyFile(path, encryptedPem);
+        var path = KeyPathFor(fingerprint, revision: 1);
+        WriteKeyFile(path, rsa.ExportEncryptedPkcs8PrivateKeyPem(passphrase, KeyEncryption));
 
         var signing = new ClaimSigningConfig
         {
@@ -66,31 +161,37 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
             PrivateKeyPath = path,
             Passphrase = passphrase.ToString(),
             PublicKeyPem = publicPem,
-            PublicKeyFingerprint = ClaimTrustContext.PublicKeyFingerprint(publicPem)
+            PublicKeyFingerprint = fingerprint
         };
 
-        config.ClaimSigning = signing;
+        config.ClaimSigningKeys[pluginId] = signing;
         configService.Save(config);
 
         logger.Information("Created claim signing key {KeyId} for plugin {PluginId} ({Fingerprint})",
-            keyId, pluginId, signing.PublicKeyFingerprint);
+            keyId, pluginId, fingerprint);
 
         return signing;
     }
 
+    /// <summary>The recorded key for a plugin, or null when there is none yet.</summary>
+    public ClaimSigningConfig? TryGet(string pluginId) =>
+        configService.Load().ClaimSigningKeys.GetValueOrDefault(pluginId);
+
     /// <summary>
-    /// Opens a signer for the configured key, bound to the given anchor.
+    /// Opens a signer for a plugin's key, bound to the given anchor.
     ///
     /// The anchor comes from the SIGNED REGISTRY, not from local config, so this also answers the
-    /// question that actually matters before publishing: does the key on this disk still match what
-    /// the registry vouches for? A mismatch throws here rather than producing claims that verify
-    /// nowhere.
+    /// question that actually matters before publishing: is the key on this disk still the one the
+    /// registry vouches for? All three parts of that identity are checked, not whichever one is
+    /// convenient — otherwise a key kept for one plugin could sign for another the registry names,
+    /// and a key the registry has moved on from could go on signing under a retired identity.
     /// </summary>
     public ClaimSigner OpenSigner(ClaimTrustAnchor anchor)
     {
-        var signing = configService.Load().ClaimSigning
+        var signing = TryGet(anchor.PluginId)
             ?? throw new InvalidOperationException(
-                "No signing key is set up yet. Create one before publishing signed catalog claims.");
+                $"No signing key is set up for plugin '{anchor.PluginId}'. Create one, or import your " +
+                "backup, before publishing signed catalog claims.");
 
         if (string.IsNullOrEmpty(signing.Passphrase))
         {
@@ -105,17 +206,11 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
                 $"The signing key file is missing ({signing.PrivateKeyPath}). Import your backup to restore it.");
         }
 
-        // The key on this disk must be the key the registry vouches for — all three of the things
-        // that identify it, not just whichever one happens to be checked later. Without this, a key
-        // kept for one plugin could sign for another the registry names, and a key the registry has
-        // moved on from could go on signing under a retired identity.
-        if (!string.Equals(signing.PluginId, anchor.PluginId, StringComparison.Ordinal) ||
-            !string.Equals(signing.KeyId, anchor.KeyId, StringComparison.Ordinal))
+        if (!string.Equals(signing.KeyId, anchor.KeyId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                $"The signing key stored here is '{signing.KeyId}' for plugin '{signing.PluginId}', but the " +
-                $"registry names '{anchor.KeyId}' for '{anchor.PluginId}'. Claims signed with it would " +
-                "verify for nobody.");
+                $"The signing key stored here is '{signing.KeyId}', but the registry names " +
+                $"'{anchor.KeyId}' for this plugin. Claims signed with it would verify for nobody.");
         }
 
         if (!string.Equals(signing.PublicKeyFingerprint,
@@ -126,71 +221,95 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
                 "registry was re-signed with a different key, or this machine's key is out of date.");
         }
 
-        var pem = File.ReadAllText(signing.PrivateKeyPath);
-        return new ClaimSigner(pem, signing.Passphrase, anchor);
+        return new ClaimSigner(File.ReadAllText(signing.PrivateKeyPath), signing.Passphrase, anchor);
     }
 
     /// <summary>
-    /// Writes a portable backup, encrypted under a passphrase the author chooses.
+    /// Writes a portable backup: the key, encrypted under a passphrase the author chooses, together
+    /// with the publishing state that makes it usable somewhere else.
     ///
     /// Deliberately not DPAPI-protected: a backup only this Windows account could open would be
-    /// useless in the one situation backups exist for. The trade is that the export file is exactly
-    /// as strong as the passphrase put on it, so it is written outside the tool's own directories
-    /// wherever the author says.
+    /// useless in the one situation backups exist for. The trade is that the file is exactly as
+    /// strong as the passphrase put on it, so it is written wherever the author says rather than
+    /// into the tool's own directories.
     /// </summary>
-    public void Export(string destinationPath, ReadOnlySpan<char> exportPassphrase)
+    public void Export(string pluginId, string destinationPath, ReadOnlySpan<char> exportPassphrase)
     {
         if (exportPassphrase.IsEmpty)
             throw new ArgumentException("An export passphrase is required.", nameof(exportPassphrase));
 
-        var signing = configService.Load().ClaimSigning
-            ?? throw new InvalidOperationException("No signing key is set up yet.");
+        var signing = TryGet(pluginId)
+            ?? throw new InvalidOperationException($"No signing key is set up for plugin '{pluginId}'.");
 
         using var rsa = LoadPrivateKey(signing);
-        var exported = rsa.ExportEncryptedPkcs8PrivateKeyPem(exportPassphrase, KeyEncryption);
+
+        var backup = new ClaimKeyBackup
+        {
+            PluginId = signing.PluginId,
+            KeyId = signing.KeyId,
+            PublicKeyFingerprint = signing.PublicKeyFingerprint,
+            PrivateKeyPem = rsa.ExportEncryptedPkcs8PrivateKeyPem(exportPassphrase, KeyEncryption),
+            PublisherState = headStore.RecordsFor(pluginId),
+            RegistryVersion = headStore.RegistryHighWaterVersion()
+        };
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(destinationPath));
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-        WriteKeyFile(destinationPath, exported);
+        File.WriteAllText(destinationPath, JsonSerializer.Serialize(backup, BackupJson));
 
-        logger.Information("Exported claim signing key {KeyId} to a backup", signing.KeyId);
+        logger.Information("Exported claim signing key {KeyId} with {Records} publishing record(s)",
+            signing.KeyId, backup.PublisherState.Count);
     }
 
     /// <summary>
-    /// Installs a key from a backup on this machine — the other half of <see cref="Export"/>, for a
-    /// new computer or a restored disk.
-    ///
-    /// <paramref name="expectedFingerprint"/> should be whatever the signed registry currently
-    /// publishes. Importing a key the registry does not vouch for produces claims that verify
-    /// nowhere, so it is refused rather than discovered later.
+    /// Installs a backup on this machine — the other half of <see cref="Export"/>, for a new
+    /// computer or a restored disk. Brings the publishing state with it, which is what lets the new
+    /// machine carry on publishing rather than refusing to.
     /// </summary>
+    /// <param name="expectedFingerprint">
+    /// Whatever the signed registry currently publishes, when the caller has it. Importing a key
+    /// the registry does not vouch for produces claims that verify nowhere, so it is refused here
+    /// rather than discovered after a publish.
+    /// </param>
     public ClaimSigningConfig Import(
-        string sourcePath,
-        ReadOnlySpan<char> sourcePassphrase,
-        string pluginId,
-        string keyId,
-        string? expectedFingerprint = null)
+        string sourcePath, ReadOnlySpan<char> sourcePassphrase, string? expectedFingerprint = null)
     {
-        var pem = File.ReadAllText(sourcePath);
+        ClaimKeyBackup backup;
+        try
+        {
+            backup = JsonSerializer.Deserialize<ClaimKeyBackup>(File.ReadAllText(sourcePath), BackupJson)
+                ?? throw new InvalidOperationException("That backup file is empty.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException(
+                "That file isn't a key backup this version understands.", ex);
+        }
+
+        if (backup.V != 1) throw new InvalidOperationException("That backup was written by a newer version.");
+        PathSafety.EnsureSafeId(backup.PluginId, "plugin id");
 
         using var rsa = RSA.Create();
         try
         {
-            rsa.ImportFromEncryptedPem(pem, sourcePassphrase);
+            rsa.ImportFromEncryptedPem(backup.PrivateKeyPem, sourcePassphrase);
         }
         catch (CryptographicException ex)
         {
             throw new InvalidOperationException(
-                "That key couldn't be opened — the passphrase is wrong, or the file isn't an encrypted key.", ex);
+                "That key couldn't be opened — the passphrase is wrong, or the file is damaged.", ex);
         }
 
         // Before anything is written. The size rule held at creation, signing and verification but
         // not here, so an import could report success, replace a working key with an unsupported
-        // one, and only fail at the next publish — with the original already overwritten.
+        // one, and only fail at the next publish — with the original already gone.
         ClaimKeyPolicy.Require(rsa);
 
         var publicPem = rsa.ExportSubjectPublicKeyInfoPem();
         var fingerprint = ClaimTrustContext.PublicKeyFingerprint(publicPem);
+
+        if (!string.Equals(fingerprint, backup.PublicKeyFingerprint, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("That backup's key does not match the fingerprint recorded in it.");
 
         if (!string.IsNullOrEmpty(expectedFingerprint) &&
             !string.Equals(fingerprint, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
@@ -200,42 +319,59 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
                 "would not verify for anyone. Check you imported the right backup.");
         }
 
-        // Re-encrypt under the same passphrase into this machine's key directory, so the imported
-        // file lives where the tool expects it rather than wherever the backup happened to be.
-        Directory.CreateDirectory(KeyDirectory);
-        var path = Path.Combine(KeyDirectory, $"{pluginId}-claim-signing.pem");
-        WriteKeyFile(path, rsa.ExportEncryptedPkcs8PrivateKeyPem(sourcePassphrase, KeyEncryption));
-
         var config = configService.Load();
-        config.ClaimSigning = new ClaimSigningConfig
+        var previous = config.ClaimSigningKeys.GetValueOrDefault(backup.PluginId);
+
+        // New file first, and prove it opens before anything starts depending on it. Writing over
+        // the live key and saving the config afterwards is how a crash in between leaves a key file
+        // the config can no longer unlock.
+        Directory.CreateDirectory(KeyDirectory);
+        var path = KeyPathFor(fingerprint, NextRevision(previous?.PrivateKeyPath));
+        WriteKeyFile(path, rsa.ExportEncryptedPkcs8PrivateKeyPem(sourcePassphrase, KeyEncryption));
+        using (var check = RSA.Create()) check.ImportFromEncryptedPem(File.ReadAllText(path), sourcePassphrase);
+
+        var signing = new ClaimSigningConfig
         {
-            PluginId = pluginId,
-            KeyId = keyId,
+            PluginId = backup.PluginId,
+            KeyId = backup.KeyId,
             PrivateKeyPath = path,
             Passphrase = sourcePassphrase.ToString(),
             PublicKeyPem = publicPem,
             PublicKeyFingerprint = fingerprint
         };
+
+        config.ClaimSigningKeys[backup.PluginId] = signing;
         configService.Save(config);
 
-        logger.Information("Imported claim signing key {KeyId} for plugin {PluginId} ({Fingerprint})",
-            keyId, pluginId, fingerprint);
+        // Only once the config points at the new file: publishing state is useless without the key
+        // it belongs to, and a half-restored machine should look un-restored rather than partly so.
+        headStore.RestoreFromBackup(backup.PublisherState, backup.RegistryVersion);
 
-        return config.ClaimSigning;
+        if (previous is not null &&
+            !string.Equals(previous.PrivateKeyPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            TryDelete(previous.PrivateKeyPath);
+        }
+
+        logger.Information("Imported claim signing key {KeyId} for plugin {PluginId} with {Records} record(s)",
+            signing.KeyId, signing.PluginId, backup.PublisherState.Count);
+
+        return signing;
     }
 
     /// <summary>
-    /// Re-encrypts the key file under a new passphrase. The key itself — and therefore everything
+    /// Re-encrypts a key file under a new passphrase. The key itself — and therefore everything
     /// already published under it — is unchanged, so this needs no registry update.
     /// </summary>
-    public void ChangePassphrase(ReadOnlySpan<char> currentPassphrase, ReadOnlySpan<char> newPassphrase)
+    public void ChangePassphrase(
+        string pluginId, ReadOnlySpan<char> currentPassphrase, ReadOnlySpan<char> newPassphrase)
     {
         if (newPassphrase.IsEmpty)
             throw new ArgumentException("A new passphrase is required.", nameof(newPassphrase));
 
         var config = configService.Load();
-        var signing = config.ClaimSigning
-            ?? throw new InvalidOperationException("No signing key is set up yet.");
+        var signing = config.ClaimSigningKeys.GetValueOrDefault(pluginId)
+            ?? throw new InvalidOperationException($"No signing key is set up for plugin '{pluginId}'.");
 
         using var rsa = RSA.Create();
         try
@@ -247,10 +383,22 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
             throw new InvalidOperationException("The current passphrase is wrong.", ex);
         }
 
-        WriteKeyFile(signing.PrivateKeyPath, rsa.ExportEncryptedPkcs8PrivateKeyPem(newPassphrase, KeyEncryption));
+        // Same order as an import, and for the same reason: a NEW file, proven openable, then the
+        // config, then the old one goes. The new copy gets its own name rather than replacing the
+        // working file, because the passphrase and the path have to change together — writing the
+        // new key over the old path and saving the config afterwards leaves a window where the
+        // recorded passphrase no longer opens the recorded file, and a crash inside that window
+        // strands the only key the registry vouches for.
+        var previousPath = signing.PrivateKeyPath;
+        var path = KeyPathFor(signing.PublicKeyFingerprint, NextRevision(previousPath));
+        WriteKeyFile(path, rsa.ExportEncryptedPkcs8PrivateKeyPem(newPassphrase, KeyEncryption));
+        using (var check = RSA.Create()) check.ImportFromEncryptedPem(File.ReadAllText(path), newPassphrase);
+
+        signing.PrivateKeyPath = path;
         signing.Passphrase = newPassphrase.ToString();
         configService.Save(config);
 
+        TryDelete(previousPath);
         logger.Information("Changed the passphrase on claim signing key {KeyId}", signing.KeyId);
     }
 
@@ -277,12 +425,18 @@ public sealed class ClaimSigningKeyStore(AuthorConfigService configService, ILog
 
     /// <summary>
     /// Writes via a temp file and a replace, so an interrupted write cannot leave a truncated key
-    /// where a whole one used to be. Losing the key file costs a registry re-sign to recover from.
+    /// where a whole one used to be. Losing a key file costs a registry re-sign to recover from.
     /// </summary>
     private static void WriteKeyFile(string path, string pem)
     {
         var temp = path + ".tmp";
         File.WriteAllText(temp, pem);
         File.Move(temp, path, overwrite: true);
+    }
+
+    private void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception ex) { logger.Warning(ex, "Couldn't remove the superseded key file {Path}", path); }
     }
 }

@@ -178,7 +178,12 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
                     "signing key that has since been retired, so publishing against it is refused.");
             }
 
-            if (version == seen.Version && !string.Equals(hash, seen.Sha256, StringComparison.Ordinal))
+            // A recorded version with no recorded content comes from a restored backup: the
+            // version travelled, the bytes did not. That is "I know how far I had got", not "I know
+            // exactly what I saw", and treating the two the same would leave a restored machine
+            // unable to publish against the very registry it is up to date with.
+            if (version == seen.Version && seen.Sha256 is not null &&
+                !string.Equals(hash, seen.Sha256, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     $"The registry on the server is different from the one this machine saw at version " +
@@ -186,7 +191,7 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
             }
         }
 
-        if (seen is null || version > seen.Version)
+        if (seen is null || version > seen.Version || seen.Sha256 is null)
         {
             System.IO.Directory.CreateDirectory(Directory);
             WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(
@@ -241,8 +246,72 @@ public sealed partial class PublisherHeadStore(AuthorConfigService configService
         [JsonPropertyName("version")]
         public required long Version { get; init; }
 
+        /// <summary>Null when only the version is known — see the restore path.</summary>
         [JsonPropertyName("sha256")]
-        public required string Sha256 { get; init; }
+        public string? Sha256 { get; init; }
+    }
+
+    /// <summary>
+    /// Every publishing record belonging to one plugin, for a key backup to carry.
+    ///
+    /// A key without its history cannot publish anywhere else — that is the whole point of the
+    /// single-writer rule — so the two travel together or the backup is not a backup.
+    /// </summary>
+    public IReadOnlyList<PublisherRecord> RecordsFor(string pluginId)
+    {
+        if (!System.IO.Directory.Exists(Directory)) return [];
+
+        var records = new List<PublisherRecord>();
+        foreach (var path in System.IO.Directory.EnumerateFiles(Directory, "*.json"))
+        {
+            var name = Path.GetFileNameWithoutExtension(path);
+            if (name.Length != 64) continue; // the high-water file, or something else entirely
+
+            var record = TryLoad(name);
+            if (record is not null && string.Equals(record.PluginId, pluginId, StringComparison.Ordinal))
+                records.Add(record);
+        }
+
+        return records;
+    }
+
+    /// <summary>The registry version this machine has acted on, or 0 when it has acted on none.</summary>
+    public long RegistryHighWaterVersion() =>
+        TryLoadHighWater(Path.Combine(Directory, "registry-highwater.json"))?.Version ?? 0;
+
+    /// <summary>
+    /// Takes the publishing state out of a key backup.
+    ///
+    /// Never downgrades: an existing record is kept when it is at or beyond the one being restored,
+    /// because a backup is by definition a photograph of an earlier moment, and a machine that has
+    /// published since knows more than the backup does. The registry high-water moves the same way,
+    /// forwards only.
+    /// </summary>
+    public void RestoreFromBackup(IReadOnlyList<PublisherRecord> records, long registryVersion)
+    {
+        System.IO.Directory.CreateDirectory(Directory);
+
+        foreach (var record in records)
+        {
+            var existing = TryLoad(record.TrustContext);
+            if (existing?.Committed is not null && record.Committed is not null &&
+                existing.Committed.Generation >= record.Committed.Generation)
+            {
+                continue;
+            }
+
+            Write(record);
+            logger.Information(
+                "Restored publishing state for {PluginId} at generation {Generation}",
+                record.PluginId, record.Committed?.Generation ?? 0);
+        }
+
+        var path = Path.Combine(Directory, "registry-highwater.json");
+        if (registryVersion > (TryLoadHighWater(path)?.Version ?? 0))
+        {
+            WriteAtomic(path, System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(
+                new RegistryHighWater { Version = registryVersion }, Json)));
+        }
     }
 
     /// <summary>The exact bytes a pending publish prepared, if they are still on disk.</summary>

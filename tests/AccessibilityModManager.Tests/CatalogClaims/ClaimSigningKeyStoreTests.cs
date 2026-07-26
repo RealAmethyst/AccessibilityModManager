@@ -27,13 +27,19 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         _root = Path.Combine(Path.GetTempPath(), "claimkey-tests-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(_root);
         _configService = new AuthorConfigService(TestLogger.Create(), _root);
-        _store = new ClaimSigningKeyStore(_configService, TestLogger.Create());
+        _store = NewStore(_configService);
     }
 
     public void Dispose()
     {
         try { Directory.Delete(_root, recursive: true); } catch { /* temp */ }
     }
+
+    private static ClaimSigningKeyStore NewStore(AuthorConfigService config) =>
+        new(config, new PublisherHeadStore(config, TestLogger.Create()), TestLogger.Create());
+
+    private static ClaimSigningKeyStore NewStore(string root) =>
+        NewStore(new AuthorConfigService(TestLogger.Create(), root));
 
     private static ClaimTrustAnchor AnchorFor(ClaimSigningConfig signing, string? url = null) => new()
     {
@@ -80,20 +86,76 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
 
         // A fresh service instance re-reads from disk and must decrypt the passphrase, or signing
         // would start prompting mid-publish — the thing this store exists to avoid.
-        var reloaded = new AuthorConfigService(TestLogger.Create(), _root);
-        var store = new ClaimSigningKeyStore(reloaded, TestLogger.Create());
+        var store = NewStore(_root);
 
         using var signer = store.OpenSigner(AnchorFor(signing));
         Assert.NotNull(signer);
     }
 
     [Fact]
-    public void Creating_a_second_key_is_refused()
+    public void Creating_a_second_key_for_one_plugin_is_refused()
     {
         _store.Create("amethyst", Passphrase);
 
         var ex = Assert.Throws<InvalidOperationException>(() => _store.Create("amethyst", "another"));
-        Assert.Contains("already exists", ex.Message);
+        Assert.Contains("already recorded", ex.Message);
+    }
+
+    [Fact]
+    public void A_second_plugin_gets_its_own_key()
+    {
+        // One key per author was the first shape and it was wrong twice over: a single compromise
+        // would reach every plugin the author publishes, and a second plugin could not be published
+        // at all, because creating its key was refused on the grounds that a key already existed.
+        var first = _store.Create("amethyst", Passphrase);
+        var second = _store.Create("someone-else", "their passphrase");
+
+        Assert.NotEqual(first.PublicKeyFingerprint, second.PublicKeyFingerprint);
+        Assert.NotEqual(first.PrivateKeyPath, second.PrivateKeyPath);
+
+        using var signer = _store.OpenSigner(AnchorFor(second));
+        Assert.NotNull(signer);
+    }
+
+    [Fact]
+    public void A_key_for_one_plugin_cannot_sign_for_another()
+    {
+        var first = _store.Create("amethyst", Passphrase);
+        _store.Create("someone-else", "their passphrase");
+
+        // The registry names the other plugin's id but this plugin's key material.
+        var crossed = AnchorFor(first) with { PluginId = "someone-else" };
+
+        // Refused on the key id, which is the first of the three bindings to disagree — the point
+        // being that the lookup is per plugin, so one plugin's key is never even reachable for
+        // another's claims.
+        var ex = Assert.Throws<InvalidOperationException>(() => _store.OpenSigner(crossed));
+        Assert.Contains("the registry names", ex.Message);
+    }
+
+    [Fact]
+    public void A_missing_key_file_does_not_license_creating_a_replacement()
+    {
+        // The registry vouches for that key. Quietly making another would leave every claim already
+        // published unverifiable until the registry was re-signed — which is what the backup is for.
+        var signing = _store.Create("amethyst", Passphrase);
+        File.Delete(signing.PrivateKeyPath);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => _store.Create("amethyst", "another"));
+        Assert.Contains("import your backup", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("../escape")]
+    [InlineData("..\escape")]
+    [InlineData("with/slash")]
+    [InlineData("")]
+    public void A_plugin_id_that_could_escape_the_key_directory_is_refused(string pluginId)
+    {
+        // The id arrives from a project file or a registry entry, and used to go straight into
+        // Path.Combine. Key file names now come from the key's own fingerprint, so an id cannot
+        // express a path at all; this is the check in front of that.
+        Assert.ThrowsAny<Exception>(() => _store.Create(pluginId, Passphrase));
     }
 
     [Fact]
@@ -120,15 +182,13 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
     {
         var original = _store.Create("amethyst", Passphrase);
         var backup = Path.Combine(_root, "backup", "amethyst-key.pem");
-        _store.Export(backup, "backup passphrase");
+        _store.Export("amethyst", backup, "backup passphrase");
 
         // A completely separate profile, as a new PC would be.
         var otherRoot = Path.Combine(_root, "other-machine");
-        var otherConfig = new AuthorConfigService(TestLogger.Create(), otherRoot);
-        var otherStore = new ClaimSigningKeyStore(otherConfig, TestLogger.Create());
+        var otherStore = NewStore(otherRoot);
 
-        var restored = otherStore.Import(backup, "backup passphrase", "amethyst", original.KeyId,
-            expectedFingerprint: original.PublicKeyFingerprint);
+        var restored = otherStore.Import(backup, "backup passphrase", expectedFingerprint: original.PublicKeyFingerprint);
 
         Assert.Equal(original.PublicKeyFingerprint, restored.PublicKeyFingerprint);
 
@@ -147,15 +207,14 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         // exist for, so the export is protected by a passphrase the author chooses.
         var signing = _store.Create("amethyst", Passphrase);
         var backup = Path.Combine(_root, "backup.pem");
-        _store.Export(backup, "different passphrase");
+        _store.Export("amethyst", backup, "different passphrase");
 
-        var otherStore = new ClaimSigningKeyStore(new AuthorConfigService(TestLogger.Create(),
-            Path.Combine(_root, "elsewhere")), TestLogger.Create());
+        var otherStore = NewStore(Path.Combine(_root, "elsewhere"));
 
         Assert.Throws<InvalidOperationException>(() =>
-            otherStore.Import(backup, Passphrase, "amethyst", signing.KeyId));
+            otherStore.Import(backup, Passphrase));
 
-        var ok = otherStore.Import(backup, "different passphrase", "amethyst", signing.KeyId);
+        var ok = otherStore.Import(backup, "different passphrase");
         Assert.Equal(signing.PublicKeyFingerprint, ok.PublicKeyFingerprint);
     }
 
@@ -167,16 +226,15 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         _store.Create("amethyst", Passphrase);
 
         var strangerRoot = Path.Combine(_root, "stranger");
-        var strangerStore = new ClaimSigningKeyStore(new AuthorConfigService(TestLogger.Create(), strangerRoot), TestLogger.Create());
+        var strangerStore = NewStore(strangerRoot);
         var strangerKey = strangerStore.Create("amethyst", "theirs");
         var strangerBackup = Path.Combine(strangerRoot, "theirs.pem");
-        strangerStore.Export(strangerBackup, "theirs");
+        strangerStore.Export("amethyst", strangerBackup, "theirs");
 
-        var target = new ClaimSigningKeyStore(new AuthorConfigService(TestLogger.Create(),
-            Path.Combine(_root, "target")), TestLogger.Create());
+        var target = NewStore(Path.Combine(_root, "target"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            target.Import(strangerBackup, "theirs", "amethyst", strangerKey.KeyId,
+            target.Import(strangerBackup, "theirs",
                 expectedFingerprint: "0000000000000000000000000000000000000000000000000000000000000000"));
         Assert.Contains("not the one the registry", ex.Message);
     }
@@ -190,18 +248,24 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var original = _store.Create("amethyst", Passphrase);
 
         using var weak = System.Security.Cryptography.RSA.Create(3072);
-        var weakBackup = Path.Combine(_root, "weak.pem");
-        File.WriteAllText(weakBackup, weak.ExportEncryptedPkcs8PrivateKeyPem("theirs",
-            new System.Security.Cryptography.PbeParameters(
-                System.Security.Cryptography.PbeEncryptionAlgorithm.Aes256Cbc,
-                System.Security.Cryptography.HashAlgorithmName.SHA256, 100_000)));
+        var weakBackup = Path.Combine(_root, "weak.json");
+        File.WriteAllText(weakBackup, System.Text.Json.JsonSerializer.Serialize(new ClaimKeyBackup
+        {
+            PluginId = "amethyst",
+            KeyId = original.KeyId,
+            PublicKeyFingerprint = ClaimTrustContext.PublicKeyFingerprint(weak.ExportSubjectPublicKeyInfoPem()),
+            PrivateKeyPem = weak.ExportEncryptedPkcs8PrivateKeyPem("theirs",
+                new System.Security.Cryptography.PbeParameters(
+                    System.Security.Cryptography.PbeEncryptionAlgorithm.Aes256Cbc,
+                    System.Security.Cryptography.HashAlgorithmName.SHA256, 100_000))
+        }));
 
         Assert.Throws<ClaimFormatException>(() =>
-            _store.Import(weakBackup, "theirs", "amethyst", original.KeyId));
+            _store.Import(weakBackup, "theirs"));
 
         // And the key that was already there is untouched.
         Assert.Equal(original.PublicKeyFingerprint,
-            new AuthorConfigService(TestLogger.Create(), _root).Load().ClaimSigning!.PublicKeyFingerprint);
+            new AuthorConfigService(TestLogger.Create(), _root).Load().ClaimSigningKeys["amethyst"].PublicKeyFingerprint);
     }
 
     [Fact]
@@ -209,13 +273,12 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
     {
         var signing = _store.Create("amethyst", Passphrase);
         var backup = Path.Combine(_root, "backup.pem");
-        _store.Export(backup, "right");
+        _store.Export("amethyst", backup, "right");
 
-        var other = new ClaimSigningKeyStore(new AuthorConfigService(TestLogger.Create(),
-            Path.Combine(_root, "other")), TestLogger.Create());
+        var other = NewStore(Path.Combine(_root, "other"));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            other.Import(backup, "wrong", "amethyst", signing.KeyId));
+            other.Import(backup, "wrong"));
         Assert.Contains("passphrase is wrong", ex.Message);
     }
 
@@ -227,11 +290,11 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
         var signing = _store.Create("amethyst", Passphrase);
         var before = signing.PublicKeyFingerprint;
 
-        _store.ChangePassphrase(Passphrase, "a new one");
+        _store.ChangePassphrase("amethyst", Passphrase, "a new one");
 
         // Same key, so nothing already published stops verifying and no registry update is needed.
         using var signer = _store.OpenSigner(AnchorFor(signing));
-        Assert.Equal(before, _configService.Load().ClaimSigning!.PublicKeyFingerprint);
+        Assert.Equal(before, _configService.Load().ClaimSigningKeys["amethyst"].PublicKeyFingerprint);
 
         var claim = signer.Sign(ClaimKind.Header, new ClaimIdentity { Kind = ClaimKind.Header },
             1, ClaimAudience.Everyone, "{}");
@@ -243,7 +306,7 @@ public sealed class ClaimSigningKeyStoreTests : IDisposable
     {
         _store.Create("amethyst", Passphrase);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => _store.ChangePassphrase("not it", "new"));
+        var ex = Assert.Throws<InvalidOperationException>(() => _store.ChangePassphrase("amethyst", "not it", "new"));
         Assert.Contains("current passphrase is wrong", ex.Message);
     }
 

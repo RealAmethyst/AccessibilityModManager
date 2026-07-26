@@ -26,12 +26,21 @@ public sealed class AuthorConfig
     public ServerUploadConfig? ServerUpload { get; set; }
 
     /// <summary>
-    /// The key this author signs catalog claims with. Deliberately a separate section from
-    /// <see cref="ServerUpload"/>: that one holds an SSH credential for moving files, this one holds
-    /// a signing identity that vouches for content. Conflating a transport credential with a signing
-    /// key would throw away the separation that makes having two keys worthwhile.
+    /// The keys this author signs catalog claims with, one per plugin, keyed by plugin id.
+    ///
+    /// Deliberately a separate section from <see cref="ServerUpload"/>: that one holds an SSH
+    /// credential for moving files, this one holds signing identities that vouch for content.
+    /// Conflating a transport credential with a signing key would throw away the separation that
+    /// makes having two keys worthwhile.
+    ///
+    /// Per plugin rather than per author, which the first version got wrong. One key for everything
+    /// an author publishes means a single compromise reaches every plugin they have — the opposite
+    /// of why the catalog key is split from the registry key in the first place — and it made a
+    /// second plugin impossible to publish at all, since creating its key was refused on the
+    /// grounds that "a key already exists".
     /// </summary>
-    public ClaimSigningConfig? ClaimSigning { get; set; }
+    public Dictionary<string, ClaimSigningConfig> ClaimSigningKeys { get; set; } =
+        new(StringComparer.Ordinal);
 }
 
 /// <summary>
