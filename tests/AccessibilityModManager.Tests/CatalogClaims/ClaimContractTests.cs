@@ -179,6 +179,32 @@ public sealed class ClaimContractTests : IDisposable
 
     // ---- shape rules that survive a perfect signature ----
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(ClaimCodec.MaxCounter + 1)]
+    [InlineData(long.MaxValue)]
+    public void A_sequence_outside_the_range_is_refused(long seq)
+    {
+        var claim = SignRelease(seq: 5);
+        var text = Encoding.UTF8.GetString(claim.PayloadBytes).Replace("\"seq\":5", $"\"seq\":{seq}");
+
+        Assert.Throws<ClaimFormatException>(() => ClaimCodec.Parse(Encoding.UTF8.GetBytes(text)));
+    }
+
+    [Fact]
+    public void The_top_of_the_sequence_range_is_accepted()
+    {
+        // The ceiling exists because the builder takes one past the highest sequence it is shown,
+        // and long.MaxValue would overflow into a negative. Both ends belong in the contract, so
+        // both ends are pinned by something that runs.
+        var claim = SignRelease(seq: 5);
+        var text = Encoding.UTF8.GetString(claim.PayloadBytes)
+            .Replace("\"seq\":5", $"\"seq\":{ClaimCodec.MaxCounter}");
+
+        Assert.Equal(ClaimCodec.MaxCounter, ClaimCodec.Parse(Encoding.UTF8.GetBytes(text)).Seq);
+    }
+
     [Fact]
     public void A_header_claim_may_not_be_gated()
     {

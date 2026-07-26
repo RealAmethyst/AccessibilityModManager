@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -78,7 +79,7 @@ public sealed record PublisherRecord
 /// URL, changing a key id, or rotating a key all change what claims are bound to, and each one
 /// starts a namespace of its own rather than inheriting a head that no longer means anything.
 /// </summary>
-public sealed class PublisherHeadStore(AuthorConfigService configService, ILogger logger)
+public sealed partial class PublisherHeadStore(AuthorConfigService configService, ILogger logger)
 {
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -335,8 +336,15 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
     /// but it does not survive the machine dying: the bytes can still be sitting in the filesystem
     /// cache. That distinction matters more here than almost anywhere else in the tool, because a
     /// pending record that evaporates is precisely what lets a rolled-back server walk the signer
-    /// into publishing a second, different version of a generation that already exists. So the data
-    /// is flushed to the device before the rename makes it the record.
+    /// into publishing a second, different version of a generation that already exists.
+    ///
+    /// Both halves have to be durable, and flushing only the first half was the mistake in the
+    /// first attempt at this: the CONTENT was written through, and then `File.Move` committed the
+    /// rename through the ordinary cache. .NET's move calls `MoveFileEx` with
+    /// `MOVEFILE_COPY_ALLOWED` and `MOVEFILE_REPLACE_EXISTING`, never `MOVEFILE_WRITE_THROUGH` —
+    /// which is the flag Windows documents as "do not return until the move is on the disk". So a
+    /// perfectly flushed temp file could still be followed by a lost rename, leaving exactly the
+    /// window the flush was there to close.
     /// </summary>
     private static void WriteAtomic(string path, byte[] bytes)
     {
@@ -349,8 +357,17 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
             stream.Flush(flushToDisk: true);
         }
 
-        File.Move(temp, path, overwrite: true);
+        if (!MoveFileExW(temp, path, MoveFileReplaceExisting | MoveFileWriteThrough))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
+
+    private const uint MoveFileReplaceExisting = 0x1;
+    private const uint MoveFileWriteThrough = 0x8;
+
+    [LibraryImport("kernel32.dll", EntryPoint = "MoveFileExW",
+        StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool MoveFileExW(string existingFileName, string newFileName, uint flags);
 
     private void TryDelete(string path)
     {

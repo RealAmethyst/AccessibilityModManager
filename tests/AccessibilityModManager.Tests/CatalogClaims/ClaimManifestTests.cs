@@ -47,12 +47,27 @@ public sealed class ClaimManifestTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void Generations_start_at_one(long generation)
+    [InlineData(ClaimCodec.MaxCounter + 1)]
+    [InlineData(long.MaxValue)]
+    public void A_generation_outside_the_range_is_refused(long generation)
     {
         var text = Encoding.UTF8.GetString(Payload(2, Parent))
             .Replace("\"generation\":2", $"\"generation\":{generation}");
 
         Assert.Throws<ClaimFormatException>(() => ManifestCodec.Parse(Encoding.UTF8.GetBytes(text)));
+    }
+
+    [Fact]
+    public void The_top_of_the_range_is_accepted()
+    {
+        // Both ends pinned, not just the bottom. The ceiling is not 2^63-1 because the builder takes
+        // one past the highest value it is shown, and a hostile long.MaxValue would overflow into a
+        // negative sequence — so where exactly it sits is part of the contract, and a second
+        // implementation has to agree on it.
+        var text = Encoding.UTF8.GetString(Payload(2, Parent))
+            .Replace("\"generation\":2", $"\"generation\":{ClaimCodec.MaxCounter}");
+
+        Assert.Equal(ClaimCodec.MaxCounter, ManifestCodec.Parse(Encoding.UTF8.GetBytes(text)).Generation);
     }
 
     [Fact]
