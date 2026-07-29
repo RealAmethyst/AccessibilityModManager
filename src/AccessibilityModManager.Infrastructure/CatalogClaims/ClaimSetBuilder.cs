@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AccessibilityModManager.Core.Models;
@@ -28,14 +30,205 @@ public static class ClaimSetBuilder
         int Updated,
         int Revoked);
 
+    /// <summary>
+    /// One object this index asserts, as it will be signed. Produced by <see cref="Plan"/> from the
+    /// index alone — no history, no key, nothing that could differ between asking what a publish
+    /// would do and doing it.
+    /// </summary>
+    public sealed record PlannedClaim(
+        ClaimKind Kind, ClaimIdentity Identity, ClaimAudience Audience, string BodyJson);
+
+    /// <summary>
+    /// What a publish would do, worked out without signing anything or writing anything down.
+    ///
+    /// This exists because <see cref="Build"/> cannot answer the question. By the time it has
+    /// returned a <see cref="BuildResult"/> with a revocation count, the claims are signed and the
+    /// caller has journalled the attempt — so a warning built from that number would be shown after
+    /// the decision it is warning about.
+    /// </summary>
+    /// <param name="RemovedReleases">
+    /// Versions this publish withdraws. Permanent: a withdrawn release version can never be
+    /// published again, because after the deletion the proof keeps the revocation but not the body
+    /// or its package hash, so nothing remains to check a re-publication against. This is the list
+    /// the author has to see and agree to.
+    /// </param>
+    /// <param name="RemovedGames">
+    /// Games this publish withdraws. Reversible — a removed game may be re-added — so it is
+    /// reported but does not need the same consent.
+    /// </param>
+    /// <param name="Narrowed">
+    /// Objects somebody could see before and cannot now. Nobody is losing the object, but somebody
+    /// is losing access to it.
+    /// </param>
+    /// <param name="BlockedReleases">
+    /// Versions the index re-asserts that were already withdrawn. <see cref="Build"/> refuses these,
+    /// so surfacing them here turns a failure part-way through publishing into something the author
+    /// is told before they start.
+    /// </param>
+    public sealed record PublishPreview(
+        IReadOnlyList<ClaimIdentity> RemovedReleases,
+        IReadOnlyList<ClaimIdentity> RemovedGames,
+        IReadOnlyList<ClaimIdentity> Narrowed,
+        IReadOnlyList<ClaimIdentity> BlockedReleases,
+        int Unchanged,
+        int Added,
+        int Updated)
+    {
+        /// <summary>True when this publish retires something that can never come back.</summary>
+        public bool HasPermanentRemovals => RemovedReleases.Count > 0;
+
+        /// <summary>
+        /// The withdrawn identities in a fixed order, for whoever is binding a confirmation to them.
+        ///
+        /// Deliberately not hashed here. An identity is a game, a channel and a version — it does
+        /// not name the plugin, the key, the address or the catalog state, so a digest computed at
+        /// this level would be equal for two different plugins withdrawing the same version number,
+        /// and equal across a registry change that retired the signing context. The binding belongs
+        /// where those are known.
+        /// </summary>
+        public IReadOnlyList<string> RemovedReleaseKeys =>
+            [.. RemovedReleases.Select(r => r.ToStorageKey()).OrderBy(k => k, StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The objects this index asserts, in the order they are claimed.
+    ///
+    /// Split out so the preview and the signed set are the same list read twice, rather than two
+    /// enumerations that agree today. A release the preview forgot to mention would be a release the
+    /// author was never warned about losing.
+    /// </summary>
+    public static IReadOnlyList<PlannedClaim> Plan(PluginRepoIndex index)
+    {
+        var plan = new List<PlannedClaim>
+        {
+            // repoVersion is in here because the manager's model requires it to read an index at
+            // all, and the published catalog is projected from these claims — an unsigned copy of a
+            // required field would be one a server could set freely. generatedAt deliberately is
+            // NOT: a timestamp inside the signed set would either re-sign the header on every
+            // publish or announce that something hidden had changed.
+            new(ClaimKind.Header,
+                new ClaimIdentity { Kind = ClaimKind.Header },
+                ClaimAudience.Everyone,
+                Canonicalise(new
+                {
+                    pluginId = index.PluginId,
+                    repoVersion = index.RepoVersion,
+                    author = index.Author
+                }))
+        };
+
+        foreach (var game in index.Games.OrderBy(g => g.GameId, StringComparer.Ordinal))
+        {
+            plan.Add(new PlannedClaim(
+                ClaimKind.Game,
+                new ClaimIdentity { Kind = ClaimKind.Game, GameId = game.GameId },
+                // Game metadata is public; whether it is DISCLOSED depends on whether any release
+                // under it is visible, which is a serving decision, not a signing one. A game whose
+                // only builds are patron-only must not appear for someone who cannot see them.
+                ClaimAudience.Everyone,
+                PublishedGameBody(game)));
+
+            if (!index.ReleasesByGameId.TryGetValue(game.GameId, out var releases)) continue;
+
+            foreach (var release in releases.OrderBy(r => r.Version, StringComparer.Ordinal)
+                         .ThenBy(r => r.Channel, StringComparer.Ordinal))
+            {
+                plan.Add(new PlannedClaim(
+                    ClaimKind.Release,
+                    new ClaimIdentity
+                    {
+                        Kind = ClaimKind.Release,
+                        GameId = game.GameId,
+                        Channel = release.Channel,
+                        Version = release.Version
+                    },
+                    AudienceFor(release),
+                    Canonicalise(release)));
+            }
+        }
+
+        return plan;
+    }
+
+    /// <summary>
+    /// What publishing this index over that history would do — the same comparisons
+    /// <see cref="Build"/> makes, with nothing signed and nothing recorded.
+    /// </summary>
+    public static PublishPreview Preview(PluginRepoIndex index, IReadOnlyList<SignedClaim> previousClaims)
+    {
+        var previousByIdentity = GroupByIdentity(previousClaims);
+        var plan = Plan(index);
+        var planned = new HashSet<string>(plan.Select(p => p.Identity.ToStorageKey()), StringComparer.Ordinal);
+
+        List<ClaimIdentity> narrowed = [], blocked = [], removedReleases = [], removedGames = [];
+        int unchanged = 0, added = 0, updated = 0;
+
+        foreach (var item in plan)
+        {
+            previousByIdentity.TryGetValue(item.Identity.ToStorageKey(), out var history);
+            var previous = LiveClaim(history);
+
+            if (Newest(history)?.Payload.Kind == ClaimKind.Revocation &&
+                item.Identity.Kind == ClaimKind.Release)
+            {
+                blocked.Add(item.Identity);
+                continue;
+            }
+
+            if (previous is null) { added++; continue; }
+
+            if (string.Equals(previous.Payload.BodyJson, item.BodyJson, StringComparison.Ordinal) &&
+                previous.Payload.Audience.SameAs(item.Audience))
+            {
+                unchanged++;
+                continue;
+            }
+
+            updated++;
+            if (IsNarrowing(previous.Payload.Audience, item.Audience)) narrowed.Add(item.Identity);
+        }
+
+        foreach (var (key, history) in previousByIdentity)
+        {
+            if (planned.Contains(key)) continue;
+
+            // Already withdrawn: nothing is being retired by this publish that was not retired
+            // before it, so there is nothing to warn about.
+            var last = Newest(history)!;
+            if (last.Payload.Kind == ClaimKind.Revocation) continue;
+
+            if (last.Payload.Identity.Kind == ClaimKind.Release) removedReleases.Add(last.Payload.Identity);
+            else removedGames.Add(last.Payload.Identity);
+        }
+
+        return new PublishPreview(removedReleases, removedGames, narrowed, blocked, unchanged, added, updated);
+    }
+
+    private static Dictionary<string, List<SignedClaim>> GroupByIdentity(
+        IReadOnlyList<SignedClaim> claims) =>
+        claims
+            .GroupBy(c => c.Payload.Identity.ToStorageKey(), StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+
+    /// <summary>
+    /// The claim that was live for this identity last time, if there was one. A revocation in the
+    /// history does not count as a live claim — it is what withdrew one.
+    /// </summary>
+    private static SignedClaim? LiveClaim(List<SignedClaim>? history) =>
+        history?
+            .Where(c => c.Payload.Kind != ClaimKind.Revocation)
+            .OrderByDescending(c => c.Payload.Seq)
+            .FirstOrDefault();
+
+    private static SignedClaim? Newest(List<SignedClaim>? history) =>
+        history?.OrderByDescending(c => c.Payload.Seq).FirstOrDefault();
+
     public static BuildResult Build(
         PluginRepoIndex index,
         IReadOnlyList<SignedClaim> previousClaims,
         ClaimSigner signer)
     {
-        var previousByIdentity = previousClaims
-            .GroupBy(c => c.Payload.Identity.ToStorageKey(), StringComparer.Ordinal)
-            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var previousByIdentity = GroupByIdentity(previousClaims);
 
         var result = new List<SignedClaim>();
         var seenIdentities = new HashSet<string>(StringComparer.Ordinal);
@@ -47,13 +240,7 @@ public static class ClaimSetBuilder
             seenIdentities.Add(key);
             previousByIdentity.TryGetValue(key, out var history);
 
-            // The live claim from last time, if there was one. A revocation in the history does not
-            // count as a live claim — it is what withdrew one.
-            var previous = history?
-                .Where(c => c.Payload.Kind != ClaimKind.Revocation)
-                .OrderByDescending(c => c.Payload.Seq)
-                .FirstOrDefault();
-
+            var previous = LiveClaim(history);
             var nextSeq = NextSequence(history);
 
             // A withdrawn RELEASE identity is never re-asserted.
@@ -69,8 +256,7 @@ public static class ClaimSetBuilder
             // revocation followed by a higher-sequence live claim for the same identity, which is
             // indistinguishable to a reader from a resurrection spread across two publishes. The
             // builder can tell the difference because it holds the previous set.
-            var newest = history?.OrderByDescending(c => c.Payload.Seq).FirstOrDefault();
-            if (newest?.Payload.Kind == ClaimKind.Revocation && identity.Kind == ClaimKind.Release)
+            if (Newest(history)?.Payload.Kind == ClaimKind.Revocation && identity.Kind == ClaimKind.Release)
             {
                 throw new ClaimFormatException(
                     $"Version {identity.Version} ({identity.Channel}) of {identity.GameId} was " +
@@ -114,50 +300,11 @@ public static class ClaimSetBuilder
             if (previous is null) added++; else updated++;
         }
 
-        // ---- header ----
-        // repoVersion is in here because the manager's model requires it to read an index at all,
-        // and the published catalog is projected from these claims — an unsigned copy of a required
-        // field would be one a server could set freely. generatedAt deliberately is NOT: a
-        // timestamp inside the signed set would either re-sign the header on every publish or
-        // announce that something hidden had changed.
-        Emit(ClaimKind.Header,
-            new ClaimIdentity { Kind = ClaimKind.Header },
-            ClaimAudience.Everyone,
-            Canonicalise(new
-            {
-                pluginId = index.PluginId,
-                repoVersion = index.RepoVersion,
-                author = index.Author
-            }));
-
-        // ---- games and their releases ----
-        foreach (var game in index.Games.OrderBy(g => g.GameId, StringComparer.Ordinal))
-        {
-            Emit(ClaimKind.Game,
-                new ClaimIdentity { Kind = ClaimKind.Game, GameId = game.GameId },
-                // Game metadata is public; whether it is DISCLOSED depends on whether any release
-                // under it is visible, which is a serving decision, not a signing one. A game whose
-                // only builds are patron-only must not appear for someone who cannot see them.
-                ClaimAudience.Everyone,
-                PublishedGameBody(game));
-
-            if (!index.ReleasesByGameId.TryGetValue(game.GameId, out var releases)) continue;
-
-            foreach (var release in releases.OrderBy(r => r.Version, StringComparer.Ordinal)
-                         .ThenBy(r => r.Channel, StringComparer.Ordinal))
-            {
-                Emit(ClaimKind.Release,
-                    new ClaimIdentity
-                    {
-                        Kind = ClaimKind.Release,
-                        GameId = game.GameId,
-                        Channel = release.Channel,
-                        Version = release.Version
-                    },
-                    AudienceFor(release),
-                    Canonicalise(release));
-            }
-        }
+        // ---- everything this index asserts ----
+        // The same list Preview reads. Signing what was previewed, rather than re-deriving it, is
+        // what makes "this publish will withdraw these versions" a promise instead of a guess.
+        foreach (var item in Plan(index))
+            Emit(item.Kind, item.Identity, item.Audience, item.BodyJson);
 
         // ---- things that are gone ----
         foreach (var (key, history) in previousByIdentity)
@@ -173,7 +320,7 @@ public static class ClaimSetBuilder
             foreach (var carried in history.Where(c => c.Payload.Kind == ClaimKind.Revocation))
                 result.Add(carried);
 
-            var last = history.OrderByDescending(c => c.Payload.Seq).First();
+            var last = Newest(history)!;
             if (last.Payload.Kind == ClaimKind.Revocation) continue;
 
             // Revoke at the audience that could see it, so nobody else learns it ever existed.

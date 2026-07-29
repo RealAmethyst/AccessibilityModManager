@@ -55,11 +55,11 @@ public sealed class IndexProofServiceTests : IDisposable
     /// A signed registry as the caller would hand it over — already signature-verified, which is
     /// the precondition, not something this class checks.
     /// </summary>
-    private string Registry(string? publicKeyPem = null, int version = 1) => $$"""
+    private string Registry(string? publicKeyPem = null, int version = 1, string? indexUrl = null) => $$"""
         {
           "registryVersion": "{{version}}",
           "plugins": [
-            { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}",
+            { "id": "amethyst", "repoIndexUrl": "{{indexUrl ?? IndexUrl}}",
               "indexTrust": {
                 "scheme": "signed-claims-v1",
                 "keyId": "{{_signing.KeyId}}",
@@ -70,10 +70,16 @@ public sealed class IndexProofServiceTests : IDisposable
         }
         """;
 
-    /// <summary>A whole publish: prepare, then confirm what came back is what went out.</summary>
+    /// <summary>
+    /// A whole publish the author has already agreed to: preview, carry that preview's token into
+    /// the publish, then confirm what came back is what went out — the real order, so these tests
+    /// exercise the confirmation flow rather than bypassing it with a bare "yes".
+    /// </summary>
     private byte[] Publish(byte[] index, byte[]? live)
     {
-        var prepared = _service.PreparePublish(index, Registry(), "amethyst", live, allowBootstrap: live is null);
+        var prepared = _service.PreparePublish(index, Registry(), "amethyst", live,
+            allowBootstrap: live is null,
+            confirmedDeletions: _service.PreviewPublish(index, Registry(), "amethyst", live).DeletionsToken);
         _service.ConfirmPublished(Anchor(), prepared.IndexJson);
         return prepared.IndexJson;
     }
@@ -266,7 +272,26 @@ public sealed class IndexProofServiceTests : IDisposable
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
             _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", stripped, false));
-        Assert.Contains("nothing at all", ex.Message);
+
+        // Names the actual situation: the index arrived, its proof did not. "There is no index" is a
+        // different failure with a different cause, and telling them apart is the whole point.
+        Assert.Contains("carries no proof at all", ex.Message);
+    }
+
+    [Fact]
+    public void A_missing_index_and_a_stripped_proof_are_not_reported_as_the_same_thing()
+    {
+        var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
+        var stripped = Tamper(live, root => root.Remove("proof"));
+        var index = IndexBytes(releases: Release("1.0.0"));
+
+        var missing = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(index, Registry(), "amethyst", null, false));
+        var unproven = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(index, Registry(), "amethyst", stripped, false));
+
+        Assert.Contains("no index at all", missing.Message);
+        Assert.Contains("carries no proof at all", unproven.Message);
     }
 
     [Fact]
@@ -502,7 +527,10 @@ public sealed class IndexProofServiceTests : IDisposable
 
         // Still at generation 2, so the next publish is 3 — not a second generation 2.
         var next = _service.PreparePublish(
-            IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v2, false);
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v2, false,
+            confirmedDeletions: _service.PreviewPublish(
+                IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v2)
+                .DeletionsToken);
         Assert.Equal(3, next.Pending.Generation);
     }
 
@@ -711,6 +739,299 @@ public sealed class IndexProofServiceTests : IDisposable
         var game2 = ClaimsIn(v3).Single(c =>
             c.Payload.Identity.GameId == "game2" && c.Payload.Kind == ClaimKind.Game);
         Assert.Equal(ClaimKind.Game, game2.Payload.Kind);
+    }
+
+    [Fact]
+    public void The_registry_high_water_mark_only_ever_moves_forwards()
+    {
+        // Recording a registry must never lower the mark, whatever order things happen in. The
+        // read-judge-write is one critical section now, because the two halves fail in opposite
+        // directions: judging against a re-read lets an older registry through while returning
+        // success, and judging against a single earlier read lets it be WRITTEN over a newer one —
+        // so a later, entirely unconcurrent run then accepts the older registry as current.
+        var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")),
+            Registry(version: 7), "amethyst", live, allowBootstrap: false);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreviewPublish(IndexBytes(releases: Release("1.0.0")), Registry(version: 3),
+                "amethyst", live));
+        Assert.Contains("already seen version 7", ex.Message);
+    }
+
+    // ---- who may start a signed history ----
+
+    [Fact]
+    public void A_new_key_can_start_a_history_over_an_index_published_before_signing_existed()
+    {
+        // Today's real state: the live index is a valid unsigned one. If a present-but-unproven
+        // index could not be bootstrapped over, signing could never be switched on without deleting
+        // the live catalog first — which would make whole-file deletion the safer-looking option,
+        // when a hostile server can do either.
+        var legacy = IndexBytes(releases: Release("1.0.0"));
+
+        var prepared = _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(),
+            "amethyst", legacy, allowBootstrap: true);
+
+        Assert.Equal(1, prepared.Pending.Generation);
+    }
+
+    [Fact]
+    public void A_key_restored_from_a_backup_carrying_no_history_cannot_start_one()
+    {
+        // Export before the first publish — which the tool encourages — and the bundle carries no
+        // records. Restoring it leaves a machine that looks exactly like one holding a brand-new
+        // key, while the catalog may be many publishes along. The restored mark cannot cover this:
+        // it is written onto records, and there are none.
+        var backupPath = Path.Combine(_root, "early-backup.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var (_, _, otherKeys, otherService) = NewMachine("early-restore");
+        otherKeys.Import(backupPath, "pp2", "amethyst");
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            otherService.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst",
+                null, allowBootstrap: true));
+
+        Assert.Contains("came from a backup", ex.Message);
+    }
+
+    [Fact]
+    public void A_healthy_looking_restored_machine_still_cannot_start_a_history_at_an_address_it_never_saw()
+    {
+        // The sequence that survives every narrower rule, and needs no forgery.
+        //
+        // The restored mark is CLEARED by a confirmed publish — correctly, because that publish
+        // really was confirmed. So: restore a backup taken at address A, publish once at A, and the
+        // machine now looks entirely healthy — a genuine record, nothing unconfirmed, a real
+        // publish behind it. What it still does not have is any memory of address B, which was
+        // published to after the backup was taken. Re-point there, let the server withhold the
+        // index, and a rule that asks "are there records?" or "is anything unconfirmed?" says yes
+        // and no, and lets the key sign a second generation 1 over a history it cannot see.
+        var liveAtA = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "taken-at-a.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var (_, otherHeads, otherKeys, otherService) = NewMachine("looks-healthy");
+        otherKeys.Import(backupPath, "pp2", "amethyst");
+
+        // The publish at A that clears the restored mark.
+        var atA = otherService.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")),
+            Registry(), "amethyst", liveAtA, allowBootstrap: false, acknowledgeRestoredState: true);
+        otherService.ConfirmPublished(Anchor(), atA.IndexJson);
+
+        Assert.False(otherHeads.HasUnconfirmedRestoredState("amethyst"));
+        Assert.NotEmpty(otherHeads.RecordsFor("amethyst"));
+
+        // ...and B is still refused, because neither of those facts says anything about B.
+        const string addressB = "https://accessibilitymods.com/registry/plugins/amethyst/v2/index.json";
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            otherService.PreparePublish(IndexBytes(releases: Release("1.0.0")),
+                Registry(version: 2, indexUrl: addressB), "amethyst", null, allowBootstrap: true));
+
+        Assert.Contains("came from a backup", ex.Message);
+    }
+
+    [Fact]
+    public void The_machine_that_made_the_key_can_still_start_a_history_at_a_new_address()
+    {
+        // The other side of the rule above: refusing imported keys must not refuse the only machine
+        // that can safely answer the question.
+        Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        const string addressB = "https://accessibilitymods.com/registry/plugins/amethyst/v2/index.json";
+        var prepared = _service.PreparePublish(IndexBytes(releases: Release("1.0.0")),
+            Registry(version: 2, indexUrl: addressB), "amethyst", null, allowBootstrap: true);
+
+        Assert.Equal(1, prepared.Pending.Generation);
+    }
+
+    [Fact]
+    public void A_stale_backup_cannot_start_a_fresh_history_at_a_re_pointed_address()
+    {
+        // The sequence needs no forgery. Back up while publishing at one address; the author later
+        // re-points to a second and publishes there; restore the stale backup; the server serves the
+        // GENUINE newer registry naming the second address and withholds the index there. The
+        // restored record belongs to the old address, so a per-address or per-context question would
+        // never be asked — and the key would sign a first generation at an address it may already
+        // have published to.
+        var live = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        var backupPath = Path.Combine(_root, "stale-backup.json");
+        _keyStore.Export("amethyst", backupPath, "pp2");
+
+        var (_, _, otherKeys, otherService) = NewMachine("re-pointed");
+        otherKeys.Import(backupPath, "pp2", "amethyst");
+
+        const string movedUrl = "https://accessibilitymods.com/registry/plugins/amethyst/v2/index.json";
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            otherService.PreparePublish(IndexBytes(releases: Release("1.0.0")),
+                Registry(version: 2, indexUrl: movedUrl), "amethyst", null, allowBootstrap: true));
+
+        Assert.Contains("restored from a backup", ex.Message);
+        Assert.NotNull(live);
+    }
+
+    private (AuthorConfigService, PublisherHeadStore, ClaimSigningKeyStore, IndexProofService) NewMachine(
+        string name)
+    {
+        var config = new AuthorConfigService(TestLogger.Create(), Path.Combine(_root, name));
+        var heads = new PublisherHeadStore(config, TestLogger.Create());
+        var keys = new ClaimSigningKeyStore(config, heads, TestLogger.Create());
+        return (config, heads, keys, new IndexProofService(keys, heads, TestLogger.Create()));
+    }
+
+    // ---- the warning before a deletion publishes ----
+
+    [Fact]
+    public void A_publish_that_retires_a_version_stops_until_the_author_agrees()
+    {
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), null);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", v1,
+                allowBootstrap: false));
+
+        // Naming the version matters: "one release will be removed" is not something anyone can
+        // check against what they meant to do.
+        Assert.Contains("version 1.1.0 (stable) of game1", ex.Message);
+        Assert.Contains("never be published again", ex.Message);
+    }
+
+    [Fact]
+    public void Refusing_a_deletion_leaves_nothing_journalled_behind_it()
+    {
+        // The refusal has to come BEFORE the journal write, or a publish the author declined would
+        // leave a pending record that blocks the next one.
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), null);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", v1, false));
+
+        // No pending publish is outstanding, so an ordinary publish still goes through.
+        var next = _service.PreparePublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0"), Release("1.2.0")),
+            Registry(), "amethyst", v1, false);
+        Assert.Equal(2, next.Pending.Generation);
+    }
+
+    [Fact]
+    public void Confirming_the_deletion_lets_it_through()
+    {
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), null);
+
+        var prepared = _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(),
+            "amethyst", v1, allowBootstrap: false,
+            confirmedDeletions: _service.PreviewPublish(
+                IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", v1).DeletionsToken);
+
+        Assert.Equal(1, prepared.Build.Revoked);
+    }
+
+    [Fact]
+    public void Removing_a_game_needs_no_such_confirmation()
+    {
+        // It is reported, but it is not permanent — a removed game can be added back, so it is not
+        // the thing the author has to be stopped over.
+        var v1 = Publish(IndexBytes("amethyst", ["game1", "game2"]), null);
+
+        var prepared = _service.PreparePublish(IndexBytes("amethyst", ["game1"]), Registry(),
+            "amethyst", v1, allowBootstrap: false);
+
+        Assert.Equal(1, prepared.Build.Revoked);
+    }
+
+    [Fact]
+    public void A_confirmation_does_not_carry_over_to_a_bigger_deletion()
+    {
+        // The author agrees to lose 1.1.0. Before the publish goes out, the index changes and 1.2.0
+        // would go too. A plain "yes" would have covered a removal nobody was ever shown.
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0"), Release("1.2.0")), null);
+
+        var agreed = _service.PreviewPublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v1);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", v1,
+                allowBootstrap: false, confirmedDeletions: agreed.DeletionsToken));
+
+        Assert.Contains("does not cover it", ex.Message);
+    }
+
+    [Fact]
+    public void A_confirmation_is_bound_to_the_catalog_it_was_shown_for()
+    {
+        // A version number is not an identity. Two plugins can both have "1.1.0 stable of game1", so
+        // a digest over version numbers alone would let an agreement shown for one be spent on the
+        // other — and would survive a registry change that retired the signing context entirely.
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), null);
+        var v2 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0"), Release("1.2.0")), v1);
+
+        // The SAME withdrawal — 1.1.0, in both cases — but against two different catalogs. An
+        // agreement is about a catalog, not about a version number, so these must not be
+        // interchangeable: the author who approved the first was looking at a different published
+        // state from the one the second would edit.
+        var againstV1 = _service.PreviewPublish(IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", v1);
+        var againstV2 = _service.PreviewPublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v2);
+
+        Assert.Equal("1.1.0", Assert.Single(againstV1.Changes.RemovedReleases).Version);
+        Assert.Equal("1.1.0", Assert.Single(againstV2.Changes.RemovedReleases).Version);
+        Assert.NotEqual(againstV1.DeletionsToken, againstV2.DeletionsToken);
+
+        // And the stale one really is refused rather than merely different.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")),
+                Registry(), "amethyst", v2, allowBootstrap: false,
+                confirmedDeletions: againstV1.DeletionsToken));
+        Assert.Contains("does not cover it", ex.Message);
+    }
+
+    [Fact]
+    public void The_token_names_the_set_rather_than_the_count()
+    {
+        // Two different single-version removals must not share a token, or one agreement would
+        // authorise the other.
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0"), Release("1.2.0")), null);
+
+        var dropping110 = _service.PreviewPublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.2.0")), Registry(), "amethyst", v1);
+        var dropping120 = _service.PreviewPublish(
+            IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), Registry(), "amethyst", v1);
+
+        Assert.NotEqual(dropping110.DeletionsToken, dropping120.DeletionsToken);
+        Assert.NotEmpty(dropping110.DeletionsToken);
+    }
+
+    [Fact]
+    public void The_preview_names_what_a_publish_would_retire()
+    {
+        var v1 = Publish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")), null);
+
+        var preview = _service.PreviewPublish(
+            IndexBytes(releases: Release("1.0.0")), Registry(), "amethyst", v1);
+
+        Assert.True(preview.Changes.HasPermanentRemovals);
+        Assert.Equal("1.1.0", Assert.Single(preview.Changes.RemovedReleases).Version);
+    }
+
+    [Fact]
+    public void Asking_what_a_publish_would_do_changes_nothing()
+    {
+        var v1 = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        // Previewed against a NEWER registry than the one published against afterwards. If the
+        // preview recorded a high-water mark on the way past, the publish below would be refused for
+        // using an older registry — and the author would have locked themselves out by looking.
+        _service.PreviewPublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")),
+            Registry(version: 9), "amethyst", v1);
+
+        var prepared = _service.PreparePublish(IndexBytes("amethyst", Release("1.0.0"), Release("1.1.0")),
+            Registry(version: 2), "amethyst", v1, allowBootstrap: false);
+
+        Assert.Equal(2, prepared.Pending.Generation);
     }
 
     // ---- disclosure ----

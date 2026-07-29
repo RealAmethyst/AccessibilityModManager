@@ -425,4 +425,183 @@ public sealed class ClaimSetBuilderTests : IDisposable
 
     private SignedManifest Manifest(IReadOnlyList<SignedClaim> claims) =>
         _signer.SignManifest(1, null, ClaimDigest.Compute(claims));
+
+    // ---- the preview, and its agreement with what actually gets signed ----
+
+    /// <summary>
+    /// The invariant the whole preview rests on: everything Build withdraws, Preview named first.
+    /// Build cannot answer this question itself — by the time it has returned a revocation count the
+    /// claims are signed and the attempt is journalled, so a warning built from that number would
+    /// arrive after the decision it warns about.
+    /// </summary>
+    private void AssertPreviewMatchesBuild(PluginRepoIndex index, IReadOnlyList<SignedClaim> previous)
+    {
+        var preview = ClaimSetBuilder.Preview(index, previous);
+        var built = ClaimSetBuilder.Build(index, previous, _signer);
+
+        Assert.Equal(
+            preview.Narrowed.Count + preview.RemovedReleases.Count + preview.RemovedGames.Count,
+            built.Revoked);
+        Assert.Equal(preview.Added, built.Added);
+        Assert.Equal(preview.Updated, built.Updated);
+        Assert.Equal(preview.Unchanged, built.Unchanged);
+
+        // Counts agreeing is not the property that matters. Two sets of the same size can name
+        // different releases, and the whole point of the preview is that the author was warned about
+        // the ones that actually go. So compare identities.
+        Assert.Equal(
+            preview.RemovedReleases.Concat(preview.RemovedGames)
+                .Select(i => i.ToStorageKey()).OrderBy(k => k, StringComparer.Ordinal),
+            NewlyWithdrawn(built.Claims, previous).OrderBy(k => k, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Identities the new claim set withdraws that the previous one did not — a revocation as the
+    /// newest claim now, where before there was a live one. Narrowing does not appear here: it
+    /// leaves the replacement at a HIGHER sequence, so the identity is still live.
+    /// </summary>
+    private static IEnumerable<string> NewlyWithdrawn(
+        IReadOnlyList<SignedClaim> now, IReadOnlyList<SignedClaim> before)
+    {
+        static Dictionary<string, ClaimKind> NewestKindByIdentity(IReadOnlyList<SignedClaim> claims) =>
+            claims.GroupBy(c => c.Payload.Identity.ToStorageKey(), StringComparer.Ordinal)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderByDescending(c => c.Payload.Seq).First().Payload.Kind,
+                    StringComparer.Ordinal);
+
+        var was = NewestKindByIdentity(before);
+        return NewestKindByIdentity(now)
+            .Where(entry => entry.Value == ClaimKind.Revocation &&
+                            (!was.TryGetValue(entry.Key, out var kind) || kind != ClaimKind.Revocation))
+            .Select(entry => entry.Key);
+    }
+
+    [Fact]
+    public void A_first_publish_previews_as_all_new_and_nothing_lost()
+    {
+        var preview = ClaimSetBuilder.Preview(NewIndex(NewRelease("1.0.0")), []);
+
+        Assert.Equal(3, preview.Added);
+        Assert.Empty(preview.RemovedReleases);
+        Assert.Empty(preview.RemovedGames);
+        Assert.Empty(preview.Narrowed);
+        Assert.False(preview.HasPermanentRemovals);
+        AssertPreviewMatchesBuild(NewIndex(NewRelease("1.0.0")), []);
+    }
+
+    [Fact]
+    public void Republishing_an_unchanged_index_previews_as_nothing_happening()
+    {
+        var index = NewIndex(NewRelease("1.0.0"));
+        var first = ClaimSetBuilder.Build(index, [], _signer);
+
+        var preview = ClaimSetBuilder.Preview(index, first.Claims);
+
+        Assert.Equal(3, preview.Unchanged);
+        Assert.Equal(0, preview.Added + preview.Updated);
+        Assert.False(preview.HasPermanentRemovals);
+        AssertPreviewMatchesBuild(index, first.Claims);
+    }
+
+    [Fact]
+    public void Dropping_a_release_previews_as_a_permanent_removal_naming_the_version()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0")), [], _signer);
+
+        var preview = ClaimSetBuilder.Preview(NewIndex(NewRelease("1.0.0")), first.Claims);
+
+        var gone = Assert.Single(preview.RemovedReleases);
+        Assert.Equal("1.1.0", gone.Version);
+        Assert.Equal("version 1.1.0 (stable) of game1", gone.Describe());
+        Assert.True(preview.HasPermanentRemovals);
+        Assert.Empty(preview.RemovedGames);
+        AssertPreviewMatchesBuild(NewIndex(NewRelease("1.0.0")), first.Claims);
+    }
+
+    [Fact]
+    public void Dropping_a_game_reports_the_game_and_its_releases_separately()
+    {
+        // A removed game may be re-added; a removed release version never may. They are reported
+        // apart because only one of them is the thing the author has to be warned is permanent.
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), [], _signer);
+        var empty = NewIndex();
+        empty.Games.Clear();
+
+        var preview = ClaimSetBuilder.Preview(empty, first.Claims);
+
+        Assert.Equal("game1", Assert.Single(preview.RemovedGames).GameId);
+        Assert.Equal("1.0.0", Assert.Single(preview.RemovedReleases).Version);
+        AssertPreviewMatchesBuild(empty, first.Claims);
+    }
+
+    [Fact]
+    public void A_release_already_withdrawn_is_not_reported_as_being_withdrawn_again()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0")), [], _signer);
+        var afterDeletion = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), first.Claims, _signer);
+
+        var preview = ClaimSetBuilder.Preview(NewIndex(NewRelease("1.0.0")), afterDeletion.Claims);
+
+        Assert.Empty(preview.RemovedReleases);
+        Assert.False(preview.HasPermanentRemovals);
+        AssertPreviewMatchesBuild(NewIndex(NewRelease("1.0.0")), afterDeletion.Claims);
+    }
+
+    [Fact]
+    public void Narrowing_an_audience_previews_as_somebody_losing_access()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t2"))), [], _signer);
+        var narrowed = NewIndex(NewRelease("1.0.0", gate: Gate("t1")));
+
+        var preview = ClaimSetBuilder.Preview(narrowed, first.Claims);
+
+        Assert.Equal("1.0.0", Assert.Single(preview.Narrowed).Version);
+        Assert.Empty(preview.RemovedReleases); // still published, just to fewer people
+        AssertPreviewMatchesBuild(narrowed, first.Claims);
+    }
+
+    [Fact]
+    public void Widening_an_audience_costs_nobody_anything_and_is_not_flagged()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0", gate: Gate("t1"))), [], _signer);
+        var widened = NewIndex(NewRelease("1.0.0", gate: Gate("t1", "t2")));
+
+        var preview = ClaimSetBuilder.Preview(widened, first.Claims);
+
+        Assert.Empty(preview.Narrowed);
+        Assert.Equal(1, preview.Updated);
+        AssertPreviewMatchesBuild(widened, first.Claims);
+    }
+
+    [Fact]
+    public void Re_adding_a_withdrawn_version_is_previewed_as_blocked_rather_than_discovered_by_failing()
+    {
+        var first = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0")), [], _signer);
+        var afterDeletion = ClaimSetBuilder.Build(NewIndex(NewRelease("1.0.0")), first.Claims, _signer);
+        var readded = NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0"));
+
+        var preview = ClaimSetBuilder.Preview(readded, afterDeletion.Claims);
+
+        Assert.Equal("1.1.0", Assert.Single(preview.BlockedReleases).Version);
+
+        // ...and the build really does refuse it, so the preview is describing a real outcome
+        // rather than a caution of its own invention.
+        Assert.Throws<ClaimFormatException>(
+            () => ClaimSetBuilder.Build(readded, afterDeletion.Claims, _signer));
+    }
+
+    [Fact]
+    public void The_plan_is_the_list_that_gets_signed()
+    {
+        // Preview and Build read one list. If this ever diverges, a release could be withdrawn
+        // without the author being warned — which is the failure this split exists to make impossible.
+        var index = NewIndex(NewRelease("1.0.0"), NewRelease("1.1.0", channel: "beta"));
+
+        var planned = ClaimSetBuilder.Plan(index).Select(p => p.Identity.ToStorageKey()).ToList();
+        var signed = ClaimSetBuilder.Build(index, [], _signer)
+            .Claims.Select(c => c.Payload.Identity.ToStorageKey()).ToList();
+
+        Assert.Equal(planned, signed);
+    }
 }

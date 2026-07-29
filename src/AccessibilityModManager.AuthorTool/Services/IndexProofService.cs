@@ -133,28 +133,20 @@ public sealed class IndexProofService(
     /// confirmed by a publish since — see <see cref="PublisherHeadStore.IsRestoredAndUnconfirmed"/>
     /// for why a restore cannot authorise itself.
     /// </param>
+    /// <param name="confirmedDeletions">
+    /// The <see cref="ClaimSetBuilder.PublishPreview.DeletionsToken"/> the author was actually shown
+    /// and agreed to. A withdrawn release version can never be published again, so this is not
+    /// something to discover afterwards from a count — and it is a token rather than a yes, because
+    /// between the preview and here the set can grow, and a bare yes would cover the growth too.
+    /// </param>
     public PreparedPublish PreparePublish(
         byte[] localIndexJson, string verifiedRegistryJson, string pluginId,
-        byte[]? liveIndexJson, bool allowBootstrap, bool acknowledgeRestoredState = false)
+        byte[]? liveIndexJson, bool allowBootstrap, bool acknowledgeRestoredState = false,
+        string? confirmedDeletions = null)
     {
         headStore.RequireRegistryNotOlder(verifiedRegistryJson);
 
-        var anchor = TryReadAnchor(verifiedRegistryJson, pluginId)
-            ?? throw new InvalidOperationException(
-                $"The registry has no signing key recorded for plugin '{pluginId}', so there is nothing " +
-                "to sign this index against yet.");
-
-        var indexText = Encoding.UTF8.GetString(localIndexJson);
-        var index = JsonSerializer.Deserialize<PluginRepoIndex>(indexText, IndexOptions)
-            ?? throw new InvalidOperationException("The index could not be read.");
-
-        if (!string.Equals(index.PluginId, anchor.PluginId, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"This index is for plugin '{index.PluginId}' but the registry entry being signed against " +
-                $"is '{anchor.PluginId}'. Publishing it would produce claims no manager would accept.");
-        }
-
+        var (anchor, index, indexText) = ReadInputs(verifiedRegistryJson, pluginId, localIndexJson);
         var trustContext = ClaimTrustContext.Compute(anchor);
         var record = headStore.TryLoad(trustContext);
 
@@ -172,7 +164,10 @@ public sealed class IndexProofService(
         // check below passes and the key signs a second version of a generation that already
         // exists. The author is the only one who knows whether the number they are looking at is
         // the latest, so they are asked once, and a confirmed publish clears it.
-        if (headStore.IsRestoredAndUnconfirmed(trustContext) && !acknowledgeRestoredState)
+        // Plugin-wide, not context-wide. The doubt belongs to the key: a stale backup plus an
+        // authentic later re-point puts this machine into a context with no record of its own, where
+        // a per-context question would never be asked at all.
+        if (headStore.HasUnconfirmedRestoredState(anchor.PluginId) && !acknowledgeRestoredState)
         {
             throw new InvalidOperationException(
                 $"This machine's publishing history was restored from a backup and hasn't been used " +
@@ -183,7 +178,29 @@ public sealed class IndexProofService(
         }
 
         var live = ReadLiveProof(liveIndexJson, anchor);
-        var previous = RequireExpectedHead(live, record, allowBootstrap);
+        if (live is null && record is null && allowBootstrap) RequireBootstrapPermitted(anchor);
+        var previous = RequireExpectedHead(live, record, allowBootstrap, liveIndexJson is not null);
+
+        // The authoritative deletion check, made against the claim set this publish will really
+        // extend. PreviewPublish shows the author the same answer beforehand, but it is advisory:
+        // it reads whatever is live without applying the head rules, so only this one is allowed to
+        // decide. If the two ever disagree, the publish stops here rather than going out.
+        var preview = ClaimSetBuilder.Preview(index, previous);
+        if (preview.HasPermanentRemovals &&
+            !string.Equals(DeletionsToken(anchor, live?.Manifest?.PayloadHash, preview), confirmedDeletions,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "This publish would withdraw " +
+                string.Join(", ", preview.RemovedReleases.Select(r => r.Describe())) +
+                " from the published catalog. A withdrawn version can never be published again under " +
+                "that number — after the withdrawal there is nothing left to check a re-publication " +
+                "against. Confirm the removal before publishing, or put the version back." +
+                (string.IsNullOrEmpty(confirmedDeletions)
+                    ? ""
+                    : " (What was agreed to is not what this publish would remove, so the earlier " +
+                      "confirmation does not cover it.)"));
+        }
 
         using var signer = keyStore.OpenSigner(anchor);
         var built = ClaimSetBuilder.Build(index, previous, signer);
@@ -219,6 +236,90 @@ public sealed class IndexProofService(
             generation, index.PluginId, built.Unchanged, built.Added, built.Updated, built.Revoked);
 
         return new PreparedPublish(bytes, built, pending);
+    }
+
+    /// <summary>
+    /// What publishing this index would change, worked out without signing anything, journalling
+    /// anything, or moving any high-water mark — so the author can be shown what a publish costs
+    /// before the tool commits to it.
+    ///
+    /// <para>Advisory by design. It reads whatever proof is currently live rather than applying the
+    /// head rules, because a preview that refused to answer until every publishing precondition was
+    /// already satisfied could not be shown before the decision it exists to inform. The binding
+    /// check is inside <see cref="PreparePublish"/>, made against the claim set the publish actually
+    /// extends.</para>
+    /// </summary>
+    public PublishOutlook PreviewPublish(
+        byte[] localIndexJson, string verifiedRegistryJson, string pluginId, byte[]? liveIndexJson)
+    {
+        headStore.CheckRegistryNotOlder(verifiedRegistryJson);
+
+        var (anchor, index, _) = ReadInputs(verifiedRegistryJson, pluginId, localIndexJson);
+        var live = ReadLiveProof(liveIndexJson, anchor);
+        var changes = ClaimSetBuilder.Preview(index, live?.Claims ?? []);
+
+        return new PublishOutlook(changes,
+            DeletionsToken(anchor, live?.Manifest?.PayloadHash, changes));
+    }
+
+    /// <summary>What a publish would change, and the token that agreeing to it produces.</summary>
+    public sealed record PublishOutlook(ClaimSetBuilder.PublishPreview Changes, string DeletionsToken);
+
+    /// <summary>
+    /// Ties a deletion confirmation to the exact thing that was agreed to: these versions, of this
+    /// plugin, under this key and address, extending this catalog.
+    ///
+    /// A digest over the version numbers alone is not enough, and the ways it fails are ordinary
+    /// rather than exotic. Two plugins withdrawing "1.1.0 stable of game1" produce the same list, so
+    /// an agreement shown for one would be accepted for the other. A registry change that re-points
+    /// or rotates retires the signing context entirely, and an agreement made before it must not
+    /// survive into the context that replaces it. And if the live catalog moves between the question
+    /// and the answer, the answer was about a different catalog.
+    /// </summary>
+    private static string DeletionsToken(
+        ClaimTrustAnchor anchor, string? baseManifestHash, ClaimSetBuilder.PublishPreview changes)
+    {
+        if (!changes.HasPermanentRemovals) return "";
+
+        var parts = new List<string>
+        {
+            anchor.PluginId,
+            ClaimTrustContext.Compute(anchor),
+            baseManifestHash ?? ""
+        };
+        parts.AddRange(changes.RemovedReleaseKeys);
+
+        // Length-prefixed, so no arrangement of one field's contents can imitate another's.
+        var preimage = new StringBuilder("amm-deletion-consent-v1\n");
+        foreach (var part in parts) preimage.Append(Encoding.UTF8.GetByteCount(part)).Append(':').Append(part).Append('\n');
+
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(preimage.ToString())));
+    }
+
+    /// <summary>
+    /// The anchor and the index, checked against each other. Shared so a preview and the publish it
+    /// previews can never be reading two different things.
+    /// </summary>
+    private static (ClaimTrustAnchor Anchor, PluginRepoIndex Index, string IndexText) ReadInputs(
+        string verifiedRegistryJson, string pluginId, byte[] localIndexJson)
+    {
+        var anchor = TryReadAnchor(verifiedRegistryJson, pluginId)
+            ?? throw new InvalidOperationException(
+                $"The registry has no signing key recorded for plugin '{pluginId}', so there is nothing " +
+                "to sign this index against yet.");
+
+        var indexText = Encoding.UTF8.GetString(localIndexJson);
+        var index = JsonSerializer.Deserialize<PluginRepoIndex>(indexText, IndexOptions)
+            ?? throw new InvalidOperationException("The index could not be read.");
+
+        if (!string.Equals(index.PluginId, anchor.PluginId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"This index is for plugin '{index.PluginId}' but the registry entry being signed against " +
+                $"is '{anchor.PluginId}'. Publishing it would produce claims no manager would accept.");
+        }
+
+        return (anchor, index, indexText);
     }
 
     /// <summary>
@@ -337,35 +438,112 @@ public sealed class IndexProofService(
     /// catalog has forked under one key. So: equal, or stop and let the author decide what they are
     /// looking at.
     /// </summary>
+    /// <summary>
+    /// Whether starting a fresh signed history here is something this machine is entitled to do.
+    ///
+    /// The author confirming it is necessary but not sufficient. They are being asked "is this the
+    /// beginning?" in a situation that is indistinguishable, from the outside, from a server having
+    /// deleted what was published — so the question is only fair to ask when this machine can
+    /// actually account for the key's past. Two cases where it cannot:
+    ///
+    /// <para><b>A history already published to this exact address.</b> Whatever the trust context,
+    /// the address is the thing a consumer resolves. A record for it means something was published
+    /// there and the proof is now gone: data loss or tampering, never a first publish. Re-pointing
+    /// to a NEW address is the one case where restarting is right, and it is the reason this is
+    /// judged on the address rather than on "has this key ever published".</para>
+    ///
+    /// <para><b>A key that came from a backup carrying no publishing records.</b> A backup taken
+    /// before the first publish restores nothing, so the machine ends up looking exactly like one
+    /// holding a brand-new key while the real catalog may be many publishes along. Nothing local can
+    /// tell those apart, and the permissive reading is the one that reuses every counter.</para>
+    /// </summary>
+    private void RequireBootstrapPermitted(ClaimTrustAnchor anchor)
+    {
+        // Mostly subsumed by the imported-key rule below, since restored state only ever arrives
+        // through an import — but not entirely, and the gap it covers is the real one: a config
+        // written before the key's origin was recorded reads as "made here", and this check is what
+        // still catches it. It also says something more specific when it does fire.
+        if (headStore.HasUnconfirmedRestoredState(anchor.PluginId))
+        {
+            throw new InvalidOperationException(
+                "This machine's publishing history was restored from a backup and hasn't been used " +
+                "to publish since, so nothing here can say whether that backup was the latest one. " +
+                "Starting a new signed history from that position would reissue numbers that may " +
+                "already be in use. Publish once from the machine that has been publishing — or take " +
+                "a fresh backup there and import that — before starting anything new here.");
+        }
+
+        // An imported key may never begin a history, whatever else this machine holds.
+        //
+        // The tempting narrower rule — refuse only when the backup carried NO records — leaves the
+        // hole open, because the records a backup carries say nothing about the ones it does not. A
+        // backup taken while publishing at one address knows nothing about a second address
+        // published to afterwards; restore it, publish once at the first address (which CLEARS the
+        // restored mark, because that publish really was confirmed), and the machine now looks
+        // entirely healthy: a genuine record, nothing unconfirmed, and no memory of the second
+        // address at all. Re-point there, let the server withhold the index, and the key signs a
+        // second generation 1 over a history it cannot see.
+        //
+        // Only the machine that MADE the key can know it has never published anywhere. So a new
+        // address is begun there, and travels to other machines the way everything else does — in a
+        // backup taken afterwards.
+        if (keyStore.WasImported(anchor.PluginId))
+        {
+            throw new InvalidOperationException(
+                "This key came from a backup, so this machine cannot know whether anything has " +
+                "already been published at this address. A backup carries the history it was taken " +
+                "with, and says nothing about what happened afterwards or anywhere else — so " +
+                "starting a new signed history from here could reissue numbers that are already in " +
+                "use. Publish this address for the first time on the machine that created the key, " +
+                "then bring a fresh backup across.");
+        }
+    }
+
+    /// <param name="liveIndexPresent">
+    /// Whether an index was actually served, as opposed to none being there. Only consulted when
+    /// there is no usable proof, and it is the difference between two situations that used to arrive
+    /// at this method looking identical: nothing has ever been published here, versus something is
+    /// published and its proof is missing. The second is what a server that stripped a proof looks
+    /// like, and it is also what an index from before claims existed looks like, so it cannot be
+    /// resolved from here — but it can at least be said out loud instead of being folded into "there
+    /// is nothing published".
+    /// </param>
     private static IReadOnlyList<SignedClaim> RequireExpectedHead(
-        VerifiedProof? live, PublisherRecord? record, bool allowBootstrap)
+        VerifiedProof? live, PublisherRecord? record, bool allowBootstrap, bool liveIndexPresent)
     {
         var committed = record?.Committed;
 
         if (live is null)
         {
+            var whatIsThere = liveIndexPresent
+                ? "the index on the server carries no proof at all"
+                : "the server is offering no index at all";
+
             if (committed is not null)
             {
                 throw new InvalidOperationException(
                     $"This machine published generation {committed.Generation} of this catalog, but " +
-                    "the server is now offering nothing at all. That is either tampering or data " +
-                    "loss, and publishing over the top of it would restart every version counter. " +
-                    "Nothing has been changed.");
+                    $"{whatIsThere}. That is either tampering or data loss, and publishing over the " +
+                    "top of it would restart every version counter. Nothing has been changed.");
             }
 
             if (record is not null)
             {
                 throw new InvalidOperationException(
-                    "This machine has a publishing record for this catalog but the server has no " +
-                    "proof at all. Publishing now would restart the history.");
+                    $"This machine has a publishing record for this catalog but {whatIsThere}. " +
+                    "Publishing now would restart the history.");
             }
 
             if (!allowBootstrap)
             {
                 throw new InvalidOperationException(
-                    "There is no signed history for this catalog yet. Starting one is a deliberate " +
-                    "step, because 'there is nothing published' and 'the server deleted what was " +
-                    "published' look exactly alike from here.");
+                    liveIndexPresent
+                        ? "The index on the server carries no signed history yet. Starting one is a " +
+                          "deliberate step, because an index published before signing existed and an " +
+                          "index whose proof has been stripped look exactly alike from here."
+                        : "There is no signed history for this catalog yet. Starting one is a " +
+                          "deliberate step, because 'there is nothing published' and 'the server " +
+                          "deleted what was published' look exactly alike from here.");
             }
 
             return [];

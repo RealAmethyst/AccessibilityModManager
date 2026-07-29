@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.CatalogClaims;
 using Renci.SshNet;
 using Renci.SshNet.Common;
 using Serilog;
@@ -630,6 +631,328 @@ public sealed class ServerUploadService
 
             _logger.Information("Index live at {Path}", liveIndex);
         }, ct);
+    }
+
+    /// <summary>
+    /// A plugin's published index as read straight off the server.
+    /// </summary>
+    /// <param name="Present">
+    /// False ONLY when the server answered that the path does not exist. Every other outcome —
+    /// permission denied, a dropped connection, a truncated read — throws instead of arriving here,
+    /// because publishing treats absence as permission to start a history over. A read that folded
+    /// failures into "there is nothing published" would hand a hostile or merely broken server the
+    /// one answer it most wants to give.
+    /// </param>
+    public sealed record RemoteIndex(bool Present, byte[]? Bytes);
+
+    /// <summary>
+    /// Reads a plugin's live index over SFTP, which is the only way the publisher may look at it.
+    ///
+    /// Not over HTTPS: once the read API is serving filtered catalogs, an HTTP fetch returns a
+    /// response with the manifest stripped by design, and that is indistinguishable — from here —
+    /// from a server that deleted it.
+    /// </summary>
+    public async Task<RemoteIndex> ReadPluginIndexAsync(
+        ServerUploadConfig cfg, string pluginId, CancellationToken ct)
+    {
+        var validationError = ValidateForCatalog(cfg);
+        if (validationError != null)
+            throw new InvalidOperationException(validationError);
+
+        RequireSafeRemoteSegment(pluginId, "plugin id");
+        var remotePath = JoinPosix(cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId, "index.json");
+
+        return await Task.Run(() =>
+        {
+            using var sftp = OpenSftp(cfg);
+
+            // Only the OPEN may answer "absent" — deliberately not the read that follows it. A
+            // path-not-found surfacing mid-stream is not a file that was never there; it is a
+            // transfer that broke, and letting it reach the same branch would turn a failed read
+            // into permission to start a history over.
+            Stream remote;
+            try
+            {
+                remote = sftp.OpenRead(remotePath);
+            }
+            catch (SftpPathNotFoundException)
+            {
+                // The one failure that is genuinely an answer. Permission denied, a dropped
+                // connection and everything else are separate types and propagate.
+                _logger.Information("No index is published at {Path}", remotePath);
+                return new RemoteIndex(false, null);
+            }
+
+            using (remote)
+                return new RemoteIndex(true, ReadBounded(remote, ClaimProof.MaxIndexBytes, remotePath));
+        }, ct);
+    }
+
+    /// <summary>
+    /// Reads a stream, refusing at the limit rather than after it. Checking the size once everything
+    /// has been buffered is not a limit — by then the server has already had whatever it wanted out
+    /// of this machine's memory.
+    /// </summary>
+    private static byte[] ReadBounded(Stream source, int maxBytes, string what)
+    {
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+
+        int read;
+        while ((read = source.Read(chunk, 0, chunk.Length)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+            {
+                throw new InvalidOperationException(
+                    $"'{what}' on the server is larger than {maxBytes} bytes, so it was not read. " +
+                    "An index that size is not one this tool published.");
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
+
+    /// <summary>
+    /// A publish lock this machine is holding: where it is, and what is in it.
+    /// </summary>
+    /// <param name="RemotePath">
+    /// Resolved once, at acquisition, and carried rather than recomputed — releasing must target the
+    /// file that was actually taken, even if the configured lock root changed in between.
+    /// </param>
+    public sealed record PublishLockHandle(string RemotePath, PublishLockBody Body);
+
+    /// <summary>
+    /// Takes the publish lock for one plugin, so two copies of the tool cannot build on the same
+    /// head at once.
+    ///
+    /// The exclusive create is what decides: SSH.NET's <see cref="FileMode.CreateNew"/> is
+    /// <c>SSH_FXF_CREAT|SSH_FXF_EXCL</c> (verified against the shipped assembly: <c>Flags.CreateNew</c>
+    /// is <c>0x28</c>), which OpenSSH's sftp-server performs as a single <c>O_CREAT|O_EXCL</c> open.
+    ///
+    /// <para>See <see cref="PublishLock"/> for what this does and does not protect against — in
+    /// short, it coordinates the author's own machines and is no defence against a hostile
+    /// server.</para>
+    /// </summary>
+    /// <exception cref="PublishLockHeldException">Someone else holds it.</exception>
+    public async Task<PublishLockHandle> AcquirePublishLockAsync(
+        ServerUploadConfig cfg, string pluginId, CancellationToken ct)
+    {
+        var validationError = ValidateForCatalog(cfg);
+        if (validationError != null)
+            throw new InvalidOperationException(validationError);
+
+        var fileName = PublishLock.FileNameFor(pluginId);
+        var body = PublishLock.NewBody(pluginId);
+
+        return await Task.Run(() =>
+        {
+            using var sftp = OpenSftp(cfg);
+            var lockRoot = ResolveLockRoot(sftp, cfg);
+            var lockPath = JoinPosix(lockRoot, fileName);
+
+            var created = false;
+            try
+            {
+                using var stream = sftp.Open(lockPath, FileMode.CreateNew, FileAccess.Write);
+                created = true;
+                stream.Write(PublishLock.Serialize(body));
+            }
+            catch (Exception ex) when (ex is SshException or IOException)
+            {
+                // Failing AFTER the create is our own mess, not somebody else's lock. Without this
+                // branch the probe below would find the empty file we just made and report it as a
+                // lock held by an unreadable holder — leaving a lock nobody holds, blocking the next
+                // publish for a reason that has nothing to do with concurrency.
+                if (created)
+                {
+                    TryDeleteRemote(sftp, lockPath);
+                    throw new InvalidOperationException(
+                        $"Couldn't write the publish lock at '{lockPath}': {ex.Message}", ex);
+                }
+
+                // SFTP version 3 — which is what OpenSSH speaks — has no distinct "already exists"
+                // status, so an existing file comes back as the generic SSH_FX_FAILURE. The probe
+                // below only decides the WORDING: the exclusive create above is what actually
+                // arbitrates, and it already failed.
+                var existing = PublishLock.TryParse(ReadCapped(sftp, lockPath, PublishLock.MaxBodyBytes), pluginId);
+                if (existing is not null || sftp.Exists(lockPath))
+                {
+                    throw new PublishLockHeldException(
+                        existing is not null
+                            ? $"Another copy of this tool is publishing '{pluginId}' right now " +
+                              $"({existing.Describe()}). Wait for it to finish. If nothing is really " +
+                              "running, an earlier publish was interrupted and left the lock behind — " +
+                              "that has to be cleared deliberately."
+                            : $"There is already a publish lock for '{pluginId}' on the server, and it " +
+                              "couldn't be read. Publishing is stopped until it's clear what holds it.",
+                        existing);
+                }
+
+                throw new InvalidOperationException(
+                    $"Couldn't take the publish lock at '{lockPath}': {ex.Message}", ex);
+            }
+
+            _logger.Information("Took the publish lock for {PluginId} at {Path}", pluginId, lockPath);
+            return new PublishLockHandle(lockPath, body);
+        }, ct);
+    }
+
+    /// <summary>
+    /// Gives the lock back, but only when the token in it is still ours.
+    ///
+    /// A lock that was broken and retaken belongs to whoever is publishing under it now, and
+    /// deleting it because we once held it would take it out from under them.
+    /// </summary>
+    public async Task<PublishLockRelease> ReleasePublishLockAsync(
+        ServerUploadConfig cfg, PublishLockHandle handle, CancellationToken ct)
+    {
+        var validationError = ValidateForCatalog(cfg);
+        if (validationError != null)
+            throw new InvalidOperationException(validationError);
+
+        return await Task.Run(() =>
+        {
+            using var sftp = OpenSftp(cfg);
+
+            var found = PublishLock.TryParse(ReadCapped(sftp, handle.RemotePath, PublishLock.MaxBodyBytes), handle.Body.PluginId);
+            if (found is null && !sftp.Exists(handle.RemotePath))
+            {
+                _logger.Warning("The publish lock at {Path} was already gone", handle.RemotePath);
+                return PublishLockRelease.AlreadyGone;
+            }
+
+            if (!PublishLock.IsOurs(found, handle.Body))
+            {
+                _logger.Warning(
+                    "The publish lock at {Path} is no longer ours — leaving it alone", handle.RemotePath);
+                return PublishLockRelease.NotOurs;
+            }
+
+            sftp.DeleteFile(handle.RemotePath);
+            _logger.Information("Released the publish lock at {Path}", handle.RemotePath);
+            return PublishLockRelease.Released;
+        }, ct);
+    }
+
+    /// <summary>
+    /// What is holding a plugin's publish lock, if anything. Null when there is none; a null
+    /// <see cref="PublishLockBody"/> with a true <c>Present</c> means there is a file there that
+    /// isn't a lock this version understands.
+    /// </summary>
+    public async Task<(bool Present, PublishLockBody? Body)> ReadPublishLockAsync(
+        ServerUploadConfig cfg, string pluginId, CancellationToken ct)
+    {
+        var validationError = ValidateForCatalog(cfg);
+        if (validationError != null)
+            throw new InvalidOperationException(validationError);
+
+        var fileName = PublishLock.FileNameFor(pluginId);
+
+        return await Task.Run<(bool, PublishLockBody?)>(() =>
+        {
+            using var sftp = OpenSftp(cfg);
+            var lockPath = JoinPosix(ResolveLockRoot(sftp, cfg), fileName);
+            var body = PublishLock.TryParse(ReadCapped(sftp, lockPath, PublishLock.MaxBodyBytes), pluginId);
+            return body is not null ? (true, body) : (sftp.Exists(lockPath), null);
+        }, ct);
+    }
+
+    /// <summary>
+    /// Removes a plugin's publish lock whoever holds it.
+    ///
+    /// Only ever called behind an explicit confirmation that every other copy of the tool is closed.
+    /// An interrupted publish leaves a lock nobody holds, and this is how that is cleared — but a
+    /// lock in the way is not by itself a reason to remove it, which is why this is separate from
+    /// acquisition rather than a retry inside it.
+    /// </summary>
+    public async Task BreakPublishLockAsync(ServerUploadConfig cfg, string pluginId, CancellationToken ct)
+    {
+        var validationError = ValidateForCatalog(cfg);
+        if (validationError != null)
+            throw new InvalidOperationException(validationError);
+
+        var fileName = PublishLock.FileNameFor(pluginId);
+
+        await Task.Run(() =>
+        {
+            using var sftp = OpenSftp(cfg);
+            var lockPath = JoinPosix(ResolveLockRoot(sftp, cfg), fileName);
+            if (!sftp.Exists(lockPath)) return;
+
+            sftp.DeleteFile(lockPath);
+            _logger.Warning("Broke the publish lock for {PluginId} at {Path}", pluginId, lockPath);
+        }, ct);
+    }
+
+    /// <summary>
+    /// Works out the lock directory for this connection and makes sure it exists.
+    ///
+    /// A root the author configured must already be there: creating it would turn a typo into a
+    /// stray directory that silently becomes the lock namespace, and two machines disagreeing about
+    /// where the lock lives is exactly the state the lock exists to prevent. The default one, under
+    /// the SSH home, is created on first use because nobody asked for it.
+    /// </summary>
+    private string ResolveLockRoot(SftpClient sftp, ServerUploadConfig cfg)
+    {
+        var configured = cfg.RemoteLockRoot;
+        var lockRoot = PublishLock.ResolveRoot(
+            configured, sftp.WorkingDirectory, cfg.RemoteCatalogRoot, cfg.RemoteBasePath);
+
+        if (sftp.Exists(lockRoot)) return lockRoot;
+
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            throw new InvalidOperationException(
+                $"The publish lock folder '{lockRoot}' doesn't exist on the server. Create it, or " +
+                "clear the setting to use the default under your home directory.");
+        }
+
+        try
+        {
+            sftp.CreateDirectory(lockRoot);
+            _logger.Information("Created the publish lock folder {Path}", lockRoot);
+        }
+        catch (Exception ex) when (ex is SshException or IOException)
+        {
+            // Two machines publishing different plugins for the first time can both find it missing.
+            // Whoever lost the race still has the directory they needed.
+            if (!sftp.Exists(lockRoot))
+            {
+                throw new InvalidOperationException(
+                    $"Couldn't create the publish lock folder '{lockRoot}': {ex.Message}", ex);
+            }
+        }
+
+        return lockRoot;
+    }
+
+    /// <summary>
+    /// Reads a small remote file, or null when it isn't there. Bounded, because the file comes from
+    /// a server that may be lying about how big a lock is.
+    /// </summary>
+    private static byte[]? ReadCapped(SftpClient sftp, string remotePath, int maxBytes)
+    {
+        try
+        {
+            using var remote = sftp.OpenRead(remotePath);
+            using var buffer = new MemoryStream();
+
+            var chunk = new byte[8192];
+            int read;
+            while ((read = remote.Read(chunk, 0, chunk.Length)) > 0)
+            {
+                buffer.Write(chunk, 0, read);
+                if (buffer.Length > maxBytes) return null;
+            }
+
+            return buffer.ToArray();
+        }
+        catch (Exception ex) when (ex is SshException or IOException)
+        {
+            return null;
+        }
     }
 
     private void TryDeleteRemote(SftpClient sftp, string path)

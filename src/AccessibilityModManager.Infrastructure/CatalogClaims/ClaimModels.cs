@@ -46,6 +46,18 @@ public sealed record ClaimIdentity
         string.Equals(Version, other.Version, StringComparison.Ordinal);
 
     /// <summary>
+    /// How this object is named to the author — for the confirmation that has to say exactly what a
+    /// publish is about to withdraw. Never used as a key: <see cref="ToStorageKey"/> is.
+    /// </summary>
+    public string Describe() => Kind switch
+    {
+        ClaimKind.Header => "the plugin's details",
+        ClaimKind.Game => $"the game '{GameId}'",
+        ClaimKind.Release => $"version {Version} ({Channel}) of {GameId}",
+        _ => $"{Kind} {GameId} {Version}".TrimEnd()
+    };
+
+    /// <summary>
     /// A stable string form for use as a dictionary key and in the manager's replay records. Built
     /// from length-prefixed parts so no value can be crafted to collide with a different identity.
     /// </summary>

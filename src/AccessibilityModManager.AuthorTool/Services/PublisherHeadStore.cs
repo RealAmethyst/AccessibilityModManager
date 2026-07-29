@@ -74,6 +74,16 @@ public sealed record PublisherRecord
     [JsonPropertyName("pluginId")]
     public required string PluginId { get; init; }
 
+    // Deliberately NOT recording the index address here.
+    //
+    // It was added to tell a genuine re-point apart from a proof that had gone missing, and it paid
+    // for neither. When the address is unchanged the trust context is identical, so the record for
+    // it already refuses; the field's only distinct effect was to block a same-address KEY ROTATION,
+    // which is the documented compromise-recovery operation. And this record travels inside the
+    // signed key backup, whose signature covers the re-serialized model — so a new member turns
+    // every backup written before it into one that fails to verify, discovered at the exact moment
+    // someone needs it.
+
     [JsonPropertyName("committed")]
     public PublisherHead? Committed { get; init; }
 
@@ -194,11 +204,84 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
     /// </summary>
     public void RequireRegistryNotOlder(string registryJson)
     {
-        var version = ReadRegistryVersion(registryJson);
-        var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(registryJson)));
+        System.IO.Directory.CreateDirectory(Directory);
         var path = Path.Combine(Directory, "registry-highwater.json");
 
+        // Read, judge and record inside ONE cross-process critical section.
+        //
+        // Neither half works alone, and both failures are silent. Checking and then re-reading let a
+        // second copy record version 3 in between, so this one compared its version 2 against a
+        // fresh 3, found "2 > 3" false, wrote nothing — and RETURNED SUCCESSFULLY, publishing
+        // against a registry the machine had already moved past. Judging against a single earlier
+        // read fixes that and breaks the other direction instead: the same interleaving then leaves
+        // "2 > 1" true, and version 2 is written OVER version 3, walking the high-water backwards so
+        // that a later, entirely unconcurrent run accepts the older registry as current.
+        //
+        // A mark that only ever moves forwards cannot be maintained by two processes taking turns
+        // guessing. So they take turns properly.
+        using var gate = AcquireHighWaterGate();
+
         var seen = TryLoadHighWater(path);
+        var (version, hash) = Validate(registryJson, seen);
+
+        if (seen is null || version > seen.Version)
+        {
+            DurableFile.Write(path, System.Text.Encoding.UTF8.GetBytes(
+                JsonSerializer.Serialize(new RegistryHighWater { Version = version, Sha256 = hash }, Json)));
+        }
+    }
+
+    /// <summary>
+    /// Exclusive access to the registry high-water mark, for as long as the returned handle lives.
+    ///
+    /// A lock file rather than a named mutex: an abandoned mutex from a killed process surfaces as
+    /// an exception that is easy to swallow into "carry on", whereas a file handle is released by
+    /// the operating system when the process dies, whatever killed it.
+    /// </summary>
+    private FileStream AcquireHighWaterGate()
+    {
+        var path = Path.Combine(Directory, "registry-highwater.lock");
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+
+        while (true)
+        {
+            try
+            {
+                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(50);
+            }
+            catch (IOException ex)
+            {
+                throw new InvalidOperationException(
+                    "Another copy of this tool has been holding the publishing state for more than " +
+                    "ten seconds. Close the other one and try again — two copies recording what has " +
+                    "been published is how a version number gets used twice.", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The same judgement as <see cref="RequireRegistryNotOlder"/>, recording nothing.
+    ///
+    /// Split out for the publish preview, which answers "what would this do" and must not move a
+    /// high-water mark on the way past. Asking a question is not the same as acting on the answer,
+    /// and only one of those should leave a trace.
+    /// </summary>
+    public (long Version, string Sha256) CheckRegistryNotOlder(string registryJson) =>
+        Validate(registryJson, TryLoadHighWater(Path.Combine(Directory, "registry-highwater.json")));
+
+    /// <summary>
+    /// Judges a registry against one particular reading of the high-water mark, which the caller
+    /// supplies so that refusing and recording can be decided on the same value.
+    /// </summary>
+    private static (long Version, string Sha256) Validate(string registryJson, RegistryHighWater? seen)
+    {
+        var version = ReadRegistryVersion(registryJson);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(registryJson)));
+
         if (seen is not null)
         {
             if (version < seen.Version)
@@ -217,12 +300,7 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
             }
         }
 
-        if (seen is null || version > seen.Version)
-        {
-            System.IO.Directory.CreateDirectory(Directory);
-            DurableFile.Write(path, System.Text.Encoding.UTF8.GetBytes(
-                JsonSerializer.Serialize(new RegistryHighWater { Version = version, Sha256 = hash }, Json)));
-        }
+        return (version, hash);
     }
 
     /// <summary>
@@ -377,6 +455,21 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
     public bool IsRestoredAndUnconfirmed(string trustContext) =>
         TryLoad(trustContext)?.RestoredUnconfirmed == true;
 
+    /// <summary>
+    /// Whether ANY of this plugin's publishing state came out of a backup and has not been confirmed
+    /// since — regardless of which trust context it belongs to.
+    ///
+    /// The doubt a restore creates belongs to the KEY, not to one address. Asking only about the
+    /// current context leaves a way through: restore a backup taken while publishing at one address,
+    /// let the server serve a genuinely newer signed registry that re-points to a second address,
+    /// and the context being published to now has no record at all — so the per-context question is
+    /// never asked, and the key signs a first generation at an address it may already have published
+    /// to. The registry in that sequence is authentic and the re-point real; only the backup is
+    /// stale, and staleness is the one thing a backup can never disprove.
+    /// </summary>
+    public bool HasUnconfirmedRestoredState(string pluginId) =>
+        RecordsFor(pluginId).Any(r => r.RestoredUnconfirmed);
+
     /// <summary>The exact bytes a pending publish prepared, if they are still on disk.</summary>
     public byte[]? TryReadPendingIndex(string trustContext)
     {
@@ -389,7 +482,8 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
     /// Durable before anything touches the server — that ordering is the whole point.
     /// </summary>
     public void WritePending(
-        string trustContext, string pluginId, PublisherHead? committed, PendingPublish pending, byte[] indexBytes)
+        string trustContext, string pluginId, PublisherHead? committed,
+        PendingPublish pending, byte[] indexBytes)
     {
         System.IO.Directory.CreateDirectory(Directory);
         DurableFile.Write(PendingIndexPathFor(trustContext), indexBytes);

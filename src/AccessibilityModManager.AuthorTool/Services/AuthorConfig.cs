@@ -82,6 +82,26 @@ public sealed class ClaimSigningConfig
 
     /// <summary>SHA-256 of the key's DER SubjectPublicKeyInfo, for display and comparison.</summary>
     public string PublicKeyFingerprint { get; set; } = "";
+
+    /// <summary>
+    /// True when this key arrived in a backup rather than being made here.
+    ///
+    /// It is the difference between "this key has never signed anything anywhere" and "this key has
+    /// a past this machine may not have been told about". A backup taken before the first publish
+    /// carries no publishing records, so restoring it leaves a machine that looks exactly like one
+    /// holding a brand-new key — while the real catalog may be many publishes along. Starting a
+    /// fresh signed history from that state would reuse every counter, so an imported key with no
+    /// records is refused rather than trusted.
+    ///
+    /// <para>Deliberately a plain bool, so a config written before this existed reads as "made
+    /// here". Treating the absent value as unknown-and-therefore-imported would be the fail-closed
+    /// choice and is the wrong one: it would refuse the FIRST signed publish on the very machine
+    /// that created the key, which is the only rollout path there is. The window that leaves is
+    /// narrow and worth stating — a key imported before this field existed, from a backup that
+    /// carried no records — and it is empty today, because nothing has been published yet, so a
+    /// recordless backup is currently the accurate one.</para>
+    /// </summary>
+    public bool ImportedFromBackup { get; set; }
 }
 
 /// <summary>
@@ -117,6 +137,35 @@ public sealed class ServerUploadConfig
     /// staged uploads and atomic renames. Absent in old configs → the known default.
     /// </summary>
     public string RemoteCatalogRoot { get; set; } = "/var/www/accessibilitymods.com/registry";
+
+    /// <summary>
+    /// Where per-plugin publish locks are kept on the server. Empty means the known default:
+    /// <c>.amm-publish-locks</c> under the SSH account's home directory.
+    /// <para>
+    /// It must sit outside every folder the web server hands out, and that is checked rather than
+    /// assumed. A lock file names the machine that took it and when, so inside a served directory it
+    /// would be a publicly readable record of who publishes and how often.
+    /// </para>
+    /// <para>
+    /// <b>Every machine publishing one catalog MUST resolve this to the same directory, and nothing
+    /// here can enforce that.</b> Leaving it empty is what makes it true without anyone having to
+    /// think: the default is derived from the SSH account's own home, so two machines using the same
+    /// account agree by construction. Setting it explicitly on one machine and not another — or
+    /// publishing through two different SSH accounts — gives each its own lock file, and each takes
+    /// its own lock successfully while the other is mid-publish.
+    /// </para>
+    /// <para>
+    /// <b>That produces a forked catalog, not merely a stuck publish.</b> It is tempting to think
+    /// the read-back catches it: two publishers build on one head, the second rename wins, and the
+    /// loser finds bytes that are not the ones it sent. That is only one interleaving. Let A rename,
+    /// read back, and commit BEFORE B renames, and then B renames, reads back, and commits too —
+    /// each verified its own output, each holds a valid proof, and two differently-signed
+    /// generations now exist under one key for a server to choose between. The read-back confirms a
+    /// publish landed intact; it is not a mutex, and the single-writer head check cannot see a
+    /// second machine's head.
+    /// </para>
+    /// </summary>
+    public string RemoteLockRoot { get; set; } = "";
 
     /// <summary>
     /// Path to the OpenSSH-format private key on the local machine. SSH.NET reads this

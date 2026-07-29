@@ -209,6 +209,14 @@ public sealed class ClaimSigningKeyStore(
     /// convenient — otherwise a key kept for one plugin could sign for another the registry names,
     /// and a key the registry has moved on from could go on signing under a retired identity.
     /// </summary>
+    /// <summary>
+    /// Whether this plugin's key came out of a backup rather than being created here. See
+    /// <see cref="ClaimSigningConfig.ImportedFromBackup"/> for why it decides whether a fresh signed
+    /// history may be started. A plugin with no key at all answers false — there is nothing to
+    /// publish with, and that is a different refusal.
+    /// </summary>
+    public bool WasImported(string pluginId) => TryGet(pluginId)?.ImportedFromBackup == true;
+
     public ClaimSigner OpenSigner(ClaimTrustAnchor anchor)
     {
         var signing = TryGet(anchor.PluginId)
@@ -437,7 +445,8 @@ public sealed class ClaimSigningKeyStore(
             PrivateKeyPath = path,
             Passphrase = sourcePassphrase.ToString(),
             PublicKeyPem = publicPem,
-            PublicKeyFingerprint = fingerprint
+            PublicKeyFingerprint = fingerprint,
+            ImportedFromBackup = true
         };
 
         // Publishing state before the key is usable, not after. A crash between the two used to
