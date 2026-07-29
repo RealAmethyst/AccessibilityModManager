@@ -3,18 +3,29 @@ using Serilog;
 
 namespace AccessibilityModManager.AuthorTool.Services;
 
+/// <summary>
+/// The published index, read the only way anyone acting on this machine's own publishing state is
+/// allowed to read it.
+///
+/// <para>Over SFTP, never HTTPS: once the read API serves filtered catalogs an HTTP fetch returns a
+/// document with the manifest stripped by design, and that is indistinguishable — from here — from a
+/// server that deleted it.</para>
+/// </summary>
+public interface IPublishedIndexReader
+{
+    /// <summary>
+    /// Absence must be proven, never inferred from a failed read — see
+    /// <see cref="ServerUploadService.RemoteIndex"/>.
+    /// </summary>
+    Task<ServerUploadService.RemoteIndex> ReadIndexAsync(string pluginId, CancellationToken ct);
+}
+
 /// <summary>The server, reduced to the four things publishing needs from it.</summary>
-public interface IPublishTransport
+public interface IPublishTransport : IPublishedIndexReader
 {
     Task<ServerUploadService.PublishLockHandle> AcquireLockAsync(string pluginId, CancellationToken ct);
 
     Task<PublishLockRelease> ReleaseLockAsync(ServerUploadService.PublishLockHandle handle, CancellationToken ct);
-
-    /// <summary>
-    /// The live index over SFTP. Absence must be proven, never inferred from a failed read — see
-    /// <see cref="ServerUploadService.RemoteIndex"/>.
-    /// </summary>
-    Task<ServerUploadService.RemoteIndex> ReadIndexAsync(string pluginId, CancellationToken ct);
 
     /// <summary>
     /// Uploads and switches, running <paramref name="beforeSwitchAsync"/> in the gap between the two.

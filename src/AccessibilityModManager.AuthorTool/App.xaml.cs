@@ -46,6 +46,15 @@ public partial class App : Application
         services.AddSingleton<PatreonAuthorService>();
         services.AddSingleton<ServerUploadService>();
 
+        // The signed-catalog side. Registered together because they only mean anything together:
+        // the head store is this machine's memory of what it published, the key store holds what it
+        // published with, and the proof service is the only thing allowed to read either into a
+        // decision.
+        services.AddSingleton<PublisherHeadStore>();
+        services.AddSingleton<ClaimSigningKeyStore>();
+        services.AddSingleton<IndexProofService>();
+        services.AddSingleton<ProjectReconciler>();
+
         services.AddTransient<ProjectPickerViewModel>();
         services.AddTransient<IndexEditorViewModel>();
 
@@ -136,7 +145,8 @@ public partial class App : Application
             (existingIds, repos) => ShowAddGameDialog(existingIds, repos),
             (pluginId, existing) => ShowAuthorInfoDialog(pluginId, existing),
             () => ShowServerUploadSettingsDialog(sp),
-            sp.GetRequiredService<RegistryMembershipChecker>());
+            sp.GetRequiredService<RegistryMembershipChecker>(),
+            sp.GetRequiredService<ProjectReconciler>());
     }
 
     private static void ShowServerUploadSettingsDialog(IServiceProvider sp)

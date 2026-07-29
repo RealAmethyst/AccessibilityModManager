@@ -43,6 +43,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly Func<string, PluginAuthorInfo?, PluginAuthorInfo?> _showAuthorInfoDialog;
     private readonly Action _showServerUploadSettingsDialog;
     private readonly RegistryMembershipChecker _registryChecker;
+    private readonly ProjectReconciler _reconciler;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -118,7 +119,8 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         Func<ISet<string>, ObservableCollection<string>, AddGameDialogViewModel?> showAddGameDialog,
         Func<string, PluginAuthorInfo?, PluginAuthorInfo?> showAuthorInfoDialog,
         Action showServerUploadSettingsDialog,
-        RegistryMembershipChecker registryChecker)
+        RegistryMembershipChecker registryChecker,
+        ProjectReconciler reconciler)
     {
         _projectPath = projectPath;
         _configService = configService;
@@ -138,6 +140,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         _showAuthorInfoDialog = showAuthorInfoDialog;
         _showServerUploadSettingsDialog = showServerUploadSettingsDialog;
         _registryChecker = registryChecker;
+        _reconciler = reconciler;
 
         _patreon.StateChanged += OnPatreonStateChanged;
 
@@ -147,20 +150,182 @@ public sealed partial class IndexEditorViewModel : ObservableObject
 
         _ = LoadGitHubReposAsync();
         _ = CheckRegistryMembershipAsync();
-        _ = CaptureLiveIndexBaselineAsync();
+        _ = ReconcileWithPublishedCatalogAsync();
     }
 
-    private async Task CaptureLiveIndexBaselineAsync()
+    /// <summary>
+    /// Works out, in the background, whether the published catalog has moved on — and adopts it only
+    /// if the folder is still exactly as this method found it.
+    ///
+    /// <para>It runs unawaited because opening a project must not wait on the network: the window
+    /// appears at once and stays usable. The cost of that is a race this used to lose. The author can
+    /// start typing while the fetch is in flight, and the continuation would then overwrite
+    /// <c>index.json</c> and reload the model out from under them. So the exact bytes it started from
+    /// are captured first, and nothing is written unless those bytes are still on disk and nothing
+    /// has been edited since. The continuation resumes on the UI thread, so there is no gap between
+    /// that check and the write for a keystroke to fall into.</para>
+    ///
+    /// <para>Declining is not silent. Carrying on against a stale copy is the situation the author
+    /// most needs to know about, since the next publish is the one that discovers it.</para>
+    /// </summary>
+    private async Task ReconcileWithPublishedCatalogAsync()
     {
+        byte[] localAtStart;
         try
         {
-            _liveIndexAtLoad = await TryFetchLiveIndexAsync();
-            if (_liveIndexAtLoad is not null)
-                ReconcileWithLiveIndex(_liveIndexAtLoad);
+            localAtStart = File.ReadAllBytes(Path.Combine(_projectPath, "index.json"));
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "Couldn't capture the live index baseline at load");
+            _logger.Warning(ex, "Couldn't read the local index to compare it with the published one");
+            return;
+        }
+
+        try
+        {
+            var cfg = _configService.GetServerUploadConfig();
+            var outcome = await _reconciler.InspectAsync(
+                cfg is null ? null : new ServerUploadPublishTransport(_serverUploadService, cfg),
+                new RegistryVerifiedSource(_registryChecker),
+                _index.PluginId, localAtStart,
+                _configService.GetLastPublishedIndexSha(_projectPath), CancellationToken.None);
+
+            if (outcome.Action == ReconcileAction.Explain)
+            {
+                StatusMessage = outcome.Message;
+                return;
+            }
+
+            if (outcome.Action == ReconcileAction.Unsigned)
+            {
+                // No key is anchored for this plugin, so this is the catalog as it has always been:
+                // adopt over HTTPS exactly as before, presets and scripts kept local.
+                //
+                // _liveIndexAtLoad records what the server was SERVING when this opened, which is
+                // what the publish-time third-party check compares against. That is an observation
+                // and stays true whether or not it was adopted.
+                _liveIndexAtLoad = await TryFetchLiveIndexAsync();
+                if (_liveIndexAtLoad is null) return;
+
+                if (StillUntouched(localAtStart)) ReconcileWithLiveIndex(_liveIndexAtLoad);
+                else AnnounceRaceLost();
+                return;
+            }
+
+            if (outcome.Action is not (ReconcileAction.Adopt or ReconcileAction.AdoptWithConsent)) return;
+
+            // Read once, and immediately before the write it guards. Everything from here to the
+            // replacement is synchronous on the UI thread, so the author cannot get an edit in
+            // between.
+            if (!StillUntouched(localAtStart))
+            {
+                AnnounceRaceLost();
+                return;
+            }
+
+            if (outcome.Action == ReconcileAction.AdoptWithConsent &&
+                !_confirmDialog("Your copy and the published one differ", outcome.Message!))
+            {
+                StatusMessage = "Kept your local copy. It differs from what's published until you publish it.";
+                return;
+            }
+
+            AdoptVerifiedCatalog(outcome, localAtStart);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't reconcile with the published catalog at load");
+        }
+    }
+
+    /// <summary>
+    /// Whether the folder is still exactly what reconciliation started from.
+    ///
+    /// <para>Both halves are needed and they catch different things: unsaved changes are edits that
+    /// exist only in this window, and a changed file is one another program wrote — or one this
+    /// window already saved. Either way the copy on disk is no longer the copy that was compared.</para>
+    /// </summary>
+    private bool StillUntouched(byte[] localAtStart)
+    {
+        if (HasUnsavedChanges) return false;
+
+        try
+        {
+            return File.ReadAllBytes(Path.Combine(_projectPath, "index.json"))
+                .AsSpan().SequenceEqual(localAtStart);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't re-read the local index before adopting the published one");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Says why the folder was left alone when reconciliation was overtaken by the author.
+    /// </summary>
+    private void AnnounceRaceLost() =>
+        StatusMessage = "What's published isn't the same as this folder — but you'd already started " +
+                        "editing, so nothing was replaced. Reopen the project to compare again.";
+
+    /// <summary>
+    /// Writes the verified catalog into the folder. Every field in it came out of a signed claim,
+    /// and the author's own fields were carried across before it got here.
+    ///
+    /// <para>Through <see cref="DurableFile"/> rather than a plain write, because the file being
+    /// replaced is the author's own work and a half-written index.json is a project that will not
+    /// open. Everything that can fail is separated by whether the file has been replaced yet, so the
+    /// message can never say the folder is unchanged when it is not — that reassurance is only
+    /// useful if it is always true.</para>
+    /// </summary>
+    private void AdoptVerifiedCatalog(ReconcileOutcome outcome, byte[] localAtStart)
+    {
+        // Compared again here, with nothing between it and the write. The caller compared too, only
+        // so a question is not asked about an adoption that is about to be refused — a confirmation
+        // dialog is a person thinking, and the folder can move while they do.
+        if (HasUnsavedChanges)
+        {
+            AnnounceRaceLost();
+            return;
+        }
+
+        var replaced = LocalIndexAdoption.ReplaceIfUnchanged(
+            Path.Combine(_projectPath, "index.json"), localAtStart, outcome.Document!, out var error);
+
+        if (replaced == AdoptionResult.Superseded)
+        {
+            AnnounceRaceLost();
+            return;
+        }
+
+        if (replaced == AdoptionResult.Failed)
+        {
+            _logger.Error("Couldn't adopt the published catalog for {Project}: {Error}", _projectPath, error);
+            _showInfoDialog("Couldn't take the published copy",
+                $"{error}\n\nThis folder's copy is unchanged.");
+            return;
+        }
+
+        try
+        {
+            _index = LoadOrThrow();
+            RebuildGameList();
+            if (Games.Count > 0) SelectedGame = Games[0];
+            HasUnsavedChanges = false;
+            RecordPublishedIndex(outcome.Document!);
+
+            StatusMessage = $"Loaded publish {outcome.Generation} from the server — this folder's copy " +
+                            "was out of date. Your presets and default scripts were kept.";
+            _logger.Information("Adopted verified publish {Generation} for {Project}",
+                outcome.Generation, _projectPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Adopted the published catalog but couldn't reload it for {Project}",
+                _projectPath);
+            _showInfoDialog("Took the published copy, but couldn't load it",
+                $"{ex.Message}\n\nThis folder now holds publish {outcome.Generation}. Close and reopen " +
+                "the project.");
         }
     }
 
