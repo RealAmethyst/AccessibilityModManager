@@ -456,19 +456,39 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
         TryLoad(trustContext)?.RestoredUnconfirmed == true;
 
     /// <summary>
-    /// Whether ANY of this plugin's publishing state came out of a backup and has not been confirmed
-    /// since — regardless of which trust context it belongs to.
+    /// Whether the restore this machine's state came from is still unsettled for the address about
+    /// to be published to.
     ///
-    /// The doubt a restore creates belongs to the KEY, not to one address. Asking only about the
-    /// current context leaves a way through: restore a backup taken while publishing at one address,
-    /// let the server serve a genuinely newer signed registry that re-points to a second address,
-    /// and the context being published to now has no record at all — so the per-context question is
-    /// never asked, and the key signs a first generation at an address it may already have published
-    /// to. The registry in that sequence is authentic and the re-point real; only the backup is
-    /// stale, and staleness is the one thing a backup can never disprove.
+    /// <para>Two questions, and the answer to "what about the other contexts?" is deliberate rather
+    /// than incidental. When there IS a record for this context, that record's own mark decides: it
+    /// is the head about to be extended, and it is what a confirmed publish under this context
+    /// proves out.</para>
+    ///
+    /// <para>When there is NO record for this context, any restored mark anywhere for the plugin
+    /// counts. That is the shape the doubt is laundered through: restore a backup taken while
+    /// publishing at one address, let the server serve a genuinely newer signed registry that
+    /// re-points to a second, and the context being published to has no record at all — so a
+    /// question asked only about the current context would never be asked. The registry in that
+    /// sequence is authentic and the re-point real; only the backup is stale, and staleness is the
+    /// one thing a backup can never disprove.</para>
+    ///
+    /// <para>What this deliberately does NOT do is let a retired address keep asking forever. A
+    /// backup carries every context's record and a restore marks them all, so a plugin that has ever
+    /// been re-pointed or re-keyed arrives with marks that no publish can ever clear — the retired
+    /// address is retired, and nothing will publish to it again. Gating the live address on those
+    /// would put an unanswerable question in front of every single publish, and a security question
+    /// asked every time is one nobody reads.</para>
     /// </summary>
-    public bool HasUnconfirmedRestoredState(string pluginId) =>
-        RecordsFor(pluginId).Any(r => r.RestoredUnconfirmed);
+    public bool HasUnconfirmedRestoredState(string pluginId, string trustContext)
+    {
+        var records = RecordsFor(pluginId);
+        var here = records.FirstOrDefault(r =>
+            string.Equals(r.TrustContext, trustContext, StringComparison.Ordinal));
+
+        return here is not null
+            ? here.RestoredUnconfirmed
+            : records.Any(r => r.RestoredUnconfirmed);
+    }
 
     /// <summary>The exact bytes a pending publish prepared, if they are still on disk.</summary>
     public byte[]? TryReadPendingIndex(string trustContext)
@@ -485,6 +505,12 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
         string trustContext, string pluginId, PublisherHead? committed,
         PendingPublish pending, byte[] indexBytes)
     {
+        // Carried across, not rebuilt from nothing. Only a publish this machine has SEEN work turns
+        // state it merely believes into state it knows, and journalling an attempt is not that —
+        // least of all an attempt that then fails before the switch, which leaves the machine
+        // exactly where it started with the question quietly marked as answered.
+        var restored = TryLoad(trustContext)?.RestoredUnconfirmed == true;
+
         System.IO.Directory.CreateDirectory(Directory);
         DurableFile.Write(PendingIndexPathFor(trustContext), indexBytes);
 
@@ -493,7 +519,8 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
             TrustContext = trustContext,
             PluginId = pluginId,
             Committed = committed,
-            Pending = pending
+            Pending = pending,
+            RestoredUnconfirmed = restored
         });
 
         logger.Information(
@@ -525,17 +552,21 @@ public sealed class PublisherHeadStore(AuthorConfigService configService, ILogge
 
     /// <summary>
     /// Drops a pending publish that has been established never to have landed. The committed head
-    /// is left exactly as it was.
+    /// is left exactly as it was — and so is any doubt about where that head came from, because
+    /// nothing about an abandoned attempt settles it.
     /// </summary>
     public void DiscardPending(string trustContext, string pluginId, PublisherHead? committed)
     {
+        var restored = TryLoad(trustContext)?.RestoredUnconfirmed == true;
+
         System.IO.Directory.CreateDirectory(Directory);
         Write(new PublisherRecord
         {
             TrustContext = trustContext,
             PluginId = pluginId,
             Committed = committed,
-            Pending = null
+            Pending = null,
+            RestoredUnconfirmed = restored
         });
 
         TryDelete(PendingIndexPathFor(trustContext));

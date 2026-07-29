@@ -822,7 +822,7 @@ public sealed class IndexProofServiceTests : IDisposable
             Registry(), "amethyst", liveAtA, allowBootstrap: false, acknowledgeRestoredState: true);
         otherService.ConfirmPublished(Anchor(), atA.IndexJson);
 
-        Assert.False(otherHeads.HasUnconfirmedRestoredState("amethyst"));
+        Assert.False(otherHeads.HasUnconfirmedRestoredState("amethyst", ClaimTrustContext.Compute(Anchor())));
         Assert.NotEmpty(otherHeads.RecordsFor("amethyst"));
 
         // ...and B is still refused, because neither of those facts says anything about B.

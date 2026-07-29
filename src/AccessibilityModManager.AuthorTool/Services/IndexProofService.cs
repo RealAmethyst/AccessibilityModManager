@@ -167,7 +167,7 @@ public sealed class IndexProofService(
         // Plugin-wide, not context-wide. The doubt belongs to the key: a stale backup plus an
         // authentic later re-point puts this machine into a context with no record of its own, where
         // a per-context question would never be asked at all.
-        if (headStore.HasUnconfirmedRestoredState(anchor.PluginId) && !acknowledgeRestoredState)
+        if (headStore.HasUnconfirmedRestoredState(anchor.PluginId, trustContext) && !acknowledgeRestoredState)
         {
             throw new InvalidOperationException(
                 $"This machine's publishing history was restored from a backup and hasn't been used " +
@@ -178,7 +178,7 @@ public sealed class IndexProofService(
         }
 
         var live = ReadLiveProof(liveIndexJson, anchor);
-        if (live is null && record is null && allowBootstrap) RequireBootstrapPermitted(anchor);
+        if (live is null && record is null && allowBootstrap) RequireBootstrapPermitted(anchor, trustContext);
         var previous = RequireExpectedHead(live, record, allowBootstrap, liveIndexJson is not null);
 
         // The authoritative deletion check, made against the claim set this publish will really
@@ -264,6 +264,72 @@ public sealed class IndexProofService(
 
     /// <summary>What a publish would change, and the token that agreeing to it produces.</summary>
     public sealed record PublishOutlook(ClaimSetBuilder.PublishPreview Changes, string DeletionsToken);
+
+    /// <summary>What is published under one anchor right now, as far as its proof can be believed.</summary>
+    /// <param name="Present">Whether an index was served at all. False is proven absence, never a failed read.</param>
+    /// <param name="Generation">Which publish the live proof says it is; null when there is no proof.</param>
+    /// <param name="ManifestHash">
+    /// The live head, to compare against this machine's committed one. Null when unsigned.
+    /// </param>
+    public sealed record LiveCatalogState(
+        bool Present, long? Generation, string? ManifestHash, IReadOnlyList<SignedClaim> Claims)
+    {
+        /// <summary>True when a proof is there and it verified against the registry's key.</summary>
+        public bool Signed => ManifestHash is not null;
+    }
+
+    /// <summary>
+    /// Whether the published document and the local one say the same thing, once the proof — the one
+    /// part that is only ever added on the way out — is set aside.
+    ///
+    /// <para>This is what lets "there is nothing to publish" survive signing. The two files can no
+    /// longer be compared byte for byte, because the published one carries a proof the local one
+    /// never does; without this, every publish would look like a change, and with a careless version
+    /// of it the FIRST signed publish would look like a no-op and be skipped.</para>
+    ///
+    /// <para>Both sides are re-serialized through the same writer before comparing, so indentation
+    /// and escaping differences between what this tool wrote and what the author's editor saved do
+    /// not read as a change. Anything that cannot be parsed answers "not the same", which only ever
+    /// costs a publish that was going to happen anyway.</para>
+    /// </summary>
+    public static bool SameCatalogIgnoringProof(byte[] liveIndexJson, byte[] localIndexJson)
+    {
+        try
+        {
+            var live = JsonNode.Parse(liveIndexJson)?.AsObject();
+            var local = JsonNode.Parse(localIndexJson)?.AsObject();
+            if (live is null || local is null) return false;
+
+            live.Remove("proof");
+
+            return string.Equals(
+                live.ToJsonString(IndexOptions), local.ToJsonString(IndexOptions), StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Looks at what is live without preparing to replace it — so the author can be asked the right
+    /// question, with the right numbers in it, before anything is signed or journalled.
+    ///
+    /// <para>Read-only in every sense that matters: no key is opened, no counter moves, no high-water
+    /// mark is touched, and nothing is written down. It refuses on exactly the same terms
+    /// <see cref="PreparePublish"/> does, because a proof that does not verify is not a state to
+    /// report — it is a stop.</para>
+    /// </summary>
+    public LiveCatalogState InspectLive(ClaimTrustAnchor anchor, byte[]? liveIndexJson)
+    {
+        var live = ReadLiveProof(liveIndexJson, anchor);
+
+        return new LiveCatalogState(
+            Present: liveIndexJson is not null,
+            Generation: live?.Manifest?.Manifest.Generation,
+            ManifestHash: live?.Manifest?.PayloadHash,
+            Claims: live?.Claims ?? []);
+    }
 
     /// <summary>
     /// Ties a deletion confirmation to the exact thing that was agreed to: these versions, of this
@@ -457,13 +523,18 @@ public sealed class IndexProofService(
     /// holding a brand-new key while the real catalog may be many publishes along. Nothing local can
     /// tell those apart, and the permissive reading is the one that reuses every counter.</para>
     /// </summary>
-    private void RequireBootstrapPermitted(ClaimTrustAnchor anchor)
+    private void RequireBootstrapPermitted(ClaimTrustAnchor anchor, string trustContext)
     {
         // Mostly subsumed by the imported-key rule below, since restored state only ever arrives
         // through an import — but not entirely, and the gap it covers is the real one: a config
         // written before the key's origin was recorded reads as "made here", and this check is what
         // still catches it. It also says something more specific when it does fire.
-        if (headStore.HasUnconfirmedRestoredState(anchor.PluginId))
+        //
+        // Bootstrapping means there is no record for this context, so the check below is asking its
+        // widest question: is ANY of this key's history only believed? That is the right one here —
+        // starting a history at an address this machine cannot account for is exactly the act a
+        // stale backup makes look reasonable.
+        if (headStore.HasUnconfirmedRestoredState(anchor.PluginId, trustContext))
         {
             throw new InvalidOperationException(
                 "This machine's publishing history was restored from a backup and hasn't been used " +

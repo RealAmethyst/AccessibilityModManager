@@ -11,6 +11,27 @@ using Serilog;
 namespace AccessibilityModManager.AuthorTool.Services;
 
 /// <summary>
+/// A publish that did not complete, and the one thing that decides what may be done about it.
+/// </summary>
+/// <param name="renameAttempted">
+/// Whether the rename that switches the live index was reached.
+///
+/// <para>False means the live index is provably untouched: the connection, the upload, or the
+/// pre-switch check failed, and the file the world reads is still the old one. Only then may the
+/// caller drop its journalled record of the attempt.</para>
+///
+/// <para>True means it may have landed — including when the rename itself threw, because a
+/// connection lost mid-rename is indistinguishable from one the server completed before the reply
+/// went missing. The journal must survive, or the only evidence that this machine may have
+/// published is gone, and the next attempt signs a second version of the same publish.</para>
+/// </param>
+public sealed class IndexPublishFailedException(string message, bool renameAttempted, Exception? inner)
+    : Exception(message, inner)
+{
+    public bool RenameAttempted { get; } = renameAttempted;
+}
+
+/// <summary>
 /// Uploads a wrapped ZIP + generated <c>gate.json</c> to the author's Patreon-gate download
 /// server over SFTP, and publishes the catalog (signed registry pair, per-plugin indexes) to
 /// the same box. Authentication uses the same SSH private key the author already configured
@@ -595,42 +616,93 @@ public sealed class ServerUploadService
     /// single atomic posix-rename — every manager request sees either the complete old index
     /// or the complete new one, never a partial file.
     /// </summary>
+    /// <param name="beforeSwitchAsync">
+    /// Run after the upload and immediately before the rename, to make a last check that the world
+    /// has not moved while the file was going up.
+    ///
+    /// <para>It sits here rather than in the caller because a check made before this method returns
+    /// leaves the entire upload — seconds to minutes of it — between the check and the switch. Here
+    /// the gap is a few instructions.</para>
+    ///
+    /// <para>Deliberately takes no cancellation token: this runs after the publish has been
+    /// journalled, where "give up" is not one of the available answers. It refuses by throwing, and
+    /// a refusal is the one failure that guarantees the live index was never touched.</para>
+    /// </param>
+    /// <exception cref="IndexPublishFailedException">
+    /// Every failure, carrying whether the rename was attempted.
+    /// </exception>
     public async Task PublishIndexAsync(
-        ServerUploadConfig cfg, string pluginId, byte[] indexJson, CancellationToken ct)
+        ServerUploadConfig cfg, string pluginId, byte[] indexJson,
+        Func<Task>? beforeSwitchAsync, CancellationToken ct)
     {
-        var validationError = ValidateForCatalog(cfg);
-        if (validationError != null)
-            throw new InvalidOperationException(validationError);
+        // The one fact the caller has to branch on, so it is one variable, set in one place,
+        // immediately before the call it describes, and never cleared. It lives out here because
+        // every exit from this method has to be able to report it — including the ones that happen
+        // before the connection is even opened.
+        var renameAttempted = false;
 
-        RequireSafeRemoteSegment(pluginId, "plugin id");
-        var remoteDir = JoinPosix(cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
-        var liveIndex = JoinPosix(remoteDir, "index.json");
-        var tempIndex = JoinPosix(remoteDir, $".index.json.{Guid.NewGuid():N}.tmp");
-
-        await Task.Run(() =>
+        try
         {
-            using var sftp = OpenSftp(cfg);
+            var validationError = ValidateForCatalog(cfg);
+            if (validationError != null)
+                throw new InvalidOperationException(validationError);
 
-            if (!sftp.Exists(cfg.RemoteCatalogRoot.TrimEnd('/')))
-                throw new InvalidOperationException(
-                    $"Remote catalog folder '{cfg.RemoteCatalogRoot}' doesn't exist on the server. " +
-                    "Check the catalog root in Server upload settings.");
-            EnsureRemoteDirectory(sftp, cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
+            RequireSafeRemoteSegment(pluginId, "plugin id");
+            var remoteDir = JoinPosix(cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
+            var liveIndex = JoinPosix(remoteDir, "index.json");
+            var tempIndex = JoinPosix(remoteDir, $".index.json.{Guid.NewGuid():N}.tmp");
 
-            try
+            await Task.Run(() =>
             {
-                using (var src = new MemoryStream(indexJson))
-                    sftp.UploadFile(src, tempIndex, canOverride: true);
-                sftp.RenameFile(tempIndex, liveIndex, isPosix: true);
-            }
-            catch
-            {
-                TryDeleteRemote(sftp, tempIndex);
-                throw;
-            }
+                SftpClient? sftp = null;
+                try
+                {
+                    sftp = OpenSftp(cfg);
 
-            _logger.Information("Index live at {Path}", liveIndex);
-        }, ct);
+                    if (!sftp.Exists(cfg.RemoteCatalogRoot.TrimEnd('/')))
+                        throw new InvalidOperationException(
+                            $"Remote catalog folder '{cfg.RemoteCatalogRoot}' doesn't exist on the server. " +
+                            "Check the catalog root in Server upload settings.");
+                    EnsureRemoteDirectory(sftp, cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
+
+                    using (var src = new MemoryStream(indexJson))
+                        sftp.UploadFile(src, tempIndex, canOverride: true);
+
+                    // Blocking rather than restructuring this method around an await, so the SFTP
+                    // session stays on the single thread every other operation in this class uses it
+                    // from. There is no synchronisation context on a thread-pool thread, so there is
+                    // nothing here to deadlock against.
+                    beforeSwitchAsync?.Invoke().GetAwaiter().GetResult();
+
+                    renameAttempted = true;
+                    sftp.RenameFile(tempIndex, liveIndex, isPosix: true);
+
+                    _logger.Information("Index live at {Path}", liveIndex);
+                }
+                catch
+                {
+                    // Best-effort, and it swallows its own failures: tidying up must never become
+                    // the exception the caller sees, because that exception is what says whether the
+                    // switch ran.
+                    if (sftp is not null) TryDeleteRemote(sftp, tempIndex);
+                    throw;
+                }
+                finally
+                {
+                    // Same reason. Disposing a session that has just died can throw, and that would
+                    // replace a classified failure with an unclassified one.
+                    try { sftp?.Dispose(); }
+                    catch (Exception ex) { _logger.Warning(ex, "Couldn't close the SFTP session cleanly"); }
+                }
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            // One boundary around everything, so there is no way out of this method that does not
+            // say whether the rename was reached — not a bad config, not a failed connection, not
+            // something nobody thought of.
+            throw new IndexPublishFailedException(ex.Message, renameAttempted, ex);
+        }
     }
 
     /// <summary>

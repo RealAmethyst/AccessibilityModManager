@@ -959,7 +959,8 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             }
 
             StatusMessage = "Publishing index...";
-            await _serverUploadService.PublishIndexAsync(cfg, _index.PluginId, candidate, CancellationToken.None);
+            await _serverUploadService.PublishIndexAsync(
+                cfg, _index.PluginId, candidate, beforeSwitchAsync: null, CancellationToken.None);
 
             var verify = await TryFetchLiveIndexAsync();
             if (verify is null || !verify.AsSpan().SequenceEqual(candidate))
