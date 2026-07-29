@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -1123,5 +1124,138 @@ public sealed class IndexProofServiceTests : IDisposable
     {
         var registry = """{ "registryVersion": "1", "plugins": [] }""";
         Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+    }
+
+    /// <summary>
+    /// A dependency preset — the author-only template that fills in a dependency's download URL and
+    /// hash when they add one to a game.
+    /// </summary>
+    private static JsonObject Preset(string id, string downloadUrl) => new()
+    {
+        ["id"] = id,
+        ["displayName"] = id,
+        ["dependency"] = new JsonObject
+        {
+            ["id"] = id,
+            ["type"] = "framework",
+            ["downloadUrl"] = downloadUrl
+        }
+    };
+
+    // ---- reading the published catalog back, for a folder that is about to be overwritten ----
+
+    [Fact]
+    public void Nothing_can_declare_a_document_verified_without_having_verified_it()
+    {
+        // These types ARE the evidence — every check downstream reads "this is a VerifiedProof" as
+        // proof that signatures were checked and the catalog was rebuilt from claims. A public
+        // constructor added later would let any caller manufacture that conclusion for a document
+        // the server wrote, and nothing further along would ask again. The compiler enforces this;
+        // the test is here so that removing the enforcement is a failure rather than a convenience.
+        //
+        // "Not public" means not reachable from anywhere, including from here: there is deliberately
+        // no InternalsVisibleTo. Granting one to this assembly would hand the tests every internal in
+        // the other one — the VerifiedProof constructor included — and a guarantee this assembly can
+        // step around is not one this assembly can honestly assert.
+        Assert.Empty(typeof(VerifiedProof).GetConstructors());
+        Assert.Empty(typeof(IndexProofService.VerifiedCatalog).GetConstructors());
+
+        // And the projection cannot be reached with a bare list of claims, which carry their own
+        // signatures but no evidence that anyone checked them.
+        Assert.Null(typeof(ClaimAcceptance).GetMethod(
+            "Accept", BindingFlags.Public | BindingFlags.Static));
+    }
+
+    [Fact]
+    public void The_published_catalog_is_read_from_the_claims_and_not_from_the_file_around_them()
+    {
+        var published = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        // The plaintext beside a proof is not covered by the manifest, so whoever holds the file can
+        // rewrite it and every signature still verifies. This is the whole reason the catalog is
+        // rebuilt rather than read: a package URL and its matching hash, rewritten together, is an
+        // install the manager's own hash gate would wave straight through.
+        var rewritten = Tamper(published, root =>
+        {
+            root["repoVersion"] = "666";
+            root["releasesByGameId"]!["game1"]![0]!["sha256"] = new string('f', 64);
+            root["releasesByGameId"]!["game1"]![0]!["packageUrl"] = "https://evil.example.com/p.zip";
+        });
+
+        var catalog = _service.ReadPublishedCatalog(Anchor(), rewritten)!;
+
+        Assert.DoesNotContain("evil.example.com", catalog.CatalogJson);
+        Assert.DoesNotContain(new string('f', 64), catalog.CatalogJson);
+        Assert.DoesNotContain("666", catalog.CatalogJson);
+        Assert.Equal(1, catalog.Generation);
+    }
+
+    [Fact]
+    public void The_published_catalog_carries_no_proof_of_its_own()
+    {
+        var published = Publish(IndexBytes(releases: Release("1.0.0")), null);
+
+        // It goes on at publish and comes off here. A proof written into the author's folder would
+        // be signed over on the next publish, wrapping one generation inside another.
+        Assert.DoesNotContain("\"proof\"", _service.ReadPublishedCatalog(Anchor(), published)!.CatalogJson);
+    }
+
+    [Fact]
+    public void An_unsigned_or_absent_published_index_offers_nothing_to_adopt()
+    {
+        // Null here means "leave the folder alone", never "take what was served". Both of these are
+        // the ordinary state before signing is switched on, and both are also exactly what a
+        // stripped proof looks like.
+        Assert.Null(_service.ReadPublishedCatalog(Anchor(), IndexBytes(releases: Release("1.0.0"))));
+        Assert.Null(_service.ReadPublishedCatalog(Anchor(), null));
+    }
+
+    [Fact]
+    public void A_proof_that_does_not_verify_offers_nothing_to_adopt()
+    {
+        var published = Publish(IndexBytes(releases: Release("1.0.0")), null);
+        var broken = Tamper(published, root =>
+            root["proof"]!["claims"]![0]!["signature"] = Convert.ToBase64String(new byte[512]));
+
+        Assert.Throws<InvalidOperationException>(() => _service.ReadPublishedCatalog(Anchor(), broken));
+    }
+
+    [Fact]
+    public void Adopting_a_published_catalog_keeps_what_belongs_to_the_author()
+    {
+        var local = Tamper(IndexBytes(releases: Release("1.0.0")), root =>
+        {
+            root["generatedAt"] = "2030-01-01T00:00:00Z";
+            root["dependencyPresets"] = new JsonArray(Preset("mine", "https://example.com/dep.zip"));
+        });
+        var published = Publish(local, null);
+        var catalog = _service.ReadPublishedCatalog(Anchor(), published)!;
+
+        var document = Encoding.UTF8.GetString(
+            IndexProofService.BuildLocalDocument(catalog, local));
+
+        // generatedAt is deliberately unsigned, so the projection has only a stand-in for it.
+        Assert.Contains("2030-01-01", document);
+        Assert.Contains("\"mine\"", document);
+    }
+
+    [Fact]
+    public void Adopting_never_takes_an_author_only_field_from_the_server()
+    {
+        var local = IndexBytes(releases: Release("1.0.0"));
+        var published = Publish(local, null);
+
+        // No claim will ever cover a preset, so nothing downstream protects one — and a preset fills
+        // in a dependency's download URL and hash. A server that could put one in the author's
+        // folder would be choosing what the author signs next.
+        var withServerPresets = Tamper(published, root =>
+            root["dependencyPresets"] = new JsonArray(Preset("theirs", "https://evil.example.com/x.zip")));
+
+        var catalog = _service.ReadPublishedCatalog(Anchor(), withServerPresets)!;
+        var document = Encoding.UTF8.GetString(
+            IndexProofService.BuildLocalDocument(catalog, local));
+
+        Assert.DoesNotContain("theirs", document);
+        Assert.DoesNotContain("evil.example.com", document);
     }
 }

@@ -62,7 +62,25 @@ public sealed class ClaimAcceptanceTests : IDisposable
         {"gameId":"{{gameId}}","pluginId":"amethyst","version":"{{version}}","channel":"{{channel}}","packageUrl":"{{url}}","sha256":"{{sha}}"}
         """;
 
-    private void Accept(params SignedClaim[] claims) => ClaimAcceptance.Accept(claims, _anchor);
+    /// <summary>
+    /// Runs a claim set through the door a real consumer comes in by, rather than calling the
+    /// acceptance rules directly.
+    ///
+    /// <para>Two things fall out of that. The signatures on these claims are genuinely checked, so
+    /// every test below proves its rule is reachable in production instead of only through a test
+    /// seam. And nothing outside the verification code needs to be able to reach the projection at
+    /// all — a claim carries its signature but no evidence that anyone checked it, so a caller
+    /// holding a bare list of them must not be able to turn one into a catalog.</para>
+    /// </summary>
+    private void Accept(params SignedClaim[] claims) =>
+        ClaimProof.ReadVerified(new ClaimProofDocument
+        {
+            Scheme = _anchor.Scheme,
+            KeyId = _anchor.KeyId,
+            Algorithm = _anchor.Algorithm,
+            Claims = [.. claims.Select(c => new ClaimProofEntry(
+                Convert.ToBase64String(c.PayloadBytes), Convert.ToBase64String(c.Signature)))]
+        }, _anchor, requireManifest: false);
 
     [Fact]
     public void A_coherent_set_is_accepted()

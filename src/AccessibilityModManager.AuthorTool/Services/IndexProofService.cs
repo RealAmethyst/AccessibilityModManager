@@ -279,6 +279,91 @@ public sealed class IndexProofService(
     }
 
     /// <summary>
+    /// The published catalog, rebuilt from its signed claims and nothing else.
+    ///
+    /// <para>Everything it reports is taken from the <see cref="VerifiedProof"/> it was built
+    /// around, and that proof can only be produced by the verification code in another assembly. So
+    /// this type cannot be assembled here at all — not from the live plaintext, not from a
+    /// hand-written string, not by a later refactor that finds it convenient. The guarantee is the
+    /// type's, not a comment's.</para>
+    /// </summary>
+    public sealed class VerifiedCatalog
+    {
+        private readonly SignedManifest _manifest;
+
+        internal VerifiedCatalog(VerifiedProof proof)
+        {
+            _manifest = proof.Manifest
+                ?? throw new InvalidOperationException(
+                    "A published catalog is only meaningful with the manifest it was published " +
+                    "under — without one there is no way to tell whether part of it was removed.");
+            CatalogJson = proof.CatalogJson;
+        }
+
+        /// <summary>Which publish this is.</summary>
+        public long Generation => _manifest.Manifest.Generation;
+
+        /// <summary>The head to compare against this machine's own record.</summary>
+        public string ManifestHash => _manifest.PayloadHash;
+
+        /// <summary>
+        /// Every field here came out of a signed claim. Nothing came from the document the proof
+        /// travelled inside, and there is no proof in it.
+        /// </summary>
+        public string CatalogJson { get; }
+    }
+
+    /// <summary>
+    /// What is published, as the claims describe it — for a caller about to write it into the
+    /// author's project folder.
+    ///
+    /// <para>Null when there is no proof to read, and that null means "leave the local copy alone",
+    /// never "adopt what was served". An unsigned published index is the ordinary state before an
+    /// author switches signing on, and it is also exactly what a stripped proof looks like; neither
+    /// is something to take a catalog from. A proof that exists and does not verify throws, because
+    /// that is not a state at all.</para>
+    /// </summary>
+    public VerifiedCatalog? ReadPublishedCatalog(ClaimTrustAnchor anchor, byte[]? liveIndexJson)
+    {
+        var live = ReadLiveProof(liveIndexJson, anchor);
+        return live?.Manifest is null ? null : new VerifiedCatalog(live);
+    }
+
+    /// <summary>
+    /// The document to write into the author's folder: the verified catalog, plus the two things
+    /// that are the author's own and must survive the trip.
+    ///
+    /// <para><c>generatedAt</c> is deliberately unsigned — a timestamp inside the signed set would
+    /// either re-sign everything on every publish or announce that something hidden had changed — so
+    /// the projection stands a fixed value in for it. Taking the server's would be adopting a field
+    /// nothing vouches for; keeping the local one costs nothing and churns nothing.</para>
+    ///
+    /// <para>The author-only fields are kept for a sharper reason. No claim will ever cover a
+    /// dependency preset, a default lifecycle script or a version-discovery rule, so nothing
+    /// downstream protects them — and each one feeds something the author later signs. A server that
+    /// edited a preset would be choosing a download URL and hash for the author to put their key
+    /// behind, one plausible click later.</para>
+    /// </summary>
+    /// <param name="verified">
+    /// Taken as the verified object rather than as its JSON, so a caller cannot hand this the live
+    /// plaintext or anything else it happens to have — the argument itself has to have come from a
+    /// checked proof.
+    /// </param>
+    public static byte[] BuildLocalDocument(VerifiedCatalog verified, byte[] localIndexJson)
+    {
+        var adopted = JsonNode.Parse(verified.CatalogJson)?.AsObject()
+            ?? throw new InvalidOperationException("The verified catalog is not a JSON object.");
+        var mine = JsonNode.Parse(localIndexJson)?.AsObject()
+            ?? throw new InvalidOperationException("The local index is not a JSON object.");
+
+        if (mine["generatedAt"] is { } generatedAt) adopted["generatedAt"] = generatedAt.DeepClone();
+
+        AuthoringOnlyFields.RestoreFromLocal(adopted, mine);
+
+        return Encoding.UTF8.GetBytes(adopted.ToJsonString(IndexOptions));
+    }
+
+    /// <summary>
     /// Whether the published document and the local one say the same thing, once the proof — the one
     /// part that is only ever added on the way out — is set aside.
     ///

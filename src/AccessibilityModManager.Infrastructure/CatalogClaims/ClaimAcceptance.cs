@@ -43,11 +43,27 @@ public static class ClaimAcceptance
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
-    public static void Accept(IReadOnlyList<SignedClaim> claims, ClaimTrustAnchor anchor)
+    /// <summary>
+    /// Checks a verified claim set and hands back the catalog it describes.
+    ///
+    /// <para>The projection is returned rather than discarded because it already had to be built to
+    /// validate against, and because anything that wants the published catalog must get it from
+    /// here — a caller that reconstructs a catalog from claims nobody accepted is the whole failure
+    /// this class exists to prevent, arriving one level up.</para>
+    ///
+    /// <para>Internal, and reachable only through <see cref="ClaimProof.ReadVerified"/>, which
+    /// checks the cryptography first. A <see cref="SignedClaim"/> is freely constructible: it
+    /// carries a signature, which is not the same as evidence that anyone checked one. Anything
+    /// outside this assembly that could hand a bare list of them to this method would be a second
+    /// way to obtain a catalog, and the shorter of the two.</para>
+    /// </summary>
+    /// <returns>The catalog as JSON, built from signed claims alone and carrying no proof.</returns>
+    internal static string Accept(IReadOnlyList<SignedClaim> claims, ClaimTrustAnchor anchor)
     {
         foreach (var claim in claims) CheckBody(claim, anchor);
 
-        var report = PluginIndexValidation.Validate(anchor.PluginId, Project(claims, anchor));
+        var projected = Project(claims, anchor);
+        var report = PluginIndexValidation.Validate(anchor.PluginId, projected);
 
         if (report.TrustErrors.Count > 0)
             throw new ClaimFormatException(
@@ -56,6 +72,8 @@ public static class ClaimAcceptance
         if (report.UnobtainableReleases.Count > 0)
             throw new ClaimFormatException(
                 "a signed release could never be installed: " + report.UnobtainableReleases[0]);
+
+        return projected;
     }
 
     private static void CheckBody(SignedClaim claim, ClaimTrustAnchor anchor)

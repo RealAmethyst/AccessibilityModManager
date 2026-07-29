@@ -42,8 +42,37 @@ public sealed record ClaimProofEntry(
     [property: JsonPropertyName("payload")] string PayloadBase64,
     [property: JsonPropertyName("signature")] string SignatureBase64);
 
-/// <summary>A proof that has been verified end to end, with the manifest it arrived under.</summary>
-public sealed record VerifiedProof(IReadOnlyList<SignedClaim> Claims, SignedManifest? Manifest);
+/// <summary>
+/// A proof that has been verified end to end, with the manifest it arrived under.
+///
+/// <para>Only <see cref="ClaimProof.ReadVerified"/> can make one, and that is the point rather than
+/// an accident of layering. This type is the evidence that signatures were checked, that the whole
+/// set was validated, and that the catalog inside it was rebuilt from claims — so a caller in
+/// another assembly cannot assemble the conclusion without having done the work. A record with a
+/// public constructor would let anyone declare a hostile document verified.</para>
+/// </summary>
+public sealed class VerifiedProof
+{
+    internal VerifiedProof(IReadOnlyList<SignedClaim> claims, SignedManifest? manifest, string catalogJson)
+    {
+        Claims = claims;
+        Manifest = manifest;
+        CatalogJson = catalogJson;
+    }
+
+    public IReadOnlyList<SignedClaim> Claims { get; }
+
+    public SignedManifest? Manifest { get; }
+
+    /// <summary>
+    /// The catalog these claims describe, rebuilt from the claims alone. It carries no proof and
+    /// nothing from the document the proof travelled inside — which is the point: the plaintext
+    /// beside a proof is not covered by the manifest, so a server is free to rewrite it, and anyone
+    /// acting on the published catalog has to read it from here rather than from what they were
+    /// handed.
+    /// </summary>
+    public string CatalogJson { get; }
+}
 
 public static class ClaimProof
 {
@@ -119,8 +148,9 @@ public static class ClaimProof
 
         // A valid signature is necessary and nowhere near sufficient. Everything the author's own
         // rules say about content is applied here, after the cryptography and before anyone acts on
-        // it — same implementation the manager runs, so the two cannot drift apart.
-        ClaimAcceptance.Accept(verified, anchor);
+        // it — same implementation the manager runs, so the two cannot drift apart. What comes back
+        // is the catalog those claims describe, which is the only version of it anyone may act on.
+        var catalog = ClaimAcceptance.Accept(verified, anchor);
 
         SignedManifest? manifest = null;
         if (document.Manifest is not null)
@@ -143,7 +173,7 @@ public static class ClaimProof
                 "removed");
         }
 
-        return new VerifiedProof(verified, manifest);
+        return new VerifiedProof(verified, manifest, catalog);
     }
 
     /// <summary>
