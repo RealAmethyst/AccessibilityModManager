@@ -44,6 +44,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly Action _showServerUploadSettingsDialog;
     private readonly RegistryMembershipChecker _registryChecker;
     private readonly ProjectReconciler _reconciler;
+    private readonly IndexPublishCoordinator _publishCoordinator;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -55,7 +56,62 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private string? _statusMessage;
 
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
+    [NotifyCanExecuteChangedFor(nameof(PublishIndexCommand))]
+    [NotifyCanExecuteChangedFor(nameof(BreakPublishLockCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CloseProjectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CheckServerCommand))]
     private bool _isBusy;
+
+    /// <summary>
+    /// Whether an action that talks to the server may start. It is not merely about double-clicks:
+    /// clearing the publish lock while THIS copy is publishing would delete the lock this copy is
+    /// holding and let a second machine in, which is the one situation the lock exists to prevent.
+    ///
+    /// <para>Editing itself is deliberately left alone. A publish sends the bytes it read when it
+    /// started, so typing during one cannot change what goes out, and freezing the form under a
+    /// screen reader mid-operation costs more than it protects.</para>
+    /// </summary>
+    public bool IsNotBusy => !IsBusy;
+
+    /// <summary>
+    /// Whether a server operation owns this editor right now. It is what actually enforces one at a
+    /// time; <see cref="IsBusy"/> is the announcement of it.
+    ///
+    /// <para>Disabling the commands is not enough on its own, and the way it fails is worth writing
+    /// down. Adding or editing a release saves and then offers to publish, and those flows are not
+    /// disabled — deliberately, since editing stays available. So a publish can be entered while
+    /// one is already running. It would take the lock, find this copy holding it, report that and
+    /// return — and its <c>finally</c> would clear the shared flag, re-enabling Save, Publish and
+    /// Clear-lock while the first publish is still going. The author could then be asked whether
+    /// every OTHER copy is closed, answer yes perfectly honestly, and delete the lock their own
+    /// in-flight publish is holding. A second machine gets in, and two publishes under one key can
+    /// produce two different versions of the same publish number, which nothing downstream can
+    /// untangle.</para>
+    ///
+    /// <para>A plain bool is sufficient here and a lock is not needed: every one of these paths
+    /// runs on the WPF UI thread, and nothing can be interleaved between testing this and setting
+    /// it because there is no await between them.</para>
+    /// </summary>
+    private bool _serverOperationInFlight;
+
+    /// <summary>
+    /// Claims the editor for one server operation, or reports that another one already has it.
+    /// </summary>
+    private bool TryBeginServerOperation()
+    {
+        if (_serverOperationInFlight) return false;
+
+        _serverOperationInFlight = true;
+        IsBusy = true;
+        return true;
+    }
+
+    private void EndServerOperation()
+    {
+        _serverOperationInFlight = false;
+        IsBusy = false;
+    }
 
     [ObservableProperty]
     private GameItemViewModel? _selectedGame;
@@ -120,7 +176,8 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         Func<string, PluginAuthorInfo?, PluginAuthorInfo?> showAuthorInfoDialog,
         Action showServerUploadSettingsDialog,
         RegistryMembershipChecker registryChecker,
-        ProjectReconciler reconciler)
+        ProjectReconciler reconciler,
+        IndexPublishCoordinator publishCoordinator)
     {
         _projectPath = projectPath;
         _configService = configService;
@@ -141,6 +198,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         _showServerUploadSettingsDialog = showServerUploadSettingsDialog;
         _registryChecker = registryChecker;
         _reconciler = reconciler;
+        _publishCoordinator = publishCoordinator;
 
         _patreon.StateChanged += OnPatreonStateChanged;
 
@@ -433,47 +491,6 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// <summary>The plugin's canonical live index URL, derived from the registry's fixed home.</summary>
     private Uri LiveIndexUrl => new(RegistryMembershipChecker.RegistryUrl,
         $"plugins/{Uri.EscapeDataString(_index.PluginId)}/index.json");
-
-    /// <summary>
-    /// Checks that the signed registry actually sends managers to the address this editor
-    /// publishes to. Returns null when they agree (or when the registry can't be read, which is
-    /// its own visible problem elsewhere), otherwise a description for the author.
-    /// </summary>
-    private async Task<string?> FindRegistryIndexUrlMismatchAsync()
-    {
-        RegistryMembershipResult membership;
-        try
-        {
-            membership = await _registryChecker.CheckAsync(_index.PluginId);
-        }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "Couldn't read the registry to compare index URLs; continuing");
-            return null;
-        }
-
-        if (!membership.RegistryReachable || membership.Entry?.RepoIndexUrl is not { } registered)
-            return null;
-
-        var target = LiveIndexUrl;
-
-        // Scheme and host are case-insensitive by definition; the PATH is not — the catalog is
-        // served off a Linux filesystem, where /plugins/Amethyst/ and /plugins/amethyst/ are two
-        // different places. Comparing them loosely would call a real mismatch a match.
-        var sameOrigin = Uri.Compare(registered, target,
-            UriComponents.Scheme | UriComponents.HostAndPort,
-            UriFormat.Unescaped, StringComparison.OrdinalIgnoreCase) == 0;
-        var samePath = Uri.Compare(registered, target,
-            UriComponents.PathAndQuery,
-            UriFormat.Unescaped, StringComparison.Ordinal) == 0;
-        if (sameOrigin && samePath) return null;
-
-        return $"The signed registry tells managers to read '{_index.PluginId}' from:\n\n{registered}\n\n" +
-               $"but publishing here would write to:\n\n{target}\n\n" +
-               "Publishing now would look like it worked while every manager kept reading the old address. " +
-               "Update the plugin's index URL in the registry admin screen (then sign and publish the " +
-               "registry) so the two match. Nothing was uploaded.";
-    }
 
     /// <summary>
     /// Whether a download address actually answers.
@@ -872,7 +889,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             $"Remove {SelectedGame.DisplayName} v{rel.Version} ({rel.Channel})");
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
     private async Task SaveAsync()
     {
         // Save + prompt-to-publish, matching the Add/Edit/Remove-release flows. Without this,
@@ -1008,7 +1025,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         return true;
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
     private async Task PublishIndexAsync()
     {
         if (HasUnsavedChanges)
@@ -1022,18 +1039,210 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Clears a publish lock that nothing is holding any more.
+    ///
+    /// <para>Its own command, reachable when publishing is not, and deliberately never offered from
+    /// the dialog that reports a lock in the way. A lock that is in the way is usually a lock that
+    /// is doing its job — the other copy is still publishing — and the failure this guards against
+    /// is a person clearing it because it was the button in front of them. Two copies publishing at
+    /// once is how one key comes to sign two different versions of the same publish number, which
+    /// nothing downstream can untangle.</para>
+    ///
+    /// <para>It breaks the lock and stops. It does not retry the publish, and it does not touch
+    /// this machine's record of what it has published: an interrupted publish is settled by
+    /// publishing again, which reads the server and decides, not by removing the evidence.</para>
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
+    private async Task BreakPublishLockAsync()
+    {
+        var cfg = _configService.GetServerUploadConfig();
+        if (cfg is null)
+        {
+            _showInfoDialog("Server upload not configured",
+                "Publish locks live on your server, so there are no settings here to work with yet.");
+            return;
+        }
+
+        if (!TryBeginServerOperation())
+        {
+            _showInfoDialog("Busy", AnotherOperationInFlight);
+            return;
+        }
+
+        try
+        {
+            ServerUploadService.RemoteLock found;
+            try
+            {
+                found = await _serverUploadService.ReadPublishLockAsync(
+                    cfg, _index.PluginId, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Couldn't read the publish lock for {PluginId}", _index.PluginId);
+                _showInfoDialog("Couldn't check the publish lock", ex.Message);
+                return;
+            }
+
+            if (!found.Present)
+            {
+                _showInfoDialog("There is no publish lock",
+                    $"Nothing is holding the publish lock for '{_index.PluginId}', so there is nothing " +
+                    "to clear. If publishing is refusing for another reason, the message it gave says " +
+                    "which.");
+                return;
+            }
+
+            var whoHasIt = found.Body is not null
+                ? $"It is held by {found.Body.Describe()}."
+                : "There is a lock file there, but its contents can't be read, so who holds it is unknown.";
+
+            if (!_confirmDialog("Clear the publish lock?",
+                    $"{whoHasIt}\n\n" +
+                    "Close every other copy of the AuthorTool first. Clearing a lock that another copy " +
+                    "is really using lets both publish at once, and two publishes under one key can " +
+                    "produce two different versions of the same publish — which can't be undone.\n\n" +
+                    "Are all other copies closed?"))
+            {
+                StatusMessage = "Left the publish lock alone.";
+                return;
+            }
+
+            bool cleared;
+            try
+            {
+                // The lock the author just read about is named, so a different one that has since
+                // been taken at the same path is left alone rather than deleted on the strength of
+                // a question that was about something else.
+                cleared = await _serverUploadService.BreakPublishLockAsync(
+                    cfg, _index.PluginId, found.Fingerprint, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Couldn't clear the publish lock for {PluginId}", _index.PluginId);
+                _showInfoDialog("Couldn't clear the publish lock", ex.Message);
+                return;
+            }
+
+            if (!cleared)
+            {
+                _showInfoDialog("The lock changed",
+                    "The publish lock is no longer the one you were shown — it was released and a " +
+                    "new one taken while this was open, so something is publishing right now. It " +
+                    "was left alone. Try again once that has finished.");
+                return;
+            }
+
+            StatusMessage = "Cleared the publish lock. Choose Publish index to try again.";
+            _logger.Warning("Cleared the publish lock for {PluginId} at the author's request", _index.PluginId);
+        }
+        finally
+        {
+            EndServerOperation();
+        }
+    }
+
+    /// <summary>
+    /// Tries the parts of the server signed publishing needs, and changes nothing.
+    ///
+    /// <para>Here so the machinery can be proved against the real server BEFORE the key is anchored
+    /// in the registry — after that, the first signed publish would be the first time those paths
+    /// ever ran for real, and a wrong lock directory discovered then is discovered at the worst
+    /// possible moment.</para>
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
+    private async Task CheckServerAsync()
+    {
+        var cfg = _configService.GetServerUploadConfig();
+        if (cfg is null)
+        {
+            _showInfoDialog("Server upload not configured",
+                "There are no server settings to check yet. Set up Server upload settings first.");
+            return;
+        }
+
+        if (!TryBeginServerOperation())
+        {
+            _showInfoDialog("Busy", AnotherOperationInFlight);
+            return;
+        }
+
+        try
+        {
+            StatusMessage = "Checking your server...";
+
+            var steps = await ServerSelfTest.RunAsync(
+                new ServerUploadPublishTransport(_serverUploadService, cfg),
+                _index.PluginId, CancellationToken.None);
+
+            var (title, message) = ServerSelfTest.Describe(steps);
+            _showInfoDialog(title, message);
+            StatusMessage = title;
+
+            foreach (var step in steps)
+                _logger.Information("Server check — {Step}: {Ok} ({Detail})", step.Name, step.Ok, step.Detail);
+        }
+        catch (Exception ex)
+        {
+            // RunAsync reports failures as steps rather than throwing, so this is the unexpected
+            // case. It still cannot have published anything: nothing in the self-test uploads.
+            _logger.Error(ex, "The server check stopped unexpectedly");
+            _showInfoDialog("The check stopped", $"{ex.Message}\n\nNothing was changed.");
+        }
+        finally
+        {
+            EndServerOperation();
+        }
+    }
+
+    /// <summary>Shown when a second server operation is asked for while one is running.</summary>
+    private const string AnotherOperationInFlight =
+        "This project is already talking to your server. Wait for that to finish, then try again.";
+
+    /// <summary>
     /// Publishes <c>index.json</c> to the author's server (the catalog's canonical home since
-    /// GitHub retired): strict manager-grade validation, a third-party-change check against the
-    /// live index, staged upload with an atomic rename, then verification from the PUBLIC url.
-    /// A local git commit records history afterwards, best-effort — git state never decides
-    /// whether the publish happened; the live remote does.
+    /// GitHub retired).
+    ///
+    /// <para>Which of two paths it takes is decided by the signed registry, and by nothing else. A
+    /// plugin the registry anchors a signing key for goes through
+    /// <see cref="IndexPublishCoordinator"/>: locked, signed, journalled, read back and recorded.
+    /// A plugin it anchors no key for publishes exactly as it always has. Deliberately not decided
+    /// by whether a key exists on this machine — creating a key is a local, private act, and it
+    /// must not be able to change how anything publishes until the author puts that key in the
+    /// registry on purpose.</para>
+    ///
+    /// <para>A local git commit records history afterwards, best-effort — git state never decides
+    /// whether the publish happened; the live remote does.</para>
     /// </summary>
     /// <returns>
-    /// True when the live catalog now matches the local index — either because this publish
-    /// switched it, or because it was already identical. Callers use it to gate work that must
-    /// only happen once users can see the change.
+    /// True when the live catalog now describes the local index — either because this publish put
+    /// it there, or because it was already saying so. Callers use it to gate work that must only
+    /// happen once users can see the change. Notably NOT true after resuming an interrupted
+    /// publish, which sends what that attempt prepared rather than what is in the folder now.
     /// </returns>
     private async Task<bool> PublishIndexToServerAsync(string commitMessage, bool confirmFirst)
+    {
+        // Claimed before anything else, and released in exactly one place. The release flows reach
+        // here without going through the Publish command, so the command's own disabled state does
+        // not stop a second entry — and a second entry that gave up would otherwise clear the
+        // shared busy flag out from under the publish still running.
+        if (!TryBeginServerOperation())
+        {
+            _showInfoDialog("Busy", AnotherOperationInFlight);
+            return false;
+        }
+
+        try
+        {
+            return await PublishGuardedAsync(commitMessage, confirmFirst);
+        }
+        finally
+        {
+            EndServerOperation();
+        }
+    }
+
+    private async Task<bool> PublishGuardedAsync(string commitMessage, bool confirmFirst)
     {
         var indexPath = Path.Combine(_projectPath, "index.json");
         byte[] candidate;
@@ -1078,14 +1287,120 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             return false;
         }
 
-        IsBusy = true;
+        PublishResult result;
+        try
+        {
+            result = await _publishCoordinator.PublishAsync(
+                new ServerUploadPublishTransport(_serverUploadService, cfg),
+                new RegistryVerifiedSource(_registryChecker),
+                new PublishRequest(_index.PluginId, candidate)
+                {
+                    ConfirmOrdinary = confirmFirst,
+                    ChangeSummary = commitMessage
+                },
+                question => _confirmDialog(question.Title, question.Message),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // The coordinator returns its outcomes rather than throwing them, and every outcome
+            // where something may have gone out is a returned Interrupted — so in practice this
+            // is a failure from before anything was sent.
+            //
+            // It still does not say so. "Nothing was uploaded" is the one claim in this tool
+            // that must never rest on reasoning about a path nobody has walked, and this catch
+            // exists precisely for the paths nobody thought of. Publishing again is the honest
+            // instruction in every case: it reads this machine's journal and the server, and
+            // either finishes what was started or explains why it cannot.
+            _logger.Error(ex, "Publish stopped unexpectedly");
+            _showInfoDialog("Publish stopped",
+                $"{ex.Message}\n\nChoose Publish index again — it checks the server before doing " +
+                "anything, and will either finish or tell you what it found.");
+            return false;
+        }
+
+        if (result.Status == PublishStatus.NotSigned)
+        {
+            // Only one path produces NotSigned and it always carries the registry — but a
+            // missing one is answered by refusing rather than by a null-forgiving '!', because
+            // the alternative to having it is publishing without ever checking that managers
+            // are told to read the address being published to.
+            if (result.VerifiedRegistryJson is not { } verifiedRegistry)
+            {
+                _showInfoDialog("Couldn't check the registry",
+                    "The registry was read but didn't come back with the plugin list, so there is " +
+                    "no way to confirm this publish would go where managers are told to look. " +
+                    "Nothing was uploaded.");
+                return false;
+            }
+
+            return await PublishUnsignedAsync(
+                cfg, candidate, commitMessage, confirmFirst, verifiedRegistry);
+        }
+
+        return await PublishPresentation.ApplyAsync(result, _index.PluginId, new PublishEffects(
+            RecordPublishedSource: () => RecordPublishedIndex(candidate),
+            ShowDialog: _showInfoDialog,
+            CommitHistoryAsync: () => CommitLocalHistoryAsync(commitMessage),
+            SetStatus: message => StatusMessage = message));
+    }
+
+    /// <summary>
+    /// Publishing as it has always worked, for a plugin the signed registry anchors no key for.
+    ///
+    /// <para>Reached only through a registry that was fetched and whose signature verified — the
+    /// coordinator refuses everything else, and that refusal is what this path is missing on its
+    /// own. Its own registry check used to swallow every failure and carry on, so a registry whose
+    /// signature did not verify read as "nothing to compare, go ahead". <paramref
+    /// name="verifiedRegistryJson"/> is that document, so the address check below is made against
+    /// bytes something has vouched for rather than against whatever answered.</para>
+    /// </summary>
+    private async Task<bool> PublishUnsignedAsync(
+        ServerUploadConfig cfg, byte[] candidate, string commitMessage, bool confirmFirst,
+        string verifiedRegistryJson)
+    {
+        // Set the moment the switch returns, and read only by the catch below. Without it, anything
+        // that failed after a successful switch would be reported with the message for a failure
+        // before one — and "the live index is unchanged" is the single claim here that costs the
+        // most when it is wrong.
+        var switched = false;
+
         try
         {
             // Publishing to an address nobody reads is the quietest possible failure: the tool
             // would upload, verify the upload from the public URL, and report success while every
-            // manager went on fetching the address the SIGNED registry names. Compare the two
-            // before touching anything.
-            if (await FindRegistryIndexUrlMismatchAsync() is { } mismatch)
+            // manager went on fetching the address the SIGNED registry names.
+            //
+            // Not being listed at all is fine and common — a plugin nobody has added to the
+            // registry yet publishes normally. Being listed with no usable address is not the same
+            // thing and is not allowed to pass as it.
+            var registered = IndexProofService.TryReadIndexUrl(verifiedRegistryJson, _index.PluginId);
+
+            if (registered.IdCaseDiffers)
+            {
+                _showInfoDialog("The registry spells this plugin differently",
+                    $"This project publishes '{_index.PluginId}', but the registry lists it under a " +
+                    "different capitalisation. Nothing here can treat those as the same name: a " +
+                    "signing key is matched exactly, so the entry as written anchors no key for this " +
+                    "project — and if it ever does anchor one, publishing from here would put an " +
+                    "unsigned index over a signed catalog.\n\n" +
+                    "Make the id in the registry match this project exactly, then sign and publish " +
+                    "the registry. Nothing was uploaded.");
+                return false;
+            }
+
+            if (registered.Listed && registered.Url is null)
+            {
+                _showInfoDialog("The registry can't say where this is read",
+                    $"The registry lists '{_index.PluginId}' but its entry carries no usable index " +
+                    "address, so there is no way to tell whether publishing here would reach anyone. " +
+                    "Fix the entry in the registry admin screen, then sign and publish the registry. " +
+                    "Nothing was uploaded.");
+                return false;
+            }
+
+            if (registered.Url is { } address &&
+                IndexPublishCoordinator.IndexUrlMismatch(address, _index.PluginId) is { } mismatch)
             {
                 _showInfoDialog("The registry points somewhere else", mismatch);
                 return false;
@@ -1126,6 +1441,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             StatusMessage = "Publishing index...";
             await _serverUploadService.PublishIndexAsync(
                 cfg, _index.PluginId, candidate, beforeSwitchAsync: null, CancellationToken.None);
+            switched = true;
 
             var verify = await TryFetchLiveIndexAsync();
             if (verify is null || !verify.AsSpan().SequenceEqual(candidate))
@@ -1139,24 +1455,25 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             _liveIndexAtLoad = candidate;
             RecordPublishedIndex(candidate);
             StatusMessage = "Published the index and verified it live from the public address.";
-
-            // Local history, best-effort — a git hiccup must never repaint a live publish as failed.
-            try
-            {
-                if (await _gitService.IsRepoAsync(_projectPath))
-                {
-                    await _gitService.AddAsync(_projectPath, "index.json");
-                    var status = await _gitService.StatusPorcelainAsync(_projectPath);
-                    if (!string.IsNullOrWhiteSpace(status.Stdout))
-                        await _gitService.CommitAsync(_projectPath, commitMessage);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning(ex, "Local history commit after index publish failed");
-            }
-
+            await CommitLocalHistoryAsync(commitMessage);
             return true;
+        }
+        catch (IndexPublishFailedException ex) when (ex.RenameAttempted)
+        {
+            // The switch may have run, so the live index is not known to be anything.
+            _logger.Error(ex, "Index publish was interrupted around the switch");
+            _showInfoDialog("Publish interrupted",
+                $"{ex.Message}\n\nThe index may or may not have switched live. Publish again, and " +
+                "check the result.");
+            return false;
+        }
+        catch (Exception ex) when (switched)
+        {
+            _logger.Error(ex, "Index publish switched live but failed afterwards");
+            _showInfoDialog("Published, but something failed afterwards",
+                $"{ex.Message}\n\nThe index did switch live, so managers will see it. Publish again to " +
+                "be sure the server holds what this folder holds.");
+            return false;
         }
         catch (Exception ex)
         {
@@ -1164,9 +1481,27 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             _showInfoDialog("Publish failed — the live index is unchanged", ex.Message);
             return false;
         }
-        finally
+    }
+
+    /// <summary>
+    /// Records what went out in local git history. Best-effort by design: a git hiccup must never
+    /// repaint a live publish as failed.
+    /// </summary>
+    private async Task CommitLocalHistoryAsync(string commitMessage)
+    {
+        try
         {
-            IsBusy = false;
+            if (await _gitService.IsRepoAsync(_projectPath))
+            {
+                await _gitService.AddAsync(_projectPath, "index.json");
+                var status = await _gitService.StatusPorcelainAsync(_projectPath);
+                if (!string.IsNullOrWhiteSpace(status.Stdout))
+                    await _gitService.CommitAsync(_projectPath, commitMessage);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Local history commit after index publish failed");
         }
     }
 
@@ -1291,7 +1626,17 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         return "Update plugin index";
     }
 
-    [RelayCommand]
+    /// <summary>
+    /// Closing is refused while a server operation is running, and that is a safety rule rather
+    /// than tidiness.
+    ///
+    /// <para>The one-at-a-time gate belongs to this editor. Closing mid-publish would not stop the
+    /// publish — it keeps running, still holding the lock — but reopening the project builds a
+    /// second editor with a fresh gate, which knows nothing about it. That copy could then be
+    /// asked whether every other copy is closed, answer yes truthfully, and clear a lock the first
+    /// one is still using.</para>
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
     private void CloseProject()
     {
         if (HasUnsavedChanges)

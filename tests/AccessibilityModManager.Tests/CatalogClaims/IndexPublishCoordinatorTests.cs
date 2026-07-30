@@ -430,6 +430,81 @@ public sealed class IndexPublishCoordinatorTests : IDisposable
         Assert.Contains("confirm:ResumeInterrupted", _events);
     }
 
+    // ---- which publishes may be recorded as putting THIS folder live ----
+    //
+    // A publish succeeding and the local file being published are different facts, and the gap
+    // between them is where work gets destroyed. The caller records the local bytes as published,
+    // and a later project-open reads that mark to tell "this folder is stale" (replaceable) apart
+    // from "this folder holds work nobody has published" (ask first). Claiming it wrongly turns the
+    // second into the first.
+
+    [Fact]
+    public async Task A_publish_of_the_local_file_reports_that_it_is_what_went_live()
+    {
+        var result = await PublishAsync(IndexBytes("1.0.0"));
+
+        Assert.Equal(PublishStatus.Published, result.Status);
+        Assert.True(result.LocalSourceIsLive);
+    }
+
+    [Fact]
+    public async Task A_resend_never_reports_the_local_file_as_the_one_that_went_live()
+    {
+        _transport.FailRename = new IOException("lost the connection");
+        await PublishAsync(IndexBytes("1.0.0"));
+        _events.Clear();
+        _transport.FailRename = null;
+
+        // 9.9.9 exists only in this folder. The resend sends generation 1's signed bytes, which
+        // never mentioned it — so the publish succeeds and 9.9.9 is still unpublished work. A caller
+        // that recorded this candidate as published would be arming the next project-open to
+        // overwrite it without asking.
+        var result = await PublishAsync(IndexBytes("1.0.0", "9.9.9"));
+
+        Assert.Equal(PublishStatus.Published, result.Status);
+        Assert.False(result.LocalSourceIsLive);
+    }
+
+    [Fact]
+    public async Task Discovering_an_interrupted_publish_landed_says_nothing_about_the_local_file()
+    {
+        _transport.FailRename = new IOException("lost the reply");
+        _transport.RenameLandsAnyway = true;
+        await PublishAsync(IndexBytes("1.0.0"));
+        _events.Clear();
+
+        var result = await PublishAsync(IndexBytes("1.0.0", "9.9.9"));
+
+        Assert.Equal(PublishStatus.Recovered, result.Status);
+        Assert.False(result.LocalSourceIsLive);
+    }
+
+    [Fact]
+    public async Task A_catalog_that_already_says_what_the_folder_says_reports_exactly_that()
+    {
+        await BootstrapAsync();
+
+        var result = await PublishAsync(IndexBytes("1.0.0"));
+
+        Assert.Equal(PublishStatus.AlreadyUpToDate, result.Status);
+        Assert.True(result.LocalSourceIsLive);
+    }
+
+    [Fact]
+    public async Task The_unsigned_path_is_handed_the_registry_that_sent_it_there()
+    {
+        // The unsigned path has its own address check to run, and used to run it against whatever
+        // a fresh fetch returned — treating a signature that did not verify as nothing to compare.
+        // Carrying the verified document across means it can only ever check against bytes the
+        // registry key vouched for.
+        _registry.Json = UnsignedRegistry();
+
+        var result = await PublishAsync(IndexBytes("1.0.0"));
+
+        Assert.Equal(PublishStatus.NotSigned, result.Status);
+        Assert.Equal(UnsignedRegistry(), result.VerifiedRegistryJson);
+    }
+
     [Fact]
     public async Task Declining_the_resume_blocks_every_new_publish()
     {

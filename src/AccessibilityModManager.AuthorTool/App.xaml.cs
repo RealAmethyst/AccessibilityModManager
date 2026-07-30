@@ -54,6 +54,7 @@ public partial class App : Application
         services.AddSingleton<ClaimSigningKeyStore>();
         services.AddSingleton<IndexProofService>();
         services.AddSingleton<ProjectReconciler>();
+        services.AddSingleton<IndexPublishCoordinator>();
 
         services.AddTransient<ProjectPickerViewModel>();
         services.AddTransient<IndexEditorViewModel>();
@@ -146,7 +147,8 @@ public partial class App : Application
             (pluginId, existing) => ShowAuthorInfoDialog(pluginId, existing),
             () => ShowServerUploadSettingsDialog(sp),
             sp.GetRequiredService<RegistryMembershipChecker>(),
-            sp.GetRequiredService<ProjectReconciler>());
+            sp.GetRequiredService<ProjectReconciler>(),
+            sp.GetRequiredService<IndexPublishCoordinator>());
     }
 
     private static void ShowServerUploadSettingsDialog(IServiceProvider sp)

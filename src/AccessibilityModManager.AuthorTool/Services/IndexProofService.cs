@@ -9,6 +9,28 @@ using Serilog;
 namespace AccessibilityModManager.AuthorTool.Services;
 
 /// <summary>
+/// What the signed registry has to say about where managers read a plugin's index.
+/// </summary>
+/// <param name="Listed">Whether the registry carries an entry for the plugin at all.</param>
+/// <param name="Url">
+/// The address, when there is a usable one. Null with <paramref name="Listed"/> true means the entry
+/// exists but cannot say where managers read — which must stop a publish, not wave it through.
+/// </param>
+public readonly record struct RegisteredIndexAddress(bool Listed, string? Url)
+{
+    /// <summary>
+    /// True when the only entry found differs from the requested id by capitalisation alone.
+    ///
+    /// <para>Its own state because it must stop a publish, and the reason is not obvious. Trust is
+    /// matched exactly, so an entry cased differently anchors no key for THIS id — meaning signing
+    /// could never switch on, and, worse, if that entry does carry an <c>indexTrust</c> and points
+    /// at the same place, publishing here would put an unsigned index over a signed catalog. The
+    /// disagreement is the problem, and it is fixed in the registry rather than worked around.</para>
+    /// </summary>
+    public bool IdCaseDiffers { get; init; }
+}
+
+/// <summary>
 /// Attaches the signed <c>proof</c> block to an index about to be published, and owns the rule
 /// that makes it safe to do so: publishing extends exactly the history this machine last confirmed,
 /// or it does not happen.
@@ -66,6 +88,69 @@ public sealed class IndexProofService(
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reads just the address the registry sends managers to for a plugin, independently of whether
+    /// it anchors a signing key.
+    ///
+    /// <para>Separate from <see cref="TryReadAnchor"/> because an unsigned catalog needs this exact
+    /// answer and gets null from that one: no <c>indexTrust</c> is precisely the state it reports
+    /// nothing for. Publishing to an address the registry does not name is the quietest failure this
+    /// tool has — everything reports success while every manager reads somewhere else — and it is
+    /// worth catching whether or not the catalog is signed.</para>
+    ///
+    /// <para>The id is matched exactly first and then, failing that, ignoring case — unlike
+    /// <see cref="TryReadAnchor"/>, which only ever matches exactly. That difference is deliberate
+    /// and the two must not be made to agree: a trust anchor decides which key may sign for a
+    /// plugin, and matching THAT loosely would let 'amethyst' and 'Amethyst' be one identity. The
+    /// loose match here is not a fallback that lets publishing continue — it exists so the
+    /// disagreement can be SEEN and refused. Reporting it as plain "not listed" would hide it, and
+    /// what it hides is a catalog that can never be signed and might already be.</para>
+    ///
+    /// <para>The four answers are kept apart deliberately. Not listed is a normal state — a plugin
+    /// nobody has added to the registry yet publishes perfectly well. Listed but with no usable
+    /// address is not: it is an entry that exists and cannot say where managers read, and folding it
+    /// in with "not listed" would publish on the strength of a check that could not be made. Listed
+    /// under a different capitalisation is its own refusal, described on
+    /// <see cref="RegisteredIndexAddress.IdCaseDiffers"/>. Only an exact entry with a usable address
+    /// leads to an address comparison.</para>
+    ///
+    /// <para>The distinction is defence in depth rather than a live hole: the registry is
+    /// deserialized into a model whose <c>RepoIndexUrl</c> is a required <c>Uri</c>, so today a
+    /// malformed entry throws before any of this is reachable. That is a property of a different
+    /// file, though, and this one should not quietly become permissive if it is ever relaxed.</para>
+    ///
+    /// <para>The caller must have verified the registry's signature first.</para>
+    /// </summary>
+    public static RegisteredIndexAddress TryReadIndexUrl(string verifiedRegistryJson, string pluginId)
+    {
+        using var document = JsonDocument.Parse(verifiedRegistryJson);
+        if (!document.RootElement.TryGetProperty("plugins", out var plugins) ||
+            plugins.ValueKind != JsonValueKind.Array)
+        {
+            return new RegisteredIndexAddress(Listed: false, null);
+        }
+
+        RegisteredIndexAddress? looseMatch = null;
+
+        foreach (var plugin in plugins.EnumerateArray())
+        {
+            if (!plugin.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) continue;
+
+            var listedId = id.GetString();
+            var exact = string.Equals(listedId, pluginId, StringComparison.Ordinal);
+            if (!exact && !string.Equals(listedId, pluginId, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var url = plugin.TryGetProperty("repoIndexUrl", out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+
+            if (exact) return new RegisteredIndexAddress(Listed: true, url);
+            looseMatch ??= new RegisteredIndexAddress(Listed: true, url) { IdCaseDiffers = true };
+        }
+
+        return looseMatch ?? new RegisteredIndexAddress(Listed: false, null);
     }
 
     private static string RequiredString(JsonElement parent, string name)

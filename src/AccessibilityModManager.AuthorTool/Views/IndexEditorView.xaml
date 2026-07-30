@@ -166,6 +166,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0"
                        Text="{Binding StatusMessage}"
@@ -176,7 +177,22 @@
                        Text="Unsaved changes"
                        Foreground="#B00"
                        FontWeight="SemiBold"
+                       Margin="0,0,8,0"
                        Visibility="{Binding HasUnsavedChanges, Converter={StaticResource BoolToVisConverter}}"/>
+            <!-- Down here, and last in the tab order, on purpose: these are recovery and diagnostic
+                 actions and neither is what to reach for first. A publish lock in the way is usually
+                 a lock doing its job. -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <Button Content="Check my server"
+                        Command="{Binding CheckServerCommand}"
+                        AutomationProperties.Name="Check my server"
+                        AutomationProperties.HelpText="Tries the parts of your server that signed publishing needs — takes the publish lock, reads your published index, releases the lock. Changes nothing."
+                        Margin="0,0,8,0"/>
+                <Button Content="Clear publish lock..."
+                        Command="{Binding BreakPublishLockCommand}"
+                        AutomationProperties.Name="Clear a stuck publish lock"
+                        AutomationProperties.HelpText="Only for a lock left behind by a publish that was interrupted. Close every other copy of the AuthorTool first — clearing a lock another copy is using lets both publish at once."/>
+            </StackPanel>
         </Grid>
     </Grid>
 </UserControl>

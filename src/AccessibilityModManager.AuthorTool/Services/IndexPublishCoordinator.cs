@@ -133,6 +133,31 @@ public sealed record PublishResult(PublishStatus Status, string Title, string Me
     /// publishing head, and an imported key with no head may never start or continue a history.
     /// </summary>
     public bool StartedHistory { get; init; }
+
+    /// <summary>
+    /// Whether the live catalog now describes exactly the candidate this publish was handed —
+    /// the only condition under which the caller may record that local file as published.
+    ///
+    /// <para>Not the same question as "did a publish succeed", and the difference is the whole
+    /// reason this exists. A resumed publish sends the bytes an interrupted attempt signed, which
+    /// is deliberately NOT the current local file: anything edited since goes out on the publish
+    /// after it. So it succeeds, a generation goes live, and the local file is still unpublished
+    /// work. Recording it as published there would tell the next project-open that this folder is
+    /// merely stale — and project-open replaces stale folders without asking. The same holds for
+    /// discovering that an interrupted publish had landed.</para>
+    ///
+    /// <para>"Describes", not "equals": the published document carries the proof and the local one
+    /// never does, so the two are never byte-identical once signing is on.</para>
+    /// </summary>
+    public bool LocalSourceIsLive { get; init; }
+
+    /// <summary>
+    /// The signed registry this decision was made against, carried out on
+    /// <see cref="PublishStatus.NotSigned"/> so the unsigned path can finish its own checks against
+    /// a document whose signature has been verified, rather than fetching the registry again and
+    /// deciding what to do when that fetch fails.
+    /// </summary>
+    public string? VerifiedRegistryJson { get; init; }
 }
 
 /// <summary>What to publish, and how much to ask about it.</summary>
@@ -232,7 +257,10 @@ public sealed class IndexPublishCoordinator(
             }
 
             return new PublishResult(PublishStatus.NotSigned,
-                "Not signed", $"The registry anchors no signing key for '{pluginId}'.");
+                "Not signed", $"The registry anchors no signing key for '{pluginId}'.")
+            {
+                VerifiedRegistryJson = registryJson
+            };
         }
 
         if (IndexUrlMismatch(anchor.RepoIndexUrl, pluginId) is { } mismatch)
@@ -400,7 +428,11 @@ public sealed class IndexPublishCoordinator(
             return new PublishResult(PublishStatus.AlreadyUpToDate, "Nothing to publish",
                 $"The live catalog is already publish {state.Generation} of this index.")
             {
-                Generation = state.Generation
+                Generation = state.Generation,
+                // Established by the two conditions just checked, not assumed: nothing signed
+                // differs, and what is live says exactly what the candidate says once the proof is
+                // set aside.
+                LocalSourceIsLive = true
             };
         }
 
@@ -515,10 +547,16 @@ public sealed class IndexPublishCoordinator(
         logger.Information("Published generation {Generation} of {PluginId}", generation, pluginId);
 
         return new PublishResult(PublishStatus.Published, "Published",
-            $"Publish {generation} is live, and reading it back off the server confirmed it.")
+            newlyPrepared
+                ? $"Publish {generation} is live, and reading it back off the server confirmed it."
+                : $"Publish {generation} is live, and reading it back off the server confirmed it. " +
+                  "It sent what the interrupted attempt had prepared, so anything edited since is " +
+                  "still unpublished — choose Publish again to send it.")
         {
             Generation = generation,
-            StartedHistory = startsHistory
+            StartedHistory = startsHistory,
+            // A resend puts the JOURNALLED bytes live, which predate whatever is in the folder now.
+            LocalSourceIsLive = newlyPrepared
         };
     }
 
@@ -751,7 +789,7 @@ public sealed class IndexPublishCoordinator(
     /// off a Linux filesystem, where /plugins/Amethyst/ and /plugins/amethyst/ are two different
     /// places, and comparing them loosely would call a real mismatch a match.
     /// </summary>
-    private static string? IndexUrlMismatch(string registeredUrl, string pluginId)
+    public static string? IndexUrlMismatch(string registeredUrl, string pluginId)
     {
         var target = CanonicalIndexUrl(pluginId);
 

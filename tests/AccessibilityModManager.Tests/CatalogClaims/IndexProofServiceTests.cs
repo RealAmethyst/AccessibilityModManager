@@ -1126,6 +1126,132 @@ public sealed class IndexProofServiceTests : IDisposable
         Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
     }
 
+    [Fact]
+    public void The_index_address_is_readable_for_a_plugin_with_no_signing_key()
+    {
+        // The case the anchor reader deliberately reports nothing for, and the one that needs this
+        // answer most: an unsigned catalog still has to check that it is publishing to the address
+        // the registry sends managers to.
+        var registry = $$"""
+        { "registryVersion": "1",
+          "plugins": [ { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}" } ] }
+        """;
+
+        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+        Assert.Equal(new RegisteredIndexAddress(Listed: true, IndexUrl),
+            IndexProofService.TryReadIndexUrl(registry, "amethyst"));
+    }
+
+    [Fact]
+    public void An_unlisted_plugin_has_no_index_address()
+    {
+        // Not listed at all, which is a normal state: a plugin nobody has added to the registry yet
+        // publishes fine, and there is simply no address to compare against.
+        var registry = """{ "registryVersion": "1", "plugins": [] }""";
+
+        var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
+
+        Assert.False(address.Listed);
+        Assert.Null(address.Url);
+    }
+
+    [Theory]
+    [InlineData("""{ "registryVersion": "1", "plugins": [ { "id": "amethyst" } ] }""")]
+    [InlineData("""{ "registryVersion": "1", "plugins": [ { "id": "amethyst", "repoIndexUrl": 7 } ] }""")]
+    public void An_entry_that_cannot_say_where_it_is_read_is_listed_but_addressless(string registry)
+    {
+        // Kept apart from "not listed" on purpose. Both have no address, and only one of them is a
+        // reason to carry on: an entry that EXISTS and cannot say where managers read is a registry
+        // that cannot answer the question, and publishing anyway would be publishing on the strength
+        // of a check that never happened. The caller refuses this and continues on the other.
+        var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
+
+        Assert.True(address.Listed);
+        Assert.Null(address.Url);
+    }
+
+    [Fact]
+    public void An_entry_cased_differently_is_reported_as_a_disagreement_not_as_absent()
+    {
+        // The registry entry and this project disagree about capitalisation. The ANCHOR reader must
+        // refuse to match — a trust decision keyed on a loose identity would let two plugin ids be
+        // one — but reporting nothing at all here would hide the disagreement, and the caller would
+        // publish as though the plugin were simply unlisted. It is surfaced instead, so the caller
+        // can refuse and say which name to fix.
+        var registry = """
+        { "registryVersion": "1",
+          "plugins": [ { "id": "Amethyst",
+                         "repoIndexUrl": "https://accessibilitymods.com/registry/plugins/Amethyst/index.json" } ] }
+        """;
+
+        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+
+        var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
+        Assert.True(address.Listed);
+        Assert.True(address.IdCaseDiffers);
+        Assert.Equal("https://accessibilitymods.com/registry/plugins/Amethyst/index.json", address.Url);
+    }
+
+    [Fact]
+    public void A_differently_cased_entry_pointing_at_the_same_place_is_still_reported_as_a_mismatch()
+    {
+        // The nastier shape, and the reason the disagreement is reported rather than the address
+        // merely compared. Here the addresses AGREE, so an address check alone would wave it
+        // through — while the trust reader, which matches exactly, sees no anchor for this id. The
+        // result would be an unsigned publish landing on top of a catalog anchored under the other
+        // capitalisation.
+        var registry = $$"""
+        { "registryVersion": "1",
+          "plugins": [ { "id": "AMETHYST", "repoIndexUrl": "{{IndexUrl}}",
+                         "indexTrust": {
+                           "scheme": "signed-claims-v1",
+                           "keyId": "{{_signing.KeyId}}",
+                           "algorithm": "rsa-pss-sha256",
+                           "publicKeyPem": {{JsonSerializer.Serialize(_signing.PublicKeyPem)}}
+                         } } ] }
+        """;
+
+        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+
+        var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
+        Assert.True(address.IdCaseDiffers);
+
+        // The address itself is no help here: it matches exactly.
+        Assert.Null(IndexPublishCoordinator.IndexUrlMismatch(address.Url!, "amethyst"));
+    }
+
+    [Fact]
+    public void An_exactly_matching_entry_wins_over_one_that_only_matches_loosely()
+    {
+        var registry = $$"""
+        { "registryVersion": "1",
+          "plugins": [
+            { "id": "AMETHYST", "repoIndexUrl": "https://elsewhere.example/index.json" },
+            { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}" }
+          ] }
+        """;
+
+        var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
+
+        Assert.Equal(IndexUrl, address.Url);
+        Assert.False(address.IdCaseDiffers);
+    }
+
+    [Fact]
+    public void The_index_address_belongs_to_the_plugin_that_was_asked_about()
+    {
+        var registry = $$"""
+        { "registryVersion": "1",
+          "plugins": [
+            { "id": "someone-else", "repoIndexUrl": "https://elsewhere.example/index.json" },
+            { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}" }
+          ] }
+        """;
+
+        Assert.Equal(new RegisteredIndexAddress(Listed: true, IndexUrl),
+            IndexProofService.TryReadIndexUrl(registry, "amethyst"));
+    }
+
     /// <summary>
     /// A dependency preset — the author-only template that fills in a dependency's download URL and
     /// hash when they add one to a game.

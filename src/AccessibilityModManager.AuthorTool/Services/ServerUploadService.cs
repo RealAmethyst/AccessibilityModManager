@@ -909,11 +909,23 @@ public sealed class ServerUploadService
     }
 
     /// <summary>
-    /// What is holding a plugin's publish lock, if anything. Null when there is none; a null
-    /// <see cref="PublishLockBody"/> with a true <c>Present</c> means there is a file there that
-    /// isn't a lock this version understands.
+    /// A publish lock as it stands right now.
     /// </summary>
-    public async Task<(bool Present, PublishLockBody? Body)> ReadPublishLockAsync(
+    /// <param name="Present">Whether there is anything at the lock's path.</param>
+    /// <param name="Body">
+    /// The lock's contents, when they parse as a lock this version understands. Null with
+    /// <paramref name="Present"/> true means there is a file there that does not.
+    /// </param>
+    /// <param name="Fingerprint">
+    /// A digest of the exact bytes found, whatever they were. It exists so that "is this still the
+    /// lock I was shown" can be answered for a lock that does NOT parse — the recovery case that
+    /// most needs asking, and the one where there is otherwise nothing to compare. Null only when
+    /// nothing is there.
+    /// </param>
+    public readonly record struct RemoteLock(bool Present, PublishLockBody? Body, string? Fingerprint);
+
+    /// <summary>What is holding a plugin's publish lock, if anything.</summary>
+    public async Task<RemoteLock> ReadPublishLockAsync(
         ServerUploadConfig cfg, string pluginId, CancellationToken ct)
     {
         var validationError = ValidateForCatalog(cfg);
@@ -922,24 +934,61 @@ public sealed class ServerUploadService
 
         var fileName = PublishLock.FileNameFor(pluginId);
 
-        return await Task.Run<(bool, PublishLockBody?)>(() =>
+        return await Task.Run(() =>
         {
             using var sftp = OpenSftp(cfg);
             var lockPath = JoinPosix(ResolveLockRoot(sftp, cfg), fileName);
-            var body = PublishLock.TryParse(ReadCapped(sftp, lockPath, PublishLock.MaxBodyBytes), pluginId);
-            return body is not null ? (true, body) : (sftp.Exists(lockPath), null);
+            return ReadLockAt(sftp, lockPath, pluginId);
         }, ct);
     }
 
     /// <summary>
-    /// Removes a plugin's publish lock whoever holds it.
+    /// Reads whatever is at a lock path, in the one form both reading and breaking agree on.
+    /// </summary>
+    private static RemoteLock ReadLockAt(SftpClient sftp, string lockPath, string pluginId)
+    {
+        var raw = ReadCapped(sftp, lockPath, PublishLock.MaxBodyBytes);
+        if (raw is null)
+        {
+            // Either nothing is there, or there is something too big or unreadable to have come
+            // from this tool. Both are "present, unidentifiable" if the path exists.
+            return new RemoteLock(sftp.Exists(lockPath), null, null);
+        }
+
+        return new RemoteLock(true, PublishLock.TryParse(raw, pluginId),
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(raw)));
+    }
+
+    /// <summary>
+    /// Removes the publish lock the caller was shown, and only that one.
     ///
     /// Only ever called behind an explicit confirmation that every other copy of the tool is closed.
     /// An interrupted publish leaves a lock nobody holds, and this is how that is cleared — but a
     /// lock in the way is not by itself a reason to remove it, which is why this is separate from
     /// acquisition rather than a retry inside it.
+    ///
+    /// <para><paramref name="expectedFingerprint"/> is the digest of the exact bytes the author was
+    /// shown, and the lock is re-read here and required to match it. Between being shown a lock and
+    /// consenting to remove it a person takes as long as they take: the lock they were told about
+    /// can be released and a genuinely active one taken at the same path in that time, and deleting
+    /// by path alone would then clear a publish that is running — the exact concurrent-publisher
+    /// case the lock exists for.</para>
+    ///
+    /// <para>A digest of the raw bytes rather than a field out of the parsed body, so that a lock
+    /// which does not parse is checked just as strictly as one that does. That case is the whole
+    /// reason this command exists, so exempting it — "there is nothing to compare" — would leave
+    /// the race wide open on precisely the path most likely to be used. There is always something
+    /// to compare.</para>
+    ///
+    /// <para>Not atomic, and cannot be: SFTP offers no conditional delete. The read and the delete
+    /// are two round trips and the interval between them is not bounded by anything — a slow link or
+    /// a stalled connection widens it. What this buys is the removal of the human-length window,
+    /// which was the one that mattered; closing the rest needs a server-side conditional operation
+    /// or a different locking protocol.</para>
     /// </summary>
-    public async Task BreakPublishLockAsync(ServerUploadConfig cfg, string pluginId, CancellationToken ct)
+    /// <returns>False when the lock changed under the author and was therefore left alone.</returns>
+    public async Task<bool> BreakPublishLockAsync(
+        ServerUploadConfig cfg, string pluginId, string? expectedFingerprint, CancellationToken ct)
     {
         var validationError = ValidateForCatalog(cfg);
         if (validationError != null)
@@ -947,14 +996,29 @@ public sealed class ServerUploadService
 
         var fileName = PublishLock.FileNameFor(pluginId);
 
-        await Task.Run(() =>
+        return await Task.Run(() =>
         {
             using var sftp = OpenSftp(cfg);
             var lockPath = JoinPosix(ResolveLockRoot(sftp, cfg), fileName);
-            if (!sftp.Exists(lockPath)) return;
+
+            var now = ReadLockAt(sftp, lockPath, pluginId);
+            if (!now.Present) return true;
+
+            // No wildcard. A caller that cannot name what it saw does not get to delete what is
+            // there now, because "I could not identify it" and "it is the same one" are different
+            // statements and only the second authorises this.
+            if (now.Fingerprint is null ||
+                !string.Equals(now.Fingerprint, expectedFingerprint, StringComparison.Ordinal))
+            {
+                _logger.Warning(
+                    "Refused to break the publish lock for {PluginId}: it is no longer the one that was read",
+                    pluginId);
+                return false;
+            }
 
             sftp.DeleteFile(lockPath);
             _logger.Warning("Broke the publish lock for {PluginId} at {Path}", pluginId, lockPath);
+            return true;
         }, ct);
     }
 
