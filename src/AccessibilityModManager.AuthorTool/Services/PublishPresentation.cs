@@ -11,11 +11,16 @@ namespace AccessibilityModManager.AuthorTool.Services;
 /// <param name="ShowDialog">Title then message, both read aloud.</param>
 /// <param name="CommitHistoryAsync">The best-effort local git commit.</param>
 /// <param name="SetStatus">The status line, which is a screen-reader live region.</param>
+/// <param name="OfferSigningSetup">
+/// Asks whether to open the catalog-signing screen, and opens it on yes. Only ever reached when the
+/// registry anchors a key this machine does not have.
+/// </param>
 public readonly record struct PublishEffects(
     Action RecordPublishedSource,
     Action<string, string> ShowDialog,
     Func<Task> CommitHistoryAsync,
-    Action<string> SetStatus);
+    Action<string> SetStatus,
+    Action? OfferSigningSetup = null);
 
 /// <summary>
 /// What the editor does with a <see cref="PublishResult"/>: what to say, what to record, and what
@@ -62,6 +67,14 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
     /// recover the thing it was taken for, and the moment that becomes true is here.
     /// </summary>
     public bool PromptForFreshKeyBackup { get; init; }
+
+    /// <summary>
+    /// Whether to offer the catalog-signing screen afterwards. True only when the registry anchors
+    /// a key this machine does not have — the one refusal the author can act on immediately, by
+    /// restoring their backup. Every other refusal is about the catalog or the server, and pointing
+    /// at the key screen would be misdirection.
+    /// </summary>
+    public bool OfferSigningSetup { get; init; }
 
     /// <summary>
     /// Maps a finished publish onto what the editor should do about it.
@@ -122,10 +135,21 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
                     "A catalog with no signing key anchored in the registry publishes by the " +
                     "unsigned path, which the caller must run instead of presenting this.");
 
-            // Refused, SigningKeyMissing, LockHeld, Interrupted, RecoveryRequired — each says
-            // something the author has to act on, and each is worded for them already. Interrupted
-            // is the one that must never be softened into a status line: it is the only outcome
-            // where nothing at all can be assumed about what is live.
+            case PublishStatus.SigningKeyMissing:
+                // The status line says what HAPPENED, not what is still true. The author may restore
+                // their key from the screen this offers, and the live region is set afterwards —
+                // leaving "this machine can't sign for this catalog" there would announce, to
+                // someone who had just fixed it, that it was still broken.
+                return new PublishPresentation(ShowDialog: true,
+                    "That publish wasn't sent. Choose Publish index again when the key is in place.")
+                {
+                    OfferSigningSetup = true
+                };
+
+            // Refused, LockHeld, Interrupted, RecoveryRequired — each says something the author has
+            // to act on, and each is worded for them already. Interrupted is the one that must never
+            // be softened into a status line: it is the only outcome where nothing at all can be
+            // assumed about what is live.
             default:
                 return new PublishPresentation(ShowDialog: true, result.Title);
         }
@@ -153,6 +177,8 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
             var (title, message) = FreshBackupPrompt(pluginId);
             effects.ShowDialog(title, message);
         }
+
+        if (presentation.OfferSigningSetup) effects.OfferSigningSetup?.Invoke();
 
         if (presentation.CommitLocalHistory) await effects.CommitHistoryAsync();
 

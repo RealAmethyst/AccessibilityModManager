@@ -1,0 +1,173 @@
+<Window x:Class="AccessibilityModManager.AuthorTool.Views.ClaimSigningDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance vm:ClaimSigningViewModel}"
+        Title="Catalog signing"
+        Height="700" Width="660"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        AutomationProperties.Name="Catalog signing">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="Catalog signing"
+                   FontSize="20" FontWeight="Bold"
+                   AutomationProperties.HeadingLevel="Level1"
+                   Margin="0,0,0,4"/>
+
+        <TextBlock Grid.Row="1"
+                   Text="This screen does not publish a catalog and does not change the registry. Creating a key is private to this machine; signing starts only when you publish a registry that names it, from the registry admin screen. Export writes an encrypted backup to the location you choose, which may be shared or synchronised."
+                   TextWrapping="Wrap"
+                   Foreground="#666"
+                   Margin="0,0,0,12"/>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
+                      AutomationProperties.Name="Catalog signing actions">
+            <StackPanel>
+
+                <TextBlock Text="{Binding KeySummary}"
+                           TextWrapping="Wrap"
+                           AutomationProperties.LiveSetting="Polite"
+                           Margin="0,0,0,16"/>
+
+                <!-- Create -->
+                <TextBlock Text="Create the signing key"
+                           FontSize="15" FontWeight="SemiBold"
+                           AutomationProperties.HeadingLevel="Level2"
+                           Margin="0,0,0,6"/>
+
+                <TextBlock Text="Only possible once. Replacing a key later would make everything already published unverifiable until a new registry is signed, so the tool refuses to do it quietly."
+                           TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
+
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Key name:" VerticalAlignment="Center"/>
+                    <TextBox Grid.Column="1"
+                             x:Name="KeyIdBox"
+                             Text="{Binding SuggestedKeyId, Mode=OneTime}"
+                             AutomationProperties.Name="Key name"
+                             AutomationProperties.HelpText="Goes into the public registry alongside your key. The month is useful if you ever replace the key."/>
+                </Grid>
+
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Key passphrase:" VerticalAlignment="Center"/>
+                    <PasswordBox Grid.Column="1"
+                                 x:Name="CreatePassphraseBox"
+                                 AutomationProperties.Name="Key passphrase"
+                                 AutomationProperties.HelpText="Protects the key file on this computer. You will not be asked for it each time you publish."/>
+                </Grid>
+
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Type it again:" VerticalAlignment="Center"/>
+                    <PasswordBox Grid.Column="1"
+                                 x:Name="CreateConfirmBox"
+                                 AutomationProperties.Name="Confirm key passphrase"/>
+                </Grid>
+
+                <Button Content="Create key"
+                        Click="CreateKey_Click"
+                        IsEnabled="{Binding CanCreate}"
+                        AutomationProperties.Name="Create the signing key"
+                        HorizontalAlignment="Left" MinWidth="120" Margin="0,0,0,20"/>
+
+                <!-- Export -->
+                <TextBlock Text="Back the key up"
+                           FontSize="15" FontWeight="SemiBold"
+                           AutomationProperties.HeadingLevel="Level2"
+                           Margin="0,0,0,6"/>
+
+                <TextBlock Text="The backup holds the key and how far your catalog has got. It is deliberately not tied to this computer, so its passphrase is the only thing protecting it — use a different one from the key passphrase, and keep both somewhere safe."
+                           TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
+
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Backup passphrase:" VerticalAlignment="Center"/>
+                    <PasswordBox Grid.Column="1"
+                                 x:Name="ExportPassphraseBox"
+                                 AutomationProperties.Name="Backup passphrase"/>
+                </Grid>
+
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Type it again:" VerticalAlignment="Center"/>
+                    <PasswordBox Grid.Column="1"
+                                 x:Name="ExportConfirmBox"
+                                 AutomationProperties.Name="Confirm backup passphrase"/>
+                </Grid>
+
+                <Button Content="Export backup..."
+                        Click="ExportBackup_Click"
+                        IsEnabled="{Binding HasKey}"
+                        AutomationProperties.Name="Export a key backup"
+                        HorizontalAlignment="Left" MinWidth="140" Margin="0,0,0,20"/>
+
+                <!-- Import -->
+                <TextBlock Text="Restore from a backup"
+                           FontSize="15" FontWeight="SemiBold"
+                           AutomationProperties.HeadingLevel="Level2"
+                           Margin="0,0,0,6"/>
+
+                <TextBlock Text="For a replacement machine, or to recover a key file that was lost. This replaces the key held here and deletes the file it replaces, so a backup holding a different key is refused rather than confirmed. The first publish afterwards asks you to confirm that the publish the backup remembers really is the latest one — no file can prove that on its own."
+                           TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
+
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Backup passphrase:" VerticalAlignment="Center"/>
+                    <PasswordBox Grid.Column="1"
+                                 x:Name="ImportPassphraseBox"
+                                 AutomationProperties.Name="Passphrase of the backup being restored"/>
+                </Grid>
+
+                <Button Content="Restore backup..."
+                        Click="ImportBackup_Click"
+                        AutomationProperties.Name="Restore a key from a backup"
+                        HorizontalAlignment="Left" MinWidth="140"/>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="3"
+                   Text="{Binding StatusMessage}"
+                   AutomationProperties.LiveSetting="Polite"
+                   TextWrapping="Wrap"
+                   Margin="0,12,0,0"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Close"
+                    IsCancel="True"
+                    AutomationProperties.Name="Close"
+                    MinWidth="90"/>
+        </StackPanel>
+    </Grid>
+</Window>

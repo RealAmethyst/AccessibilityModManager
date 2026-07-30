@@ -45,6 +45,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly RegistryMembershipChecker _registryChecker;
     private readonly ProjectReconciler _reconciler;
     private readonly IndexPublishCoordinator _publishCoordinator;
+    private readonly Action<string, bool> _showClaimSigningDialog;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -61,6 +62,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(BreakPublishLockCommand))]
     [NotifyCanExecuteChangedFor(nameof(CloseProjectCommand))]
     [NotifyCanExecuteChangedFor(nameof(CheckServerCommand))]
+    [NotifyCanExecuteChangedFor(nameof(EditCatalogSigningCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -177,7 +179,8 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         Action showServerUploadSettingsDialog,
         RegistryMembershipChecker registryChecker,
         ProjectReconciler reconciler,
-        IndexPublishCoordinator publishCoordinator)
+        IndexPublishCoordinator publishCoordinator,
+        Action<string, bool> showClaimSigningDialog)
     {
         _projectPath = projectPath;
         _configService = configService;
@@ -199,6 +202,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         _registryChecker = registryChecker;
         _reconciler = reconciler;
         _publishCoordinator = publishCoordinator;
+        _showClaimSigningDialog = showClaimSigningDialog;
 
         _patreon.StateChanged += OnPatreonStateChanged;
 
@@ -1197,6 +1201,17 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Opens the catalog-signing screen: create the key, back it up, restore it.
+    ///
+    /// <para>Not gated on <see cref="IsNotBusy"/>. Nothing on that screen touches the server, and
+    /// the one thing that could collide — exporting a backup while a publish is unsettled — is
+    /// refused by the key store itself, which will not write a backup that remembers an attempt
+    /// without the bytes it was going to send.</para>
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
+    private void EditCatalogSigning() => _showClaimSigningDialog(_index.PluginId, false);
+
     /// <summary>Shown when a second server operation is asked for while one is running.</summary>
     private const string AnotherOperationInFlight =
         "This project is already talking to your server. Wait for that to finish, then try again.";
@@ -1344,7 +1359,19 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             RecordPublishedSource: () => RecordPublishedIndex(candidate),
             ShowDialog: _showInfoDialog,
             CommitHistoryAsync: () => CommitLocalHistoryAsync(commitMessage),
-            SetStatus: message => StatusMessage = message));
+            SetStatus: message => StatusMessage = message,
+            OfferSigningSetup: () =>
+            {
+                if (_confirmDialog("Open catalog signing?",
+                        "The registry names a signing key for this catalog that isn't on this " +
+                        "machine. Restoring your key backup would let this copy publish again.\n\n" +
+                        "Open the catalog signing screen now?"))
+                {
+                    // Restore-only: the registry names a key, so creating another here
+                    // would make an unrelated one that signs nothing anybody trusts.
+                    _showClaimSigningDialog(_index.PluginId, true);
+                }
+            }));
     }
 
     /// <summary>

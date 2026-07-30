@@ -38,6 +38,11 @@
                         AutomationProperties.Name="Edit download server settings"
                         AutomationProperties.HelpText="Your server's address and SSH key. This is what lets you host releases on your own server instead of GitHub, and it's where the registry and your index are published."
                         Margin="0,0,8,0"/>
+                <Button Content="Catalog signing..."
+                        Command="{Binding EditCatalogSigningCommand}"
+                        AutomationProperties.Name="Catalog signing"
+                        AutomationProperties.HelpText="Create the key that signs this catalog, back it up, or restore it. Everything there is local — signing only starts when you publish a registry naming the key."
+                        Margin="0,0,8,0"/>
                 <Button Content="Save"
                         Command="{Binding SaveCommand}"
                         AutomationProperties.Name="Save index file"

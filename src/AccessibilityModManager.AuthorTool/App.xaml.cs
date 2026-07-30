@@ -148,7 +148,8 @@ public partial class App : Application
             () => ShowServerUploadSettingsDialog(sp),
             sp.GetRequiredService<RegistryMembershipChecker>(),
             sp.GetRequiredService<ProjectReconciler>(),
-            sp.GetRequiredService<IndexPublishCoordinator>());
+            sp.GetRequiredService<IndexPublishCoordinator>(),
+            (pluginId, restoreOnly) => ShowClaimSigningDialog(sp, pluginId, restoreOnly));
     }
 
     private static void ShowServerUploadSettingsDialog(IServiceProvider sp)
@@ -283,6 +284,42 @@ public partial class App : Application
         var owner = GetActiveOwnerWindow();
         var ok = owner != null ? dialog.ShowDialog(owner) : dialog.ShowDialog();
         return ok == true ? dialog.FolderName : null;
+    }
+
+    /// <summary>
+    /// Where to write a file the tool is about to create. Separate from <see cref="BrowseForFile"/>
+    /// because a key backup goes wherever the author keeps such things — answered explicitly as
+    /// "ask me each time", so there is deliberately no remembered default.
+    /// </summary>
+    private static string? BrowseToSave(string title, string suggestedFileName, string filter)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = title,
+            FileName = suggestedFileName,
+            Filter = filter,
+            OverwritePrompt = true
+        };
+
+        var owner = GetActiveOwnerWindow();
+        var ok = owner != null ? dialog.ShowDialog(owner) : dialog.ShowDialog();
+        return ok == true ? dialog.FileName : null;
+    }
+
+    private static void ShowClaimSigningDialog(IServiceProvider sp, string pluginId, bool restoreOnly)
+    {
+        var vm = new ClaimSigningViewModel(
+            pluginId,
+            sp.GetRequiredService<ClaimSigningKeyStore>(),
+            sp.GetRequiredService<PublisherHeadStore>(),
+            sp.GetRequiredService<ILogger>(),
+            ShowInfoDialog,
+            ConfirmDialog,
+            BrowseToSave,
+            BrowseForFile,
+            restoreOnly);
+
+        new ClaimSigningDialog(vm) { Owner = GetActiveOwnerWindow() }.ShowDialog();
     }
 
     private static string? BrowseForFile(string title, string filter, string? initialDirectory)
