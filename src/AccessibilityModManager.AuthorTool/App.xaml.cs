@@ -150,7 +150,7 @@ public partial class App : Application
             sp.GetRequiredService<RegistryMembershipChecker>(),
             sp.GetRequiredService<ProjectReconciler>(),
             sp.GetRequiredService<IndexPublishCoordinator>(),
-            (pluginId, restoreOnly) => ShowClaimSigningDialog(sp, pluginId, restoreOnly));
+            (pluginId, trust) => ShowClaimSigningDialog(sp, pluginId, trust));
     }
 
     private static void ShowServerUploadSettingsDialog(IServiceProvider sp)
@@ -307,7 +307,7 @@ public partial class App : Application
         return ok == true ? dialog.FileName : null;
     }
 
-    private static void ShowClaimSigningDialog(IServiceProvider sp, string pluginId, bool restoreOnly)
+    private static void ShowClaimSigningDialog(IServiceProvider sp, string pluginId, RegistryTrustState trust)
     {
         var vm = new ClaimSigningViewModel(
             pluginId,
@@ -318,7 +318,7 @@ public partial class App : Application
             ConfirmDialog,
             BrowseToSave,
             BrowseForFile,
-            restoreOnly);
+            trust);
 
         new ClaimSigningDialog(vm) { Owner = GetActiveOwnerWindow() }.ShowDialog();
     }

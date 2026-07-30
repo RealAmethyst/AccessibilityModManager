@@ -42,13 +42,14 @@ public sealed class ClaimSigningViewModelTests : IDisposable
 
     private PublisherHeadStore _heads = null!;
 
-    private ClaimSigningViewModel Create(bool restoreOnly = false) => new(
+    /// <summary>Default: the registry was read and names no key — the pre-signing state.</summary>
+    private ClaimSigningViewModel Create(RegistryTrustState? trust = null) => new(
         PluginId, _keys, _heads, TestLogger.Create(),
         showInfoDialog: (title, _) => _dialogs.Add(title),
         confirmDialog: (_, _) => _confirmAnswer,
         browseToSave: (_, _, _) => _saveTo,
         browseToOpen: (_, _, _) => _openFrom,
-        restoreOnly: restoreOnly);
+        registryTrust: trust ?? RegistryTrustState.NoKeyAnchored());
 
     private static char[] Pass(string text) => text.ToCharArray();
 
@@ -367,16 +368,120 @@ public sealed class ClaimSigningViewModelTests : IDisposable
         // Opened because the registry names a key this machine lacks. Creating one here would make
         // an unrelated key that signs nothing anyone trusts — and the old summary announced "your
         // catalog publishes unsigned, as it always has", which in this exact state is false.
-        var vm = Create(restoreOnly: true);
+        var vm = Create(RegistryTrustState.Anchored(new string('f', 64), "amethyst-2026-07"));
 
         Assert.False(vm.CanCreate);
         Assert.DoesNotContain("unsigned", vm.KeySummary, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Restore your backup", vm.KeySummary, StringComparison.Ordinal);
+        Assert.Contains("restore that backup", vm.KeySummary, StringComparison.OrdinalIgnoreCase);
 
         vm.CreateKey("sneaky", Pass("pp"), Pass("pp"));
 
         Assert.False(vm.HasKey);
         Assert.Contains("This catalog already has a key", _dialogs);
+    }
+
+    // ---- what the REGISTRY says, on a machine that holds nothing ----
+    //
+    // The replacement-machine case, and the one where getting it wrong strands recovery through the
+    // act meant to perform it. With an empty local store there is nothing to compare a backup
+    // against, so the registry has to be the thing that decides.
+
+    [Fact]
+    public void On_an_empty_machine_a_backup_of_the_wrong_key_is_refused_against_the_registry()
+    {
+        // Make a key elsewhere and back it up — a plausible wrong file: an old key, a test key, a
+        // different plugin's backup renamed.
+        var other = new ClaimSigningViewModelTests();
+        try
+        {
+            var elsewhere = other.Create();
+            elsewhere.CreateKey("not-the-live-key", Pass("pp"), Pass("pp"));
+            other._saveTo = Path.Combine(other._root, "wrong.json");
+            elsewhere.ExportBackup(Pass("wrong backup"), Pass("wrong backup"));
+
+            // This machine holds NOTHING, and the registry names some other key.
+            var vm = Create(RegistryTrustState.Anchored(new string('a', 64), "amethyst-2026-07"));
+            _openFrom = other._saveTo;
+
+            vm.ImportBackup(Pass("wrong backup"));
+
+            // Refused. Accepting it would announce "this machine can sign again", make the wrong key
+            // the one later restores are checked against, and leave the RIGHT backup refused.
+            Assert.False(vm.HasKey);
+            Assert.Contains("Couldn't restore that backup", _dialogs);
+        }
+        finally
+        {
+            other.Dispose();
+        }
+    }
+
+    [Fact]
+    public void On_an_empty_machine_the_backup_the_registry_names_is_accepted()
+    {
+        // The other half: the refusal above must not block the recovery it exists to protect.
+        var origin = new ClaimSigningViewModelTests();
+        try
+        {
+            var source = origin.Create();
+            source.CreateKey("amethyst-2026-07", Pass("pp"), Pass("pp"));
+            var fingerprint = origin._keys.TryGet(PluginId)!.PublicKeyFingerprint;
+            origin._saveTo = Path.Combine(origin._root, "right.json");
+            source.ExportBackup(Pass("right backup"), Pass("right backup"));
+
+            var vm = Create(RegistryTrustState.Anchored(fingerprint, "amethyst-2026-07"));
+            _openFrom = origin._saveTo;
+
+            vm.ImportBackup(Pass("right backup"));
+
+            Assert.True(vm.HasKey);
+            Assert.Equal(fingerprint, _keys.TryGet(PluginId)!.PublicKeyFingerprint);
+        }
+        finally
+        {
+            origin.Dispose();
+        }
+    }
+
+    [Fact]
+    public void An_anchored_catalog_never_offers_to_create_a_key()
+    {
+        // Reachable from the toolbar, not just from a failed publish: on a replacement machine the
+        // author might sensibly open this screen before ever pressing Publish. Creating here would
+        // make a key that signs nothing anyone trusts AND block restoring the real one.
+        var vm = Create(RegistryTrustState.Anchored(new string('a', 64), "amethyst-2026-07"));
+
+        Assert.False(vm.CanCreate);
+        Assert.True(vm.RestoreOnly);
+
+        vm.CreateKey("sneaky", Pass("pp"), Pass("pp"));
+
+        Assert.False(vm.HasKey);
+        Assert.Contains("This catalog already has a key", _dialogs);
+    }
+
+    [Fact]
+    public void An_unreadable_registry_is_not_permission_to_create()
+    {
+        // "Could not tell" is not "no key". Treating it as permission is how a key gets made for a
+        // catalog that already has one, precisely when the network is the thing that is broken.
+        var vm = Create(RegistryTrustState.Unreadable("no route to host"));
+
+        Assert.False(vm.CanCreate);
+
+        vm.CreateKey("amethyst-2026-07", Pass("pp"), Pass("pp"));
+
+        Assert.False(vm.HasKey);
+        Assert.Contains("The registry couldn't be read", _dialogs);
+    }
+
+    [Fact]
+    public void The_summary_names_the_key_the_registry_wants_when_this_machine_has_none()
+    {
+        var vm = Create(RegistryTrustState.Anchored(new string('a', 64), "amethyst-2026-07"));
+
+        Assert.Contains("amethyst-2026-07", vm.KeySummary, StringComparison.Ordinal);
+        Assert.DoesNotContain("unsigned", vm.KeySummary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

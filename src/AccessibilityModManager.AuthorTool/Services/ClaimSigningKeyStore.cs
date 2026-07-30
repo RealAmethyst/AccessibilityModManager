@@ -412,6 +412,20 @@ public sealed class ClaimSigningKeyStore(
                 "would not verify for anyone. Check you imported the right backup.");
         }
 
+        // Rechecked HERE, immediately before anything is written, and not only in the caller. The
+        // view model asks the same question, but it asks it before a file picker and a confirmation
+        // dialog — a person-length interval during which another copy of the tool, or another caller
+        // in this one, can journal a publish. Replacing the key or rolling the head back while an
+        // attempt is outstanding leaves that attempt recorded against a key this machine no longer
+        // holds, and nothing afterwards can work out what was sent.
+        if (headStore.RecordsFor(pluginId).Any(r => r.Pending is not null))
+        {
+            throw new InvalidOperationException(
+                "There is a publish that was started and never confirmed. Settle it first by " +
+                "publishing again — that reads the server and either finishes it or explains why it " +
+                "cannot. Restoring a key while an attempt is outstanding would strand it.");
+        }
+
         var config = configService.Load();
         var previous = config.ClaimSigningKeys.GetValueOrDefault(pluginId);
 

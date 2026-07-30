@@ -411,18 +411,44 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
             return;
         }
 
-        // Anchoring a key against an address managers are not sent to would publish signed
-        // catalogs nobody reads — and publishing refuses afterwards, which is a confusing place to
-        // discover it. The same comparison the publish path makes, made here first.
-        if (plugin["repoIndexUrl"]?.GetValue<string>() is { } registered &&
-            IndexPublishCoordinator.IndexUrlMismatch(registered, pluginId) is { } mismatch)
+        // Anchoring a key against an address managers are not sent to would publish signed catalogs
+        // nobody reads — and publishing refuses afterwards, which is a confusing place to discover
+        // it. The same comparison the publish path makes, made here first.
+        //
+        // A MISSING address is refused too, rather than skipped. "There is nothing to compare" is
+        // not the same as "they agree", and anchoring a key to an entry that cannot say where
+        // managers read produces exactly the signed-catalog-nobody-reads outcome this guards.
+        if (plugin["repoIndexUrl"] is not System.Text.Json.Nodes.JsonValue urlValue ||
+            urlValue.GetValueKind() != System.Text.Json.JsonValueKind.String)
+        {
+            _showInfoDialog("That entry has no index address",
+                $"'{pluginId}' carries no usable repoIndexUrl, so there is no way to tell whether a " +
+                "signed catalog published from here would reach anyone. Fill the Repo index URL in " +
+                "first.\n\nNothing was changed.");
+            return;
+        }
+
+        if (IndexPublishCoordinator.IndexUrlMismatch(urlValue.GetValue<string>(), pluginId) is { } mismatch)
         {
             _showInfoDialog("Fix the index address first", mismatch);
             return;
         }
 
-        if (plugin["indexTrust"] is System.Text.Json.Nodes.JsonObject existing)
+        // Any PRESENT indexTrust that is not the exact object this command writes counts as an
+        // existing different configuration. Matching only on JsonObject would let a string, an
+        // array, or some future shape fall through and be silently overwritten — and "I did not
+        // recognise it" is not a reason to replace something the registry is vouching for.
+        if (plugin["indexTrust"] is { } present && present.GetValueKind() != System.Text.Json.JsonValueKind.Null)
         {
+            if (present is not System.Text.Json.Nodes.JsonObject existing)
+            {
+                _showInfoDialog("That entry already carries something else under indexTrust",
+                    $"'{pluginId}' has an indexTrust value this version doesn't recognise, so it " +
+                    "can't tell whether replacing it would break anything already published. " +
+                    "Nothing was changed.");
+                return;
+            }
+
             var same =
                 existing["scheme"]?.GetValue<string>() == ClaimTrustAnchor.SchemeV1 &&
                 existing["keyId"]?.GetValue<string>() == signing.KeyId &&

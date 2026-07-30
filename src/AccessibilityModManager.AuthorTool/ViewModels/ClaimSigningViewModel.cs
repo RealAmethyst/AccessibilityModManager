@@ -5,6 +5,33 @@ using Serilog;
 namespace AccessibilityModManager.AuthorTool.ViewModels;
 
 /// <summary>
+/// What the signed registry says about this plugin's signing key, resolved before the signing
+/// screen opens.
+///
+/// <para>The screen needs this and cannot work without it. Both of the worst things it could do —
+/// creating a key for a catalog that already has one, and accepting a restore of the wrong key —
+/// are only distinguishable from the right thing by asking the registry. Without it the screen
+/// compares against whatever this machine happens to hold, which on a replacement machine is
+/// nothing at all, so anything is accepted; and the first wrong answer then becomes the thing
+/// later answers are checked against, stranding recovery through the act meant to perform it.</para>
+/// </summary>
+/// <param name="Known">
+/// Whether the registry was actually read and its signature verified. False is not "no key" — it is
+/// "cannot tell", and the screen treats it as a refusal to create rather than permission.
+/// </param>
+/// <param name="AnchoredFingerprint">The fingerprint the registry names, when it names one.</param>
+/// <param name="AnchoredKeyId">Its key id, for saying out loud which backup is wanted.</param>
+/// <param name="Problem">Why it could not be read, when it could not.</param>
+public readonly record struct RegistryTrustState(
+    bool Known, string? AnchoredFingerprint, string? AnchoredKeyId, string? Problem)
+{
+    public static RegistryTrustState Unreadable(string problem) => new(false, null, null, problem);
+    public static RegistryTrustState NoKeyAnchored() => new(true, null, null, null);
+    public static RegistryTrustState Anchored(string fingerprint, string keyId) =>
+        new(true, fingerprint, keyId, null);
+}
+
+/// <summary>
 /// Creating, backing up and restoring the key this author signs one plugin's catalog with.
 ///
 /// <para>This screen does not publish a catalog and does not change the registry. Creating a key is
@@ -18,11 +45,15 @@ namespace AccessibilityModManager.AuthorTool.ViewModels;
 /// is why a restore that would bring in a DIFFERENT key is refused outright rather than
 /// confirmed.</para>
 ///
-/// <para>Passphrases arrive as <c>char[]</c> from the view's PasswordBox rather than as strings.
-/// Each operation is split in two: an inner method that consumes the characters and decides, and an
-/// outer one that wipes them and only then speaks. Doing the wipe in a <c>finally</c> around the
-/// whole thing would not be enough — the dialogs come after, and a dialog waits for a person, so the
-/// characters would sit in memory for as long as it takes them to read it.</para>
+/// <para>Passphrases arrive as <c>char[]</c> from the view's PasswordBox rather than as strings, and
+/// are wiped before any RESULT is reported: each operation is split into an inner method that
+/// consumes the characters and decides, and an outer one that wipes and only then speaks. That is
+/// worth stating precisely rather than generously, because it is not "wiped before any dialog".
+/// Export opens a save picker while holding its passphrase, and restore opens a picker and a
+/// confirmation while holding its own, so those characters do live in managed memory for as long as
+/// the author takes over those steps. Closing that would mean choosing the file and confirming
+/// BEFORE the passphrase is read out of the PasswordBox — a worthwhile change, and a larger one
+/// than this note.</para>
 /// </summary>
 public sealed partial class ClaimSigningViewModel(
     string pluginId,
@@ -35,7 +66,7 @@ public sealed partial class ClaimSigningViewModel(
     Func<string, string, string, string?> browseToSave,
     // (title, filter, initial directory) — the same shape the rest of the tool uses.
     Func<string, string, string?, string?> browseToOpen,
-    bool restoreOnly = false) : ObservableObject
+    RegistryTrustState registryTrust) : ObservableObject
 {
     [ObservableProperty]
     private string? _statusMessage;
@@ -43,13 +74,28 @@ public sealed partial class ClaimSigningViewModel(
     public string PluginId => pluginId;
 
     /// <summary>
-    /// True when the screen was opened because publishing found the registry naming a key this
-    /// machine does not have. Creating a key is then exactly the wrong move — it would make an
-    /// unrelated key that signs nothing anybody trusts — so it is not offered.
+    /// True when the registry already anchors a key for this plugin. Creating one is then exactly
+    /// the wrong move — it would make an unrelated key that signs nothing anybody trusts, and worse,
+    /// it would become the key a later restore is checked against, so the CORRECT backup would then
+    /// be refused. Recovery would be stranded by the act meant to perform it.
     /// </summary>
-    public bool RestoreOnly => restoreOnly;
+    public bool RestoreOnly => registryTrust.AnchoredFingerprint is not null;
 
-    public bool CanCreate => !restoreOnly && !HasKey;
+    /// <summary>
+    /// Creating is allowed only when the registry has been read AND names no key. An unread
+    /// registry is not permission: it is the state where this screen cannot tell whether creating
+    /// would strand recovery, and that is the whole question.
+    /// </summary>
+    public bool CanCreate => registryTrust.Known && registryTrust.AnchoredFingerprint is null && !HasKey;
+
+    /// <summary>
+    /// What a restore must produce. The REGISTRY decides when it names a key — not what this
+    /// machine happens to hold — so a backup of the anchored key can repair an unrelated local key,
+    /// while a backup of anything else is refused however empty the local store is. Falling back to
+    /// the local fingerprint covers the unanchored case, where there is no external truth and the
+    /// only thing worth protecting is a key already here.
+    /// </summary>
+    private string? RequiredFingerprint => registryTrust.AnchoredFingerprint ?? Current?.PublicKeyFingerprint;
 
     /// <summary>The default key id, which is also what the registry will name.</summary>
     public string SuggestedKeyId { get; } = $"{pluginId}-{DateTime.UtcNow:yyyy-MM}";
@@ -75,10 +121,15 @@ public sealed partial class ClaimSigningViewModel(
             // catalog "publishes unsigned, as it always has", which is precisely false in the state
             // this screen is most often opened in — where the registry DOES anchor a key and
             // publishing is refusing because this machine lacks it.
-            return restoreOnly
-                ? $"No signing key for '{pluginId}' on this machine, and the registry names one. " +
-                  "Restore your backup to publish again."
-                : $"No signing key for '{pluginId}' on this machine.";
+            if (registryTrust.AnchoredFingerprint is { } anchored)
+            {
+                return $"No signing key for '{pluginId}' on this machine. The registry names key " +
+                       $"'{registryTrust.AnchoredKeyId}' ({anchored}) — restore that backup to publish again.";
+            }
+
+            return registryTrust.Known
+                ? $"No signing key for '{pluginId}' on this machine."
+                : $"No signing key for '{pluginId}' on this machine, and the registry couldn't be read.";
         }
     }
 
@@ -154,11 +205,21 @@ public sealed partial class ClaimSigningViewModel(
 
     private Outcome DoCreate(string keyId, char[] passphrase, char[] confirmation)
     {
-        if (restoreOnly)
+        if (registryTrust.AnchoredFingerprint is not null)
         {
             return Outcome.Failed("This catalog already has a key",
                 "The registry names a signing key for it. A new one made here would sign nothing " +
-                "anyone trusts. Restore your backup instead.");
+                "anyone trusts — and it would become the key a later restore is checked against, so " +
+                "your real backup would then be refused. Restore that backup instead.");
+        }
+
+        if (!registryTrust.Known)
+        {
+            return Outcome.Failed("The registry couldn't be read",
+                "Creating a key is refused until the registry can be checked. If it already names a " +
+                "key for this catalog, a new one here would sign nothing anyone trusts and would " +
+                "block restoring the right backup.\n\n" +
+                $"({registryTrust.Problem})");
         }
 
         if (passphrase.Length == 0)
@@ -323,14 +384,17 @@ public sealed partial class ClaimSigningViewModel(
         // damaged file. A backup carrying a different key is refused rather than confirmed: it would
         // destroy the key the registry vouches for, and no question asked in a dialog makes that
         // recoverable. Changing which key signs a catalog is a registry operation, not a restore.
-        var expected = Current?.PublicKeyFingerprint;
+        var expected = RequiredFingerprint;
 
         if (!confirmDialog("Restore this key?",
                 (expected is null
                     ? $"This makes the key in that file the one this machine signs '{pluginId}' with.\n\n"
-                    : $"This restores the key already recorded here — '{Current!.KeyId}', fingerprint " +
-                      $"{expected}. A backup holding any other key is refused, because restoring it " +
-                      "would destroy this one.\n\n") +
+                    : $"Only a backup of key {expected} will be accepted" +
+                      (registryTrust.AnchoredFingerprint is not null
+                          ? $" — that is the key the registry names ('{registryTrust.AnchoredKeyId}'), " +
+                            "and any other would sign nothing anyone trusts.\n\n"
+                          : " — that is the key recorded here, and restoring another would delete " +
+                            "it.\n\n")) +
                 "The first publish afterwards will ask you to confirm that the publish the backup " +
                 "names really is the latest one. That question exists because no file can prove it is " +
                 "current — if you published again after taking this backup, continuing from it would " +

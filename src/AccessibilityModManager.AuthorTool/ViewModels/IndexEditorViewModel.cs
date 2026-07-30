@@ -45,7 +45,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly RegistryMembershipChecker _registryChecker;
     private readonly ProjectReconciler _reconciler;
     private readonly IndexPublishCoordinator _publishCoordinator;
-    private readonly Action<string, bool> _showClaimSigningDialog;
+    private readonly Action<string, RegistryTrustState> _showClaimSigningDialog;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -180,7 +180,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         RegistryMembershipChecker registryChecker,
         ProjectReconciler reconciler,
         IndexPublishCoordinator publishCoordinator,
-        Action<string, bool> showClaimSigningDialog)
+        Action<string, RegistryTrustState> showClaimSigningDialog)
     {
         _projectPath = projectPath;
         _configService = configService;
@@ -1210,7 +1210,40 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// without the bytes it was going to send.</para>
     /// </summary>
     [RelayCommand(CanExecute = nameof(IsNotBusy))]
-    private void EditCatalogSigning() => _showClaimSigningDialog(_index.PluginId, false);
+    private Task EditCatalogSigningAsync() => OpenCatalogSigningAsync();
+
+    /// <summary>
+    /// Opens the signing screen with the registry's answer already in hand.
+    ///
+    /// <para>Resolved here rather than inside the screen because the screen is modal and synchronous,
+    /// and because the answer decides what it may do at all: a catalog the registry already anchors a
+    /// key for must never offer to create another, and a restore must be checked against the key the
+    /// REGISTRY names rather than whatever this machine holds — which, on a replacement machine, is
+    /// nothing.</para>
+    /// </summary>
+    private async Task OpenCatalogSigningAsync()
+    {
+        RegistryTrustState trust;
+        try
+        {
+            var json = await new RegistryVerifiedSource(_registryChecker)
+                .ReadVerifiedAsync(_index.PluginId, CancellationToken.None);
+
+            trust = IndexProofService.TryReadAnchor(json, _index.PluginId) is { } anchor
+                ? RegistryTrustState.Anchored(
+                    ClaimTrustContext.PublicKeyFingerprint(anchor.PublicKeyPem), anchor.KeyId)
+                : RegistryTrustState.NoKeyAnchored();
+        }
+        catch (Exception ex)
+        {
+            // Not treated as "no key anchored". Unknown is its own state and the screen refuses to
+            // create against it.
+            _logger.Warning(ex, "Couldn't read the registry before opening catalog signing");
+            trust = RegistryTrustState.Unreadable(ex.Message);
+        }
+
+        _showClaimSigningDialog(_index.PluginId, trust);
+    }
 
     /// <summary>Shown when a second server operation is asked for while one is running.</summary>
     private const string AnotherOperationInFlight =
@@ -1363,8 +1396,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             OfferKeyBackup: () =>
             {
                 var (title, message) = PublishPresentation.FreshBackupPrompt(_index.PluginId);
-                if (_confirmDialog(title, message))
-                    _showClaimSigningDialog(_index.PluginId, false);
+                if (_confirmDialog(title, message)) _ = OpenCatalogSigningAsync();
             },
             OfferSigningSetup: () =>
             {
@@ -1373,9 +1405,9 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                         "machine. Restoring your key backup would let this copy publish again.\n\n" +
                         "Open the catalog signing screen now?"))
                 {
-                    // Restore-only: the registry names a key, so creating another here
-                    // would make an unrelated one that signs nothing anybody trusts.
-                    _showClaimSigningDialog(_index.PluginId, true);
+                    // The screen resolves the registry itself, so it opens knowing the anchor
+                    // exists and refusing to create a key against it.
+                    _ = OpenCatalogSigningAsync();
                 }
             }));
     }

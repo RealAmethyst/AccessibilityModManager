@@ -218,6 +218,51 @@ public sealed class RegistryAnchorTests : IDisposable
         Assert.Contains("Fix the index address first", _dialogs);
     }
 
+    [Theory]
+    [InlineData("\"a-string-not-an-object\"")]
+    [InlineData("[ \"an\", \"array\" ]")]
+    [InlineData("7")]
+    public void An_indexTrust_shape_this_version_does_not_understand_is_refused_not_overwritten(string value)
+    {
+        // Matching only on "is it a JSON object" would let anything else fall through and be
+        // silently replaced. Not recognising something the registry is vouching for is not a reason
+        // to overwrite it.
+        _keys.Create(PluginId, "pp");
+
+        var vm = Create();
+        vm.RegistryJsonContent = Registry(indexTrust: value);
+        vm.SelectedPluginId = PluginId;
+        var before = vm.RegistryJsonContent;
+
+        vm.UseLocalSigningKeyCommand.Execute(null);
+
+        Assert.Equal(before, vm.RegistryJsonContent);
+        Assert.Contains("That entry already carries something else under indexTrust", _dialogs);
+    }
+
+    [Fact]
+    public void An_entry_with_no_index_address_is_refused()
+    {
+        // "Nothing to compare" is not "they agree". Anchoring a key to an entry that cannot say
+        // where managers read produces a signed catalog nobody reads.
+        _keys.Create(PluginId, "pp");
+
+        var vm = Create();
+        vm.RegistryJsonContent = """
+            {
+              "registryVersion": "2",
+              "updatedAt": "2026-07-30T00:00:00Z",
+              "plugins": [ { "id": "amethyst", "name": "n", "author": "a", "description": "d" } ]
+            }
+            """;
+        vm.SelectedPluginId = PluginId;
+
+        vm.UseLocalSigningKeyCommand.Execute(null);
+
+        Assert.Null(TrustOf(vm.RegistryJsonContent!));
+        Assert.Contains("That entry has no index address", _dialogs);
+    }
+
     [Fact]
     public void A_non_numeric_registry_version_is_refused()
     {

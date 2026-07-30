@@ -640,11 +640,16 @@ public sealed class ServerUploadService
     /// first signed publish, which is the one publish that starts a history that cannot be
     /// restarted.</para>
     ///
-    /// <para>It does not take the index, and there is no code path from here to a rename. That is
-    /// deliberate and structural rather than guarded by a flag: a rehearsal that could rename would
-    /// be more dangerous than no rehearsal at all, and a boolean saying "don't go live" is one typo
-    /// away from going live. What it uploads is a marker under a temporary name, and the only thing
-    /// that ever happens to that file is deletion.</para>
+    /// <para>This METHOD contains no rename and does not take the index: what it uploads is a marker
+    /// under a temporary name, and the only thing it ever does with that file is delete it. That is
+    /// deliberate rather than guarded by a flag, because a boolean saying "don't go live" is one
+    /// typo away from going live.</para>
+    ///
+    /// <para>It is not, however, structurally incapable of publishing, and the distinction is worth
+    /// keeping honest: <paramref name="beforeSwitchAsync"/> is arbitrary code, and the object that
+    /// implements the rehearsal in production also implements the real transport. What makes the
+    /// self-test safe is its callback, which only fetches and verifies the registry — not a property
+    /// of this signature.</para>
     /// </summary>
     public async Task RehearseIndexPublishAsync(
         ServerUploadConfig cfg, string pluginId, Func<Task> beforeSwitchAsync, CancellationToken ct)
@@ -671,9 +676,22 @@ public sealed class ServerUploadService
             }
             finally
             {
-                // However this ends, the staged file goes. Leaving dotfiles behind in the catalog
-                // directory is exactly what a rehearsal must not do.
+                // However this ends, the staged file goes — leaving dotfiles in the catalog
+                // directory is exactly what a rehearsal must not do. Best-effort by necessity (a
+                // dead session cannot delete anything), so the outcome is checked and logged rather
+                // than assumed: a rehearsal that quietly littered would be discovered by someone
+                // reading the server, not by anyone here.
                 TryDeleteRemote(sftp, paths.Temp);
+
+                try
+                {
+                    if (sftp.Exists(paths.Temp))
+                        _logger.Warning("Rehearsal left a staged file behind at {Path}", paths.Temp);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning(ex, "Couldn't confirm the rehearsal's staged file was removed");
+                }
             }
         }, ct);
     }
