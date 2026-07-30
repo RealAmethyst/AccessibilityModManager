@@ -92,6 +92,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="160"/>
@@ -126,6 +127,18 @@
                          AutomationProperties.Name="Plugin website"
                          AutomationProperties.HelpText="Optional https address shown to users. Leave empty to remove it."
                          Margin="0,2"/>
+
+                <!-- Beside the plugin picker it acts on, and deliberately NOT beside Sign and
+                     Publish: it edits the JSON and nothing else, and it should not sit under the
+                     hand of someone reaching for the buttons that go live. -->
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Catalog signing:" VerticalAlignment="Center" Margin="0,2"/>
+                <Button Grid.Row="4" Grid.Column="1"
+                        Content="Use this machine's signing key"
+                        Command="{Binding UseLocalSigningKeyCommand}"
+                        AutomationProperties.Name="Use this machine's signing key for the selected plugin"
+                        AutomationProperties.HelpText="Adds this machine's key to the selected plugin's entry and raises the registry version. Nothing goes live until you sign and publish the registry — after which every publish of that plugin must be signed by that key."
+                        HorizontalAlignment="Left"
+                        Margin="0,2"/>
             </Grid>
 
             <TextBox Grid.Row="2"
@@ -153,6 +166,7 @@
                          x:Name="PasswordBox"
                          AutomationProperties.Name="Private key password"/>
         </Grid>
+
 
         <DockPanel Grid.Row="4" Margin="0,12,0,0">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">

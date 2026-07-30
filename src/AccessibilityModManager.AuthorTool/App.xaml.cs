@@ -103,6 +103,7 @@ public partial class App : Application
             sp.GetRequiredService<GitHubService>(),
             sp.GetRequiredService<GitService>(),
             sp.GetRequiredService<ServerUploadService>(),
+            sp.GetRequiredService<ClaimSigningKeyStore>(),
             sp.GetRequiredService<ILogger>(),
             ShowInfoDialog,
             ConfirmDialog,

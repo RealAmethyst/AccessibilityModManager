@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.CatalogClaims;
 using AccessibilityModManager.Infrastructure.Security;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -57,6 +58,8 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
     [ObservableProperty]
     private string? _privateKeyPath;
 
+    private readonly ClaimSigningKeyStore _claimKeys;
+
     [ObservableProperty]
     private string? _statusMessage;
 
@@ -77,6 +80,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         GitHubService gitHubService,
         GitService gitService,
         ServerUploadService serverUploadService,
+        ClaimSigningKeyStore claimKeys,
         ILogger logger,
         Action<string, string> showInfoDialog,
         Func<string, string, bool> confirmDialog,
@@ -88,6 +92,7 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         _gitHubService = gitHubService;
         _gitService = gitService;
         _serverUploadService = serverUploadService;
+        _claimKeys = claimKeys;
         _logger = logger;
         _showInfoDialog = showInfoDialog;
         _confirmDialog = confirmDialog;
@@ -353,6 +358,144 @@ public sealed partial class RegistryAdminViewModel : ObservableObject
         {
             _syncingFields = false;
         }
+    }
+
+    /// <summary>
+    /// Writes the selected plugin's local signing key into its registry entry, and raises the
+    /// registry version.
+    ///
+    /// <para>This is the act that turns signing on — not here, but two steps later. Editing the
+    /// JSON changes nothing anyone can see; signing the registry and publishing it is what every
+    /// manager then reads, and from that moment every publish of that plugin has to be signed by
+    /// this key. So the confirmation says so plainly, and everything that can be checked first is
+    /// checked first.</para>
+    ///
+    /// <para>An existing, different <c>indexTrust</c> is refused rather than overwritten. Replacing
+    /// it is a key rotation: every claim already published stops verifying the moment the new
+    /// registry goes live, so it needs its own deliberate flow rather than a button that happens to
+    /// overwrite.</para>
+    /// </summary>
+    [RelayCommand]
+    private void UseLocalSigningKey()
+    {
+        if (SelectedPluginId is not { Length: > 0 } pluginId)
+        {
+            _showInfoDialog("Pick a plugin first",
+                "Choose which plugin's entry should name a signing key.");
+            return;
+        }
+
+        if (_claimKeys.TryGet(pluginId) is not { } signing)
+        {
+            _showInfoDialog("There is no key for that plugin on this machine",
+                $"'{pluginId}' has no signing key here. Open the project and use Catalog signing to " +
+                "create one, then come back.\n\nNothing was changed.");
+            return;
+        }
+
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(RegistryJsonContent ?? "");
+        }
+        catch (Exception ex)
+        {
+            _showInfoDialog("The registry JSON doesn't parse", ex.Message);
+            return;
+        }
+
+        if (root is null || FindPluginNode(root, pluginId) is not { } plugin)
+        {
+            _showInfoDialog("That plugin isn't listed",
+                $"The registry has no entry for '{pluginId}', so there is nothing to add a key to.");
+            return;
+        }
+
+        // Anchoring a key against an address managers are not sent to would publish signed
+        // catalogs nobody reads — and publishing refuses afterwards, which is a confusing place to
+        // discover it. The same comparison the publish path makes, made here first.
+        if (plugin["repoIndexUrl"]?.GetValue<string>() is { } registered &&
+            IndexPublishCoordinator.IndexUrlMismatch(registered, pluginId) is { } mismatch)
+        {
+            _showInfoDialog("Fix the index address first", mismatch);
+            return;
+        }
+
+        if (plugin["indexTrust"] is System.Text.Json.Nodes.JsonObject existing)
+        {
+            var same =
+                existing["scheme"]?.GetValue<string>() == ClaimTrustAnchor.SchemeV1 &&
+                existing["keyId"]?.GetValue<string>() == signing.KeyId &&
+                existing["algorithm"]?.GetValue<string>() == ClaimTrustAnchor.AlgorithmRsaPssSha256 &&
+                existing["publicKeyPem"]?.GetValue<string>() == signing.PublicKeyPem;
+
+            if (same)
+            {
+                StatusMessage = $"'{pluginId}' already names this key. Nothing to change.";
+                return;
+            }
+
+            _showInfoDialog("That entry already names a different key",
+                $"'{pluginId}' is anchored to key '{existing["keyId"]?.GetValue<string>() ?? "unknown"}', " +
+                $"and this machine holds '{signing.KeyId}'.\n\n" +
+                "Replacing it would stop every claim already published from verifying, the moment " +
+                "this registry went live. That is a key rotation, and it needs to be done " +
+                "deliberately rather than by this button.\n\nNothing was changed.");
+            return;
+        }
+
+        var version = FieldRegistryVersion?.Trim();
+        if (!long.TryParse(version, out var current) || current < 0)
+        {
+            _showInfoDialog("The registry version has to be a whole number",
+                $"It currently reads '{version}'. Managers refuse a registry older than one they " +
+                "have already seen, and that comparison needs a number.\n\nNothing was changed.");
+            return;
+        }
+
+        if (!_confirmDialog("Name this key in the registry?",
+                $"This adds key '{signing.KeyId}' to the entry for '{pluginId}' and raises the " +
+                $"registry version to {current + 1}.\n\n" +
+                "Fingerprint: " + signing.PublicKeyFingerprint + "\n\n" +
+                "Nothing goes live yet — you still have to sign the registry and publish it. But " +
+                "once you do, every later publish of that plugin has to be signed by this key, and " +
+                "changing that means another signed registry.\n\n" +
+                "Add it?"))
+        {
+            StatusMessage = "Left the registry as it was.";
+            return;
+        }
+
+        plugin["indexTrust"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["scheme"] = ClaimTrustAnchor.SchemeV1,
+            ["keyId"] = signing.KeyId,
+            ["algorithm"] = ClaimTrustAnchor.AlgorithmRsaPssSha256,
+            ["publicKeyPem"] = signing.PublicKeyPem
+        };
+
+        // Through the field, so the version box and the JSON cannot disagree.
+        _syncingFields = true;
+        try
+        {
+            RegistryJsonContent = root.ToJsonString(new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+            FieldRegistryVersion = (current + 1).ToString();
+        }
+        finally
+        {
+            _syncingFields = false;
+        }
+
+        ApplyFieldsToJson();
+
+        _logger.Information("Anchored claim signing key {KeyId} for {PluginId} in the registry JSON",
+            signing.KeyId, pluginId);
+
+        StatusMessage = $"'{pluginId}' now names key '{signing.KeyId}', version {current + 1}. " +
+                        "Sign the registry, then publish it — that is when signing starts.";
     }
 
     [RelayCommand]
