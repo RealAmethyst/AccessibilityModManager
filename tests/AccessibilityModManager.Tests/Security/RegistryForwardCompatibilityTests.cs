@@ -52,6 +52,50 @@ public sealed class RegistryForwardCompatibilityTests
     }
 
     [Fact]
+    public void A_published_index_carrying_a_signature_block_is_still_readable()
+    {
+        // Live since 30 July 2026: the published index now carries a `proof` member that managers
+        // released before signing existed know nothing about. If they refused it, every user of
+        // those versions would lose the catalog — so this is pinned against the manager's own
+        // validation rather than left as a property of a JsonSerializerOptions literal somewhere.
+        var index = """
+        {
+          "pluginId": "amethyst",
+          "repoVersion": "1",
+          "generatedAt": "2026-07-30T00:00:00Z",
+          "games": [
+            { "gameId": "game1", "displayName": "Game one", "modName": "Mod" }
+          ],
+          "releasesByGameId": {
+            "game1": [
+              {
+                "gameId": "game1",
+                "pluginId": "amethyst",
+                "version": "1.0.0",
+                "channel": "stable",
+                "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "packageUrl": "https://accessibilitymods.com/releases/game1-1.0.0.zip"
+              }
+            ]
+          },
+          "proof": {
+            "scheme": "signed-claims-v1",
+            "keyId": "amethyst-2026-07",
+            "algorithm": "rsa-pss-sha256",
+            "claims": [],
+            "manifest": "not-inspected-here"
+          }
+        }
+        """;
+
+        var report = AccessibilityModManager.Infrastructure.Services.PluginIndexValidation
+            .Validate("amethyst", index);
+
+        Assert.Empty(report.TrustErrors);
+        Assert.Empty(report.UnobtainableReleases);
+    }
+
+    [Fact]
     public void An_unknown_member_anywhere_in_the_registry_is_ignored_rather_than_fatal()
     {
         // The same property stated generally, so it is not only 'indexTrust' that is safe to add.

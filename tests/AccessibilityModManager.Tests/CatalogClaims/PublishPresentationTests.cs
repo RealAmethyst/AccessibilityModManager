@@ -195,6 +195,7 @@ public sealed class PublishPresentationTests
     {
         public int Recorded;
         public int Commits;
+        public int BackupOffers;
         public readonly List<string> Dialogs = [];
         public string? Status;
 
@@ -202,7 +203,8 @@ public sealed class PublishPresentationTests
             RecordPublishedSource: () => Recorded++,
             ShowDialog: (title, _) => Dialogs.Add(title),
             CommitHistoryAsync: () => { Commits++; return Task.CompletedTask; },
-            SetStatus: status => Status = status);
+            SetStatus: status => Status = status,
+            OfferKeyBackup: () => BackupOffers++);
     }
 
     [Fact]
@@ -251,7 +253,7 @@ public sealed class PublishPresentationTests
     }
 
     [Fact]
-    public async Task Starting_the_history_shows_the_backup_prompt_after_the_result()
+    public async Task Starting_the_history_offers_to_export_a_fresh_backup()
     {
         var spy = new Spy();
 
@@ -259,9 +261,34 @@ public sealed class PublishPresentationTests
             Result(PublishStatus.Published, localSourceIsLive: true, startedHistory: true),
             "amethyst", spy.Effects);
 
-        // The publish itself is a status line, so the backup prompt is the only dialog.
-        Assert.Equal(["Export a fresh key backup"], spy.Dialogs);
+        // An OFFER, not a notice. This is the moment the author's existing backup stops being able
+        // to recover the catalog, and a message they can only acknowledge leaves them to go and
+        // find the right screen — which is how it does not get done.
+        Assert.Equal(1, spy.BackupOffers);
         Assert.Equal(1, spy.Recorded);
+
+        // And the publish itself stays a status line, so the offer is the only thing that stops them.
+        Assert.Empty(spy.Dialogs);
+    }
+
+    [Fact]
+    public async Task An_ordinary_publish_does_not_ask_about_backups()
+    {
+        var spy = new Spy();
+
+        await PublishPresentation.ApplyAsync(
+            Result(PublishStatus.Published, localSourceIsLive: true), "amethyst", spy.Effects);
+
+        Assert.Equal(0, spy.BackupOffers);
+    }
+
+    [Fact]
+    public void The_backup_prompt_is_worded_as_a_question()
+    {
+        var (title, message) = PublishPresentation.FreshBackupPrompt("amethyst");
+
+        Assert.EndsWith("?", title, StringComparison.Ordinal);
+        Assert.EndsWith("?", message.TrimEnd(), StringComparison.Ordinal);
     }
 
     [Fact]

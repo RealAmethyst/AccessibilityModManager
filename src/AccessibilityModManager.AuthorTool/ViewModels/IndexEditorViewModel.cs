@@ -1360,6 +1360,12 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             ShowDialog: _showInfoDialog,
             CommitHistoryAsync: () => CommitLocalHistoryAsync(commitMessage),
             SetStatus: message => StatusMessage = message,
+            OfferKeyBackup: () =>
+            {
+                var (title, message) = PublishPresentation.FreshBackupPrompt(_index.PluginId);
+                if (_confirmDialog(title, message))
+                    _showClaimSigningDialog(_index.PluginId, false);
+            },
             OfferSigningSetup: () =>
             {
                 if (_confirmDialog("Open catalog signing?",

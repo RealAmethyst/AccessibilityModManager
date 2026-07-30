@@ -15,12 +15,18 @@ namespace AccessibilityModManager.AuthorTool.Services;
 /// Asks whether to open the catalog-signing screen, and opens it on yes. Only ever reached when the
 /// registry anchors a key this machine does not have.
 /// </param>
+/// <param name="OfferKeyBackup">
+/// Asks whether to export a fresh key backup, and opens the screen to do it on yes. A notice with
+/// only an acknowledgement would leave the author to find the screen themselves, at the one moment
+/// their existing backup has stopped being able to recover the catalog.
+/// </param>
 public readonly record struct PublishEffects(
     Action RecordPublishedSource,
     Action<string, string> ShowDialog,
     Func<Task> CommitHistoryAsync,
     Action<string> SetStatus,
-    Action? OfferSigningSetup = null);
+    Action? OfferSigningSetup = null,
+    Action? OfferKeyBackup = null);
 
 /// <summary>
 /// What the editor does with a <see cref="PublishResult"/>: what to say, what to record, and what
@@ -172,11 +178,7 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
         if (presentation.RecordLocalSourceAsPublished) effects.RecordPublishedSource();
         if (presentation.ShowDialog) effects.ShowDialog(result.Title, result.Message);
 
-        if (presentation.PromptForFreshKeyBackup)
-        {
-            var (title, message) = FreshBackupPrompt(pluginId);
-            effects.ShowDialog(title, message);
-        }
+        if (presentation.PromptForFreshKeyBackup) effects.OfferKeyBackup?.Invoke();
 
         if (presentation.OfferSigningSetup) effects.OfferSigningSetup?.Invoke();
 
@@ -189,16 +191,20 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
     }
 
     /// <summary>
-    /// The follow-up shown after the history's first publish. Separate from the result's own
-    /// message because it is a different subject — the publish worked; what changed is that this
-    /// machine's backup stopped being able to recover it.
+    /// The follow-up asked after the history's first publish. A QUESTION rather than a notice: it
+    /// is the one moment the author's existing backup stops being able to recover the thing it was
+    /// taken for, and leaving them to go and find the right screen afterwards is how it does not
+    /// get done. Yes opens the screen.
+    ///
+    /// <para>Separate from the result's own message because it is a different subject — the publish
+    /// worked; what changed is what the old backup is now worth.</para>
     /// </summary>
     public static (string Title, string Message) FreshBackupPrompt(string pluginId) => (
-        "Export a fresh key backup",
+        "Export a fresh key backup?",
         $"'{pluginId}' now has a signed history, and this machine is the only one that knows where " +
         "that history is up to.\n\n" +
         "Any backup you took before this publish holds the signing key but no publishing position, " +
         "and a key with no position can neither start a history nor continue one — so on a " +
         "replacement machine it could not publish this catalog at all.\n\n" +
-        "Export the key backup again, and keep the new copy.");
+        "Open catalog signing now to export a fresh one?");
 }
