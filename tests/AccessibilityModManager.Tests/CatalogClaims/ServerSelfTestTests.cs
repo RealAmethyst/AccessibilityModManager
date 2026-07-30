@@ -58,6 +58,33 @@ public sealed class ServerSelfTestTests
     private static Task<IReadOnlyList<ServerCheckStep>> RunAsync(FakeTransport transport) =>
         ServerSelfTest.RunAsync(transport, PluginId, CancellationToken.None);
 
+    /// <summary>A rehearsal that records what it was asked to do, and cannot publish.</summary>
+    private sealed class FakeRehearsal : IPublishRehearsal
+    {
+        public int Runs;
+        public bool CallbackRan;
+        public Exception? Fail;
+
+        public async Task RehearseAsync(string pluginId, Func<Task> beforeSwitchAsync, CancellationToken ct)
+        {
+            Runs++;
+            if (Fail is not null) throw Fail;
+            await beforeSwitchAsync();
+            CallbackRan = true;
+        }
+    }
+
+    private sealed class FakeRegistry(Exception? fail = null) : IVerifiedRegistrySource
+    {
+        public int Reads;
+
+        public Task<string> ReadVerifiedAsync(string pluginId, CancellationToken ct)
+        {
+            Reads++;
+            return fail is not null ? Task.FromException<string>(fail) : Task.FromResult("{}");
+        }
+    }
+
     [Fact]
     public async Task It_takes_the_lock_reads_and_gives_the_lock_back()
     {
@@ -150,6 +177,69 @@ public sealed class ServerSelfTestTests
         var steps = await RunAsync(new FakeTransport { Live = null });
 
         Assert.All(steps, s => Assert.True(s.Ok));
+    }
+
+    // ---- the rehearsal ----
+
+    [Fact]
+    public async Task The_rehearsal_runs_the_pre_switch_check_and_still_gives_the_lock_back()
+    {
+        var transport = new FakeTransport { Live = Encoding.UTF8.GetBytes("{}") };
+        var rehearsal = new FakeRehearsal();
+        var registry = new FakeRegistry();
+
+        var steps = await ServerSelfTest.RunAsync(
+            transport, PluginId, CancellationToken.None, rehearsal, registry);
+
+        Assert.Equal(1, rehearsal.Runs);
+        Assert.True(rehearsal.CallbackRan);
+        Assert.Equal(1, registry.Reads);
+        Assert.All(steps, s => Assert.True(s.Ok));
+
+        // Still bracketed by the lock, and still nothing published.
+        Assert.Equal(["lock", "read", "unlock"], transport.Events);
+        Assert.DoesNotContain("upload", transport.Events);
+    }
+
+    [Fact]
+    public async Task A_failed_rehearsal_is_reported_and_the_lock_still_comes_back()
+    {
+        var transport = new FakeTransport { Live = Encoding.UTF8.GetBytes("{}") };
+
+        var steps = await ServerSelfTest.RunAsync(
+            transport, PluginId, CancellationToken.None,
+            new FakeRehearsal { Fail = new IOException("permission denied staging the file") },
+            new FakeRegistry());
+
+        Assert.Contains(steps, s => !s.Ok && s.Name.Contains("Rehearse", StringComparison.Ordinal));
+        Assert.Contains(steps, s => s.Ok && s.Name.Contains("Release", StringComparison.Ordinal));
+        Assert.Contains("unlock", transport.Events);
+    }
+
+    [Fact]
+    public async Task A_registry_that_will_not_verify_fails_the_rehearsal_rather_than_passing_it()
+    {
+        // The whole point of the pre-switch callback is that it can REFUSE. A rehearsal that
+        // reported success when the check it exists to exercise had failed would be worse than not
+        // running it, because it would retire the question.
+        var transport = new FakeTransport { Live = Encoding.UTF8.GetBytes("{}") };
+
+        var steps = await ServerSelfTest.RunAsync(
+            transport, PluginId, CancellationToken.None,
+            new FakeRehearsal(),
+            new FakeRegistry(new RegistryUnusableException("the signature didn't verify")));
+
+        Assert.Contains(steps, s => !s.Ok && s.Name.Contains("Rehearse", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Without_a_rehearsal_the_check_is_exactly_what_it_was()
+    {
+        // The parameters are optional, and omitting them must not quietly change the other steps.
+        var steps = await RunAsync(new FakeTransport { Live = Encoding.UTF8.GetBytes("{}") });
+
+        Assert.DoesNotContain(steps, s => s.Name.Contains("Rehearse", StringComparison.Ordinal));
+        Assert.Equal(3, steps.Count);
     }
 
     [Fact]

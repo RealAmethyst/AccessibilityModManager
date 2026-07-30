@@ -1171,9 +1171,11 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         {
             StatusMessage = "Checking your server...";
 
+            var transport = new ServerUploadPublishTransport(_serverUploadService, cfg);
             var steps = await ServerSelfTest.RunAsync(
-                new ServerUploadPublishTransport(_serverUploadService, cfg),
-                _index.PluginId, CancellationToken.None);
+                transport, _index.PluginId, CancellationToken.None,
+                rehearsal: transport,
+                registry: new RegistryVerifiedSource(_registryChecker));
 
             var (title, message) = ServerSelfTest.Describe(steps);
             _showInfoDialog(title, message);

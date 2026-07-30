@@ -36,6 +36,18 @@ public interface IPublishTransport : IPublishedIndexReader
         string pluginId, byte[] indexJson, Func<Task> beforeSwitchAsync, CancellationToken ct);
 }
 
+/// <summary>
+/// A publish carried out as far as the point of no return, and then abandoned on purpose.
+///
+/// <para>Separate from <see cref="IPublishTransport"/> because publishing must never be able to
+/// reach it and it must never be able to reach publishing. Nothing that implements this has a route
+/// to a rename.</para>
+/// </summary>
+public interface IPublishRehearsal
+{
+    Task RehearseAsync(string pluginId, Func<Task> beforeSwitchAsync, CancellationToken ct);
+}
+
 /// <summary>The signed registry, fetched and its signature checked, or an explained refusal.</summary>
 public interface IVerifiedRegistrySource
 {
@@ -877,8 +889,11 @@ public sealed class IndexPublishCoordinator(
 
 /// <summary>The real server, behind the publish state machine's four operations.</summary>
 public sealed class ServerUploadPublishTransport(ServerUploadService uploads, ServerUploadConfig cfg)
-    : IPublishTransport
+    : IPublishTransport, IPublishRehearsal
 {
+    public Task RehearseAsync(string pluginId, Func<Task> beforeSwitchAsync, CancellationToken ct) =>
+        uploads.RehearseIndexPublishAsync(cfg, pluginId, beforeSwitchAsync, ct);
+
     public Task<ServerUploadService.PublishLockHandle> AcquireLockAsync(string pluginId, CancellationToken ct) =>
         uploads.AcquirePublishLockAsync(cfg, pluginId, ct);
 

@@ -22,8 +22,15 @@ public sealed record ServerCheckStep(string Name, bool Ok, string Detail);
 /// </summary>
 public static class ServerSelfTest
 {
+    /// <param name="rehearsal">
+    /// Optional. When given together with <paramref name="registry"/>, the check also stages a file
+    /// the way a signed publish would and runs the pre-switch registry check over it, then throws
+    /// the staged file away. That is the last piece that would otherwise run for the first time
+    /// during the first signed publish.
+    /// </param>
     public static async Task<IReadOnlyList<ServerCheckStep>> RunAsync(
-        IPublishTransport transport, string pluginId, CancellationToken ct)
+        IPublishTransport transport, string pluginId, CancellationToken ct,
+        IPublishRehearsal? rehearsal = null, IVerifiedRegistrySource? registry = null)
     {
         var steps = new List<ServerCheckStep>();
 
@@ -48,23 +55,51 @@ public static class ServerSelfTest
             return steps;
         }
 
+        // Everything between taking the lock and giving it back sits in one try, so the release in
+        // the finally is reached whatever happens in the middle. A check that strands the lock would
+        // block publishing entirely — considerably worse than the uncertainty it was run to remove.
         try
         {
-            var live = await transport.ReadIndexAsync(pluginId, ct);
+            try
+            {
+                var live = await transport.ReadIndexAsync(pluginId, ct);
 
-            steps.Add(new ServerCheckStep("Read the published index over SFTP", true,
-                live.Present
-                    ? $"Found it: {live.Bytes!.Length} bytes, " +
-                      (ClaimProof.TryExtract(live.Bytes) is not null
-                          ? "and it already carries a signature block."
-                          : "unsigned, which is what it should be before signing is switched on.")
-                    : "Nothing is published for this plugin yet, and the server said so clearly " +
-                      "rather than failing — which is the answer that matters, because a failed " +
-                      "read must never be mistaken for an empty catalog."));
-        }
-        catch (Exception ex)
-        {
-            steps.Add(new ServerCheckStep("Read the published index over SFTP", false, ex.Message));
+                steps.Add(new ServerCheckStep("Read the published index over SFTP", true,
+                    live.Present
+                        ? $"Found it: {live.Bytes!.Length} bytes, " +
+                          (ClaimProof.TryExtract(live.Bytes) is not null
+                              ? "and it already carries a signature block."
+                              : "unsigned, which is what it should be before signing is switched on.")
+                        : "Nothing is published for this plugin yet, and the server said so clearly " +
+                          "rather than failing — which is the answer that matters, because a failed " +
+                          "read must never be mistaken for an empty catalog."));
+            }
+            catch (Exception ex)
+            {
+                steps.Add(new ServerCheckStep("Read the published index over SFTP", false, ex.Message));
+            }
+
+            if (rehearsal is not null && registry is not null)
+            {
+                try
+                {
+                    // The callback is what a signed publish runs in the gap between staging the file
+                    // and switching it live. Before a key is anchored there is no trust context to
+                    // compare, so what is exercised here is the part that exists either way: that the
+                    // registry can be fetched and its signature verified at exactly that moment.
+                    await rehearsal.RehearseAsync(
+                        pluginId, async () => await registry.ReadVerifiedAsync(pluginId, ct), ct);
+
+                    steps.Add(new ServerCheckStep("Rehearse a publish, without going live", true,
+                        "Staged a file the way a real publish would, re-checked the registry in the " +
+                        "gap before the switch, and deleted the staged file. Nothing was renamed and " +
+                        "your published index was never touched."));
+                }
+                catch (Exception ex)
+                {
+                    steps.Add(new ServerCheckStep("Rehearse a publish, without going live", false, ex.Message));
+                }
+            }
         }
         finally
         {

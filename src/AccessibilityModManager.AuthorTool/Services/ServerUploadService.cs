@@ -612,6 +612,73 @@ public sealed class ServerUploadService
     }
 
     /// <summary>
+    /// Where a plugin's index lives, and where a staged copy of it goes.
+    ///
+    /// Shared by the real publish and the rehearsal so the two cannot drift apart on the one thing
+    /// most worth getting right — a rehearsal that staged into a different directory would prove
+    /// the wrong directory works.
+    /// </summary>
+    private (string Dir, string Live, string Temp) IndexPaths(ServerUploadConfig cfg, string pluginId)
+    {
+        var validationError = ValidateForCatalog(cfg);
+        if (validationError != null)
+            throw new InvalidOperationException(validationError);
+
+        RequireSafeRemoteSegment(pluginId, "plugin id");
+
+        var dir = JoinPosix(cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
+        return (dir, JoinPosix(dir, "index.json"), JoinPosix(dir, $".index.json.{Guid.NewGuid():N}.tmp"));
+    }
+
+    /// <summary>
+    /// Runs everything a signed publish does up to the switch, and then throws the staged file away
+    /// instead of switching it live.
+    ///
+    /// <para>It exists because the pre-switch callback — the last look at the registry before the
+    /// rename — only ever runs on the SIGNED path, which only exists once a key is anchored in the
+    /// registry. Without this, the first time that machinery met the real server would be during the
+    /// first signed publish, which is the one publish that starts a history that cannot be
+    /// restarted.</para>
+    ///
+    /// <para>It does not take the index, and there is no code path from here to a rename. That is
+    /// deliberate and structural rather than guarded by a flag: a rehearsal that could rename would
+    /// be more dangerous than no rehearsal at all, and a boolean saying "don't go live" is one typo
+    /// away from going live. What it uploads is a marker under a temporary name, and the only thing
+    /// that ever happens to that file is deletion.</para>
+    /// </summary>
+    public async Task RehearseIndexPublishAsync(
+        ServerUploadConfig cfg, string pluginId, Func<Task> beforeSwitchAsync, CancellationToken ct)
+    {
+        var paths = IndexPaths(cfg, pluginId);
+        var marker = "{\"amm\":\"publish rehearsal — nothing here is published, and this file is deleted\"}"u8.ToArray();
+
+        await Task.Run(() =>
+        {
+            using var sftp = OpenSftp(cfg);
+
+            if (!sftp.Exists(cfg.RemoteCatalogRoot.TrimEnd('/')))
+                throw new InvalidOperationException(
+                    $"Remote catalog folder '{cfg.RemoteCatalogRoot}' doesn't exist on the server. " +
+                    "Check the catalog root in Server upload settings.");
+            EnsureRemoteDirectory(sftp, cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
+
+            try
+            {
+                using (var src = new MemoryStream(marker))
+                    sftp.UploadFile(src, paths.Temp, canOverride: true);
+
+                beforeSwitchAsync().GetAwaiter().GetResult();
+            }
+            finally
+            {
+                // However this ends, the staged file goes. Leaving dotfiles behind in the catalog
+                // directory is exactly what a rehearsal must not do.
+                TryDeleteRemote(sftp, paths.Temp);
+            }
+        }, ct);
+    }
+
+    /// <summary>
     /// Publishes one plugin's index.json to the catalog web root via upload-to-temp then a
     /// single atomic posix-rename — every manager request sees either the complete old index
     /// or the complete new one, never a partial file.
@@ -643,14 +710,7 @@ public sealed class ServerUploadService
 
         try
         {
-            var validationError = ValidateForCatalog(cfg);
-            if (validationError != null)
-                throw new InvalidOperationException(validationError);
-
-            RequireSafeRemoteSegment(pluginId, "plugin id");
-            var remoteDir = JoinPosix(cfg.RemoteCatalogRoot.TrimEnd('/'), "plugins", pluginId);
-            var liveIndex = JoinPosix(remoteDir, "index.json");
-            var tempIndex = JoinPosix(remoteDir, $".index.json.{Guid.NewGuid():N}.tmp");
+            var (_, liveIndex, tempIndex) = IndexPaths(cfg, pluginId);
 
             await Task.Run(() =>
             {
