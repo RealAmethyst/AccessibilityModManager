@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
@@ -18,12 +19,20 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
     private readonly RegistrySignatureVerifier _signatureVerifier;
     private readonly ILogger _logger;
     private readonly string _stateDirectory;
+    private readonly string _minimumRegistryVersion;
 
     /// <summary>
     /// The verifier is REQUIRED: the registry is the trust anchor for everything else, and an
     /// optional verifier meant a composition mistake silently turned the whole trust chain
     /// fail-open (accepting unsigned registries with only a log line).
     /// </summary>
+    /// <remarks>
+    /// There is deliberately no way to lower the version floor. An override existed briefly as a
+    /// test seam and was removed: "test seam only" is documentation, not an access restriction, and
+    /// a constructor parameter that switches off a compiled-in security floor is one future
+    /// composition mistake away from switching it off in production. The tests use registry versions
+    /// above the floor instead, which costs them nothing.
+    /// </remarks>
     public PluginRegistryClient(
         HttpClient httpClient,
         ILogger logger,
@@ -38,6 +47,7 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         _stateDirectory = highwaterDirectoryOverride ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "AccessibilityModManager");
+        _minimumRegistryVersion = RegistryTrustKey.MinimumRegistryVersion;
     }
 
     /// <summary>
@@ -141,14 +151,34 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         // Validate plugin entries BEFORE the replay marker moves: a signed-but-malformed
         // higher-version registry must never pin the machine to a version it refused (that
         // would lock out every valid registry below it).
-        foreach (var plugin in registry.Plugins)
+        //
+        // This is PluginRegistryValidation, the same pass the AuthorTool runs before signing, so the
+        // two cannot drift. It used to be a near-copy of these rules living here — and the copies
+        // had already diverged: the AuthorTool refused a blank registryVersion and duplicate or
+        // case-colliding plugin ids, and the manager, the only side whose opinion actually protects
+        // a user, did not.
+        var report = PluginRegistryValidation.Validate(registry);
+        if (!report.IsValid)
         {
-            PathSafety.EnsureSafeId(plugin.Id, "registry plugin id");
-            UrlValidator.RequireHttps(plugin.RepoIndexUrl, $"plugin '{plugin.Id}' repoIndexUrl");
-            if (plugin.Website != null)
-                UrlValidator.RequireHttps(plugin.Website, $"plugin '{plugin.Id}' website");
-            foreach (var (linkName, linkUri) in plugin.Links)
-                UrlValidator.RequireHttps(linkUri, $"plugin '{plugin.Id}' link '{linkName}'");
+            // The original exception where there was one, so sharing the rules does not silently
+            // downgrade a SecurityException from the HTTPS check into a generic failure. Dispatched
+            // rather than plainly rethrown so the stack still points at the check that objected.
+            if (report.FirstFailure is { } failure)
+                ExceptionDispatchInfo.Capture(failure).Throw();
+            throw new InvalidOperationException(report.Errors[0]);
+        }
+
+        // The shipped floor, applied before the marker and independently of it. On a machine with no
+        // marker — a fresh install, or one whose app data was cleared — the marker refuses nothing,
+        // and a validly signed pre-signing registry would be accepted and take the manager down the
+        // unsigned path. A constant compiled into the binary cannot be absent or rolled back.
+        if (VersionComparer.Instance.Compare(registry.RegistryVersion, _minimumRegistryVersion) < 0)
+        {
+            throw new InvalidOperationException(
+                $"The plugin registry served version {registry.RegistryVersion}, older than version " +
+                $"{_minimumRegistryVersion}, which this version of the manager was built to expect. " +
+                "Refusing it — an old catalog can be a stale mirror or a replayed copy. Try again " +
+                "later; if it persists, the registry itself needs attention.");
         }
 
         // Replay guard: a validly-signed OLD registry (stale CDN, deliberate replay) must not
@@ -303,8 +333,17 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
     /// and by content when the version is unchanged (the signature proves authorship, not
     /// freshness; a same-version replay carries different bytes under an already-seen number,
     /// which the publishing rules forbid). Accepted registries advance the marker atomically.
-    /// The marker is plain local state — an unreadable marker is treated as absent (fail open
-    /// on the MARKER, closed on the registry signature).
+    ///
+    /// <para><b>Absent and unreadable are different answers.</b> A missing marker is the ordinary
+    /// state of a fresh install and must proceed — nothing could ever start otherwise — and the
+    /// shipped floor is what protects that case. A marker that EXISTS and cannot be read is not a
+    /// fresh install: it is this machine's ratchet in an unknown position, and continuing would
+    /// silently accept a rollback of every registry published since this build. That refuses.</para>
+    ///
+    /// <para>The same reasoning applies to writing it. Accepting a registry this machine cannot
+    /// record means the next fetch judges against a stale position, so the ratchet is lost exactly
+    /// when it was supposed to advance — and nothing would ever say so. Both were previously a
+    /// logged warning.</para>
     /// </summary>
     // Serializes marker read/compare/write within this process: the Mods and Developers tabs can
     // fetch concurrently, and an interleaved pair could regress the marker to the older of two
@@ -316,12 +355,12 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         await HighwaterGate.WaitAsync();
         try
         {
-            // The cache path REQUIRES the lock: cache acceptance is the replay-sensitive check,
-            // and skipping serialization there would let a cache be judged against a marker
-            // another process is mid-way through moving. The network path proceeds (with a log
-            // line) if the lock stays stuck — a wedged lock file must not blank the catalog, and
-            // network acceptance still has the signature and validation gates in front of it.
-            using var crossProcessLock = await TryAcquireHighwaterLockAsync(required: checkOnly);
+            // Required on BOTH paths. The read-compare-write it guards takes milliseconds, so a lock
+            // that stays busy for the full ten-second wait is a machine in trouble, not contention —
+            // and the handle is released by the OS however a holder dies, so a crashed process
+            // cannot leave one behind. The network path used to proceed unlocked, which let two app
+            // copies interleave and regress the marker to the older of two accepted registries.
+            using var crossProcessLock = await TryAcquireHighwaterLockAsync(required: true);
             await EnforceRegistryHighwaterCoreAsync(registryVersion, registryJson, checkOnly);
         }
         finally
@@ -382,26 +421,59 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         var markerPath = Path.Combine(_stateDirectory, "registry-highwater.txt");
         string? seenVersion = null;
         string? seenSha = null;
-        var markerReadable = true;
+
+        // Absence is tracked EXPLICITLY rather than inferred from `seenVersion` being empty. There
+        // are two ways to end up with no version — the file not existing, and the file existing but
+        // saying nothing — and only the first may proceed. Inferring it conflated them: a marker
+        // truncated to zero bytes read successfully, left `seenVersion` null, skipped the comparison
+        // entirely and then recorded whatever arrived. A machine that had accepted version 5 would
+        // accept a replayed version 4, which is precisely the protection this exists to provide.
+        var markerAbsent = false;
         try
         {
-            if (File.Exists(markerPath))
-            {
-                var lines = File.ReadAllLines(markerPath);
-                seenVersion = lines.Length > 0 ? lines[0].Trim() : null;
-                seenSha = lines.Length > 1 ? lines[1].Trim() : null;
-            }
+            var lines = File.ReadAllLines(markerPath);
+            seenVersion = lines.Length > 0 ? lines[0].Trim() : null;
+            seenSha = lines.Length > 1 ? lines[1].Trim() : null;
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // Genuinely absent — a fresh install, or app data cleared. The only state that may
+            // proceed without a recorded position, and the shipped floor is what guards it.
+            // Deliberately NOT File.Exists first: that answers a different question a moment
+            // earlier, and a permission error from it would have read as absence.
+            markerAbsent = true;
         }
         catch (Exception ex)
         {
-            markerReadable = false;
-            _logger.Warning(ex, "Couldn't read registry high-water marker");
+            // Present and unreadable. Continuing here would accept a rollback of everything
+            // published since this build, silently, on the one machine that had the evidence.
+            _logger.Error(ex, "Registry high-water marker exists but couldn't be read");
+            throw new InvalidOperationException(
+                "This machine's record of which catalog versions it has already accepted couldn't be " +
+                "read, so an older catalog can't be told apart from a current one. The catalog wasn't " +
+                "refreshed.", ex);
         }
 
-        // A cached copy may only REPLAY an acceptance this machine provably made: no marker (or an
-        // unreadable one) means no proven acceptance, so the cache is refused rather than treated
-        // as a first fetch — deleting the marker must not let an old cache back in.
-        if (checkOnly && (!markerReadable || string.IsNullOrEmpty(seenVersion)))
+        // Read fine and says nothing: truncated, emptied, or otherwise corrupt. Same consequence as
+        // unreadable, so the same refusal — and it must NOT overwrite the file, because the position
+        // it would record is the one being replayed.
+        //
+        // Only the VERSION is required. A marker carrying a version but no hash is treated as
+        // "version known, content not" by the comparison below, exactly as it always has been;
+        // demanding a hash here could lock out a marker written by an earlier build.
+        if (!markerAbsent && string.IsNullOrEmpty(seenVersion))
+        {
+            _logger.Error("Registry high-water marker at {Path} is present but empty", markerPath);
+            throw new InvalidOperationException(
+                "This machine's record of which catalog versions it has already accepted is damaged, " +
+                "so an older catalog can't be told apart from a current one. The catalog wasn't " +
+                "refreshed.");
+        }
+
+        // A cached copy may only REPLAY an acceptance this machine provably made: no marker means no
+        // proven acceptance, so the cache is refused rather than treated as a first fetch — deleting
+        // the marker must not let an old cache back in.
+        if (checkOnly && markerAbsent)
         {
             throw new InvalidOperationException(
                 "no record of this machine ever accepting a registry, so the saved copy can't be trusted");
@@ -420,18 +492,52 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
                     "machine has already seen. Refusing it — this can be a stale mirror or a replayed old copy. " +
                     "Try again later; if it persists, the registry itself needs attention.");
             }
-            if (cmp == 0 && !string.IsNullOrEmpty(seenSha) &&
-                !string.Equals(sha, seenSha, StringComparison.OrdinalIgnoreCase))
+            if (cmp == 0)
             {
-                throw new InvalidOperationException(
-                    $"The plugin registry's content changed without a version bump (still {registryVersion}). " +
-                    "Refusing it — this can be a replayed old copy, or the registry was republished without " +
-                    "raising registryVersion (which its publishing tool now enforces). A newer registryVersion fixes this.");
+                // A marker naming a version but no content hash is a TRUNCATED one. Every build that
+                // has ever written this file wrote both lines (since 580692a), so there is no legacy
+                // one-line format to be tolerant of — checked in the history rather than assumed,
+                // after a first pass declined this fix on exactly that unverified assumption.
+                //
+                // Tolerating it silently drops the same-version half of the ratchet, which is the
+                // half guarding the publishing failure the hash exists for: two differently signed
+                // documents under one version number. The replayed one would be accepted AND its
+                // hash written into the marker, making the loss permanent. A strictly newer version
+                // still passes below and rebuilds the marker with both lines.
+                if (string.IsNullOrEmpty(seenSha))
+                {
+                    _logger.Error("Registry high-water marker at {Path} names version {Version} but no content hash",
+                        markerPath, seenVersion);
+                    throw new InvalidOperationException(
+                        "This machine's record of the catalog it has already accepted is incomplete, so a " +
+                        "different catalog carrying the same version number can't be told apart from the one " +
+                        "already trusted. The catalog wasn't refreshed.");
+                }
+
+                if (!string.Equals(sha, seenSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"The plugin registry's content changed without a version bump (still {registryVersion}). " +
+                        "Refusing it — this can be a replayed old copy, or the registry was republished without " +
+                        "raising registryVersion (which its publishing tool now enforces). A newer registryVersion fixes this.");
+                }
             }
         }
 
         if (checkOnly)
             return; // the cache path never advances the marker
+
+        // Already recorded, exactly. Writing would reproduce the file byte for byte, so there is
+        // nothing to advance and nothing a failure could cost — while insisting on the write turns a
+        // read-only marker or a restrictive ACL into a catalog that refuses to refresh every time,
+        // even as the server returns precisely the registry this machine already trusts. Unlike a
+        // full disk, a permissions fault does not clear itself.
+        if (!markerAbsent &&
+            VersionComparer.Instance.Compare(registryVersion, seenVersion) == 0 &&
+            string.Equals(sha, seenSha, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
 
         try
         {
@@ -440,7 +546,15 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Couldn't persist registry high-water marker");
+            // Refusing a registry that verified is a real cost, and it is the smaller one. Accepting
+            // it without recording it leaves the next fetch judging against a stale position, so the
+            // ratchet is lost at the moment it should have advanced and no later run can tell. The
+            // condition is also self-correcting: whatever stopped the write is a local fault, and
+            // the next refresh succeeds once it is gone.
+            _logger.Error(ex, "Couldn't persist registry high-water marker");
+            throw new InvalidOperationException(
+                "This catalog verified, but the record of having accepted it couldn't be saved, so an " +
+                "older catalog couldn't be refused later. The catalog wasn't refreshed.", ex);
         }
     }
 

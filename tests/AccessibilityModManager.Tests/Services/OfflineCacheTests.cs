@@ -38,7 +38,7 @@ public class OfflineCacheTests : IDisposable
     [Fact]
     public async Task Registry_NetworkDown_ServesLastAcceptedCopy_MarkedCached()
     {
-        var online = MakeRegistryClient(RegistryJson("1.0.0"));
+        var online = MakeRegistryClient(RegistryJson("4.0.0"));
         var live = await online.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
         Assert.False(live.FromCache);
 
@@ -47,7 +47,7 @@ public class OfflineCacheTests : IDisposable
 
         Assert.True(cached.FromCache);
         Assert.NotNull(cached.CachedAtUtc);
-        Assert.Equal("1.0.0", cached.Value.RegistryVersion);
+        Assert.Equal("4.0.0", cached.Value.RegistryVersion);
         Assert.Equal("plug-a", Assert.Single(cached.Value.Plugins).Id);
     }
 
@@ -63,7 +63,7 @@ public class OfflineCacheTests : IDisposable
     [Fact]
     public async Task Registry_TamperedCache_RefusedOffline()
     {
-        var online = MakeRegistryClient(RegistryJson("1.0.0"));
+        var online = MakeRegistryClient(RegistryJson("4.0.0"));
         await online.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
         // Tamper with the cached registry bytes on disk — the signature check must kill it.
@@ -80,13 +80,13 @@ public class OfflineCacheTests : IDisposable
     public async Task Registry_StaleCacheBelowHighwater_RefusedOffline()
     {
         // Accept v2 live: highwater = 2.0.0, cache = v2.
-        var online = MakeRegistryClient(RegistryJson("2.0.0"));
+        var online = MakeRegistryClient(RegistryJson("5.0.0"));
         await online.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
         // Swap the cache for a VALIDLY SIGNED older v1 — a cache-level replay attempt. The
         // envelope carries the correct source URL so the refusal proves the HIGHWATER check,
         // not the source binding.
-        var v1Json = RegistryJson("1.0.0");
+        var v1Json = RegistryJson("4.0.0");
         var envelope = new
         {
             FetchedAtUtc = DateTimeOffset.UtcNow,
@@ -107,7 +107,7 @@ public class OfflineCacheTests : IDisposable
     [Fact]
     public async Task Registry_CacheWithoutHighwaterMarker_RefusedOffline()
     {
-        var online = MakeRegistryClient(RegistryJson("1.0.0"));
+        var online = MakeRegistryClient(RegistryJson("4.0.0"));
         await online.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
         // No marker = no proof this machine ever accepted a registry — deleting the marker must
@@ -123,7 +123,7 @@ public class OfflineCacheTests : IDisposable
     [Fact]
     public async Task Registry_CacheFromDifferentSourceUrl_RefusedOffline()
     {
-        var online = MakeRegistryClient(RegistryJson("1.0.0"));
+        var online = MakeRegistryClient(RegistryJson("4.0.0"));
         await online.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
         var offline = MakeOfflineRegistryClient();
@@ -244,16 +244,6 @@ public class OfflineCacheTests : IDisposable
         }
         """;
 
-    private sealed class RouteHandler : HttpMessageHandler
-    {
-        private readonly Func<string, string> _respond;
-        public RouteHandler(Func<string, string> respond) { _respond = respond; }
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(_respond(request.RequestUri!.AbsoluteUri))
-            });
-    }
 
     /// <summary>Simulates the network being down: every request throws like a DNS/conn failure.</summary>
     private sealed class FailingHandler : HttpMessageHandler

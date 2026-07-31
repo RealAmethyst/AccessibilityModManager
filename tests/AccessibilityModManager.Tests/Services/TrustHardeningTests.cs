@@ -43,23 +43,23 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RegistryClient_SignedRegistry_FetchesAndRecordsHighwater()
     {
-        var client = MakeRegistryClient(RegistryJson("1.0.0"));
+        var client = MakeRegistryClient(RegistryJson("4.0.0"));
         var fetch = await client.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
-        Assert.Equal("1.0.0", fetch.Value.RegistryVersion);
+        Assert.Equal("4.0.0", fetch.Value.RegistryVersion);
         Assert.False(fetch.FromCache);
         var marker = File.ReadAllLines(Path.Combine(_tempRoot, "registry-highwater.txt"));
-        Assert.Equal("1.0.0", marker[0].Trim());
+        Assert.Equal("4.0.0", marker[0].Trim());
         Assert.Equal(64, marker[1].Trim().Length); // content hash recorded alongside the version
     }
 
     [Fact]
     public async Task RegistryClient_SameVersionDifferentContent_RefusedAsReplay()
     {
-        var first = MakeRegistryClient(RegistryJson("1.0.0"));
+        var first = MakeRegistryClient(RegistryJson("4.0.0"));
         await first.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
         // Same version, different (validly signed) bytes — the replay guard must catch it.
-        var changed = MakeRegistryClient(RegistryJson("1.0.0", extraLinkUrl: "https://example.invalid/discord"));
+        var changed = MakeRegistryClient(RegistryJson("4.0.0", extraLinkUrl: "https://example.invalid/discord"));
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             changed.FetchRegistryAsync(new Uri("https://example.invalid/registry.json")));
         Assert.Contains("without a version bump", ex.Message);
@@ -68,18 +68,18 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RegistryClient_RejectedRegistry_DoesNotAdvanceTheMarker()
     {
-        var v1 = MakeRegistryClient(RegistryJson("1.0.0"));
+        var v1 = MakeRegistryClient(RegistryJson("4.0.0"));
         await v1.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
         // v3 is signed but malformed (http link) — it must be refused WITHOUT pinning v3.
-        var badV3 = MakeRegistryClient(RegistryJson("3.0.0", extraLinkUrl: "http://example.invalid/x"));
+        var badV3 = MakeRegistryClient(RegistryJson("6.0.0", extraLinkUrl: "http://example.invalid/x"));
         await Assert.ThrowsAsync<System.Security.SecurityException>(() =>
             badV3.FetchRegistryAsync(new Uri("https://example.invalid/registry.json")));
 
         // A valid v2 must still be acceptable afterwards.
-        var v2 = MakeRegistryClient(RegistryJson("2.0.0"));
+        var v2 = MakeRegistryClient(RegistryJson("5.0.0"));
         var fetch = await v2.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
-        Assert.Equal("2.0.0", fetch.Value.RegistryVersion);
+        Assert.Equal("5.0.0", fetch.Value.RegistryVersion);
     }
 
     [Fact]
@@ -104,23 +104,23 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RegistryClient_OlderThanSeenVersion_RefusedAsReplay()
     {
-        var newer = MakeRegistryClient(RegistryJson("2.0.0"));
+        var newer = MakeRegistryClient(RegistryJson("5.0.0"));
         await newer.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
 
-        var older = MakeRegistryClient(RegistryJson("1.5.0"));
+        var older = MakeRegistryClient(RegistryJson("4.5.0"));
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             older.FetchRegistryAsync(new Uri("https://example.invalid/registry.json")));
         Assert.Contains("older than", ex.Message);
 
         // Same version as the high-water mark is fine (normal refetch).
-        var same = MakeRegistryClient(RegistryJson("2.0.0"));
+        var same = MakeRegistryClient(RegistryJson("5.0.0"));
         await same.FetchRegistryAsync(new Uri("https://example.invalid/registry.json"));
     }
 
     [Fact]
     public async Task RegistryClient_TamperedRegistry_Refused()
     {
-        var json = RegistryJson("1.0.0");
+        var json = RegistryJson("4.0.0");
         var client = MakeRegistryClient(json, tamperAfterSigning: true);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             client.FetchRegistryAsync(new Uri("https://example.invalid/registry.json")));
@@ -129,7 +129,7 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RegistryClient_NonHttpsExtraLink_Refused()
     {
-        var json = RegistryJson("1.0.0", extraLinkUrl: "http://example.invalid/discord");
+        var json = RegistryJson("4.0.0", extraLinkUrl: "http://example.invalid/discord");
         var client = MakeRegistryClient(json);
         var ex = await Assert.ThrowsAsync<System.Security.SecurityException>(() =>
             client.FetchRegistryAsync(new Uri("https://example.invalid/registry.json")));
@@ -431,14 +431,4 @@ public class TrustHardeningTests : IDisposable
         }
         """;
 
-    private sealed class RouteHandler : HttpMessageHandler
-    {
-        private readonly Func<string, string> _respond;
-        public RouteHandler(Func<string, string> respond) { _respond = respond; }
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(_respond(request.RequestUri!.AbsoluteUri))
-            });
-    }
 }

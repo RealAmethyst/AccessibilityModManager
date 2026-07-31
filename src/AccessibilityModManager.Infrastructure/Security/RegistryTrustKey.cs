@@ -23,6 +23,29 @@ public static class RegistryTrustKey
     /// </summary>
     public const string ExpectedFingerprint = "510d693a4a588b1c4a345675fa49d69e63fc7e0a17ec08b94bc771a246076c95";
 
+    /// <summary>
+    /// The oldest registry this build will accept, whatever any local state says.
+    ///
+    /// <para><b>Why a shipped constant and not just the high-water marker.</b> The marker refuses a
+    /// registry older than the newest THIS MACHINE has already seen, which is exactly nothing on a
+    /// machine that has never fetched one. So a fresh install — the state every user passes through,
+    /// and the state left by clearing app data or moving to a new PC — will accept any validly
+    /// signed registry it is served, including one published before <c>indexTrust</c> existed. That
+    /// registry names no signing key, which sends the manager down the unsigned path and discards
+    /// every guarantee signing was introduced to provide. The signature is genuine, so nothing else
+    /// in the chain objects.</para>
+    ///
+    /// <para>A constant compiled into the binary cannot be absent, corrupted or rolled back, so it
+    /// holds the line where local state has nothing to say. It is a FLOOR, never an equality: a
+    /// newer registry must always be accepted, or publishing one would strand every older manager.
+    /// Raising it is safe once a version is live and settled; the cost of leaving it behind is only
+    /// that the protection reaches less far forward.</para>
+    ///
+    /// <para>3 is the version that carries the live <c>indexTrust</c> anchor for <c>amethyst</c>,
+    /// published 2026-07-30. Anything below it predates signing.</para>
+    /// </summary>
+    public const string MinimumRegistryVersion = "3";
+
     public const string PublicKeyPem =
         """
         -----BEGIN PUBLIC KEY-----
