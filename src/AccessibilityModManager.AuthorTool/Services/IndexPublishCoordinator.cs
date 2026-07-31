@@ -251,8 +251,23 @@ public sealed class IndexPublishCoordinator(
                 "was uploaded.");
         }
 
-        var anchor = IndexProofService.TryReadAnchor(registryJson, pluginId);
-        if (anchor is null)
+        var resolution = IndexProofService.ResolveAnchor(registryJson, pluginId);
+
+        // Present and broken is its own refusal, and it must come before the no-anchor branch below.
+        // Reading it as "no anchor" would take the unsigned path — and that path is only guarded by
+        // this machine having publishing records, so on a machine that has none (a replacement, or a
+        // first publish) a malformed entry would publish plaintext over a catalog the registry says
+        // is signed. Same shape as the bugs fixed on 30 July: checked against local state, which is
+        // empty in exactly the situation the check exists for.
+        if (resolution.Status == IndexTrustStatus.Unusable)
+        {
+            return new PublishResult(PublishStatus.Refused,
+                "The registry's signing key can't be used",
+                $"{resolution.Reason}\n\nThe registry is what says which key signs this catalog, so " +
+                "publishing without being able to read that is refused. Nothing was uploaded.");
+        }
+
+        if (resolution.Status == IndexTrustStatus.None)
         {
             // No anchor and a signed history behind us is not "this catalog is unsigned" — it is the
             // registry having moved backwards, or the entry having been edited. Publishing plaintext
@@ -273,6 +288,17 @@ public sealed class IndexPublishCoordinator(
             {
                 VerifiedRegistryJson = registryJson
             };
+        }
+
+        // Anchored is the only state left that may continue, and it is asked for BY NAME rather than
+        // inferred from an anchor being present. Anything else means nobody actually asked the
+        // registry, and an unasked question is not an answer — least of all the one that grants the
+        // unsigned path.
+        if (resolution.Status != IndexTrustStatus.Anchored || resolution.Anchor is not { } anchor)
+        {
+            return new PublishResult(PublishStatus.Refused, "The registry wasn't checked",
+                "The signing key for this catalog was never resolved from the registry, so there is " +
+                "nothing to publish against. Nothing was uploaded.");
         }
 
         if (IndexUrlMismatch(anchor.RepoIndexUrl, pluginId) is { } mismatch)
@@ -338,8 +364,17 @@ public sealed class IndexPublishCoordinator(
                 $"{ex.Message}\n\nNothing was uploaded.");
         }
 
-        var anchor = IndexProofService.TryReadAnchor(registryJson, pluginId);
-        if (anchor is null)
+        var resolution = IndexProofService.ResolveAnchor(registryJson, pluginId);
+        if (resolution.Status == IndexTrustStatus.Unusable)
+        {
+            return new PublishResult(PublishStatus.Refused, "The registry changed",
+                $"The registry's signing key for this plugin stopped being usable between opening " +
+                $"the publish and taking the lock: {resolution.Reason}\n\nNothing was uploaded.");
+        }
+
+        // Anchored or nothing, asked for by name: None means the key went away mid-publish, and any
+        // other state means the question was never asked. Both refuse here, and neither continues.
+        if (resolution.Status != IndexTrustStatus.Anchored || resolution.Anchor is not { } anchor)
         {
             return new PublishResult(PublishStatus.Refused, "The registry changed",
                 "The registry stopped naming a signing key for this plugin between opening the " +
@@ -589,10 +624,17 @@ public sealed class IndexPublishCoordinator(
         // and key were current before a re-point retired them.
         headStore.RequireRegistryNotOlder(fresh);
 
-        var freshAnchor = IndexProofService.TryReadAnchor(fresh, pluginId)
-            ?? throw new InvalidOperationException(
+        var freshResolution = IndexProofService.ResolveAnchor(fresh, pluginId);
+        var freshAnchor = freshResolution.Status switch
+        {
+            IndexTrustStatus.Anchored => freshResolution.Anchor!,
+            IndexTrustStatus.Unusable => throw new InvalidOperationException(
+                "The registry's signing key for this plugin stopped being usable while the index " +
+                $"was uploading ({freshResolution.Reason}). Nothing was switched live."),
+            _ => throw new InvalidOperationException(
                 "The registry stopped naming a signing key for this plugin while the index was " +
-                "uploading. Nothing was switched live.");
+                "uploading. Nothing was switched live.")
+        };
 
         if (!string.Equals(ClaimTrustContext.Compute(freshAnchor), trustContext, StringComparison.Ordinal))
         {

@@ -1229,10 +1229,26 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             var json = await new RegistryVerifiedSource(_registryChecker)
                 .ReadVerifiedAsync(_index.PluginId, CancellationToken.None);
 
-            trust = IndexProofService.TryReadAnchor(json, _index.PluginId) is { } anchor
-                ? RegistryTrustState.Anchored(
-                    ClaimTrustContext.PublicKeyFingerprint(anchor.PublicKeyPem), anchor.KeyId)
-                : RegistryTrustState.NoKeyAnchored();
+            var resolution = IndexProofService.ResolveAnchor(json, _index.PluginId);
+            trust = resolution.Status switch
+            {
+                IndexTrustStatus.Anchored => RegistryTrustState.Anchored(
+                    ClaimTrustContext.PublicKeyFingerprint(resolution.Anchor!.PublicKeyPem),
+                    resolution.Anchor.KeyId),
+
+                // Deliberately Unreadable rather than NoKeyAnchored. The screen refuses to CREATE a
+                // key against an unknown answer, and an entry naming an unusable key is exactly when
+                // creating one strands recovery: the new key signs nothing anyone trusts, and it
+                // then becomes what the real backup is checked against.
+                IndexTrustStatus.Unusable => RegistryTrustState.Unreadable(resolution.Reason!),
+
+                IndexTrustStatus.None => RegistryTrustState.NoKeyAnchored(),
+
+                // Never assigned, so nobody asked the registry. That is Unreadable too — the one
+                // state that must not fall through to "no key anchored", which is what permits
+                // creating one.
+                _ => RegistryTrustState.Unreadable("the registry was not checked")
+            };
         }
         catch (Exception ex)
         {

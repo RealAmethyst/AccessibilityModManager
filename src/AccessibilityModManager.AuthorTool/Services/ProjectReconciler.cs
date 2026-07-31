@@ -93,8 +93,17 @@ public sealed class ProjectReconciler(
             return new ReconcileOutcome(ReconcileAction.Nothing, null, null);
         }
 
-        var anchor = IndexProofService.TryReadAnchor(registryJson, pluginId);
-        if (anchor is null)
+        var resolution = IndexProofService.ResolveAnchor(registryJson, pluginId);
+        if (resolution.Status == IndexTrustStatus.Unusable)
+        {
+            // Nothing is adopted on the strength of an entry that cannot say which key signs this
+            // catalog. Adopting the live plaintext here is the same mistake as publishing it.
+            return new ReconcileOutcome(ReconcileAction.Explain,
+                $"The registry's signing key for this catalog can't be used: {resolution.Reason}. " +
+                "Your local project was left alone.", null);
+        }
+
+        if (resolution.Status == IndexTrustStatus.None)
         {
             // A signed history behind us and no anchor in front is not "this catalog is unsigned" —
             // it is the registry having moved backwards or the entry having been edited, and
@@ -107,6 +116,16 @@ public sealed class ProjectReconciler(
             }
 
             return new ReconcileOutcome(ReconcileAction.Unsigned, null, null);
+        }
+
+        // Anchored is all that is left that may proceed, asked for by name rather than inferred from
+        // an anchor being present. Any other state means the registry was never actually consulted,
+        // and nothing is adopted on the strength of a question nobody asked.
+        if (resolution.Status != IndexTrustStatus.Anchored || resolution.Anchor is not { } anchor)
+        {
+            return new ReconcileOutcome(ReconcileAction.Explain,
+                "The signing key for this catalog was never resolved from the registry, so nothing " +
+                "was adopted. Your local project was left alone.", null);
         }
 
         // This machine's own blockers first, before anything is fetched. They are what the author has

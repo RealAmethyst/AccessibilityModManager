@@ -593,6 +593,62 @@ public sealed class IndexPublishCoordinatorTests : IDisposable
 
     // ---- the anchor decides, not the key ----
 
+    [Theory]
+    [InlineData("null")]
+    [InlineData("\"signed-claims-v1\"")]
+    [InlineData("[]")]
+    [InlineData("""{ "scheme": "signed-claims-v1" }""")]
+    [InlineData("""{ "scheme": "signed-claims-v99", "keyId": "k", "algorithm": "rsa-pss-sha256", "publicKeyPem": "x" }""")]
+    public async Task An_entry_that_names_an_unusable_key_is_refused_rather_than_published_unsigned(string trust)
+    {
+        // The defect this replaced. A malformed indexTrust used to read as "no anchor", and the ONLY
+        // thing between that and publishing plaintext over a signed catalog was this machine holding
+        // publishing records — so on a replacement machine, or a first publish, it went through.
+        // Nothing is written down here on purpose: no records, exactly the empty state the old check
+        // was consulting.
+        _registry.Json = $$"""
+            { "registryVersion": "1",
+              "plugins": [ { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}", "indexTrust": {{trust}} } ] }
+            """;
+
+        var result = await PublishAsync(IndexBytes("1.0.0"));
+
+        Assert.Equal(PublishStatus.Refused, result.Status);
+        Assert.NotEqual(PublishStatus.NotSigned, result.Status);
+        Assert.DoesNotContain("upload", _events);
+    }
+
+    [Fact]
+    public async Task An_unanchored_entry_cannot_shadow_an_anchored_one_of_the_same_id()
+    {
+        // The registry lists 'amethyst' twice: the first entry names no key, the second names the
+        // real one. A reader that stopped at the first match would answer "no anchor" — permission
+        // to publish plaintext over a signed catalog — letting whoever writes the registry choose
+        // the answer by ordering. Again with NO publishing records, since that is the only thing
+        // that used to stand in the way.
+        _registry.Json = $$"""
+            {
+              "registryVersion": "1",
+              "plugins": [
+                { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}" },
+                { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}",
+                  "indexTrust": {
+                    "scheme": "signed-claims-v1",
+                    "keyId": "{{_signing.KeyId}}",
+                    "algorithm": "rsa-pss-sha256",
+                    "publicKeyPem": {{JsonSerializer.Serialize(_signing.PublicKeyPem)}}
+                  } }
+              ]
+            }
+            """;
+
+        var result = await PublishAsync(IndexBytes("1.0.0"));
+
+        Assert.Equal(PublishStatus.Refused, result.Status);
+        Assert.NotEqual(PublishStatus.NotSigned, result.Status);
+        Assert.DoesNotContain("upload", _events);
+    }
+
     [Fact]
     public async Task A_plugin_the_registry_anchors_no_key_for_is_left_to_the_unsigned_path()
     {

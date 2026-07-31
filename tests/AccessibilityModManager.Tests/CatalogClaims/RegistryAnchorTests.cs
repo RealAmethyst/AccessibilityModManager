@@ -119,8 +119,10 @@ public sealed class RegistryAnchorTests : IDisposable
 
         vm.UseLocalSigningKeyCommand.Execute(null);
 
-        var anchor = IndexProofService.TryReadAnchor(vm.RegistryJsonContent!, PluginId);
+        var resolution = IndexProofService.ResolveAnchor(vm.RegistryJsonContent!, PluginId);
 
+        Assert.Equal(IndexTrustStatus.Anchored, resolution.Status);
+        var anchor = resolution.Anchor;
         Assert.NotNull(anchor);
         Assert.Equal(_keys.TryGet(PluginId)!.PublicKeyFingerprint,
             ClaimTrustContext.PublicKeyFingerprint(anchor!.PublicKeyPem));

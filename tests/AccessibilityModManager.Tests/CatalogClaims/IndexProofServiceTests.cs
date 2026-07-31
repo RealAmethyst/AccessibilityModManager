@@ -1093,8 +1093,10 @@ public sealed class IndexProofServiceTests : IDisposable
         }
         """;
 
-        var anchor = IndexProofService.TryReadAnchor(registry, "amethyst");
+        var resolution = IndexProofService.ResolveAnchor(registry, "amethyst");
 
+        Assert.Equal(IndexTrustStatus.Anchored, resolution.Status);
+        var anchor = resolution.Anchor;
         Assert.NotNull(anchor);
         Assert.Equal(IndexUrl, anchor!.RepoIndexUrl);
         Assert.Equal(_signing.KeyId, anchor.KeyId);
@@ -1116,14 +1118,16 @@ public sealed class IndexProofServiceTests : IDisposable
           "plugins": [ { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}" } ] }
         """;
 
-        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+        Assert.Equal(IndexTrustStatus.None,
+            IndexProofService.ResolveAnchor(registry, "amethyst").Status);
     }
 
     [Fact]
     public void An_unknown_plugin_yields_no_anchor()
     {
         var registry = """{ "registryVersion": "1", "plugins": [] }""";
-        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+        Assert.Equal(IndexTrustStatus.None,
+            IndexProofService.ResolveAnchor(registry, "amethyst").Status);
     }
 
     [Fact]
@@ -1137,7 +1141,8 @@ public sealed class IndexProofServiceTests : IDisposable
           "plugins": [ { "id": "amethyst", "repoIndexUrl": "{{IndexUrl}}" } ] }
         """;
 
-        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+        Assert.Equal(IndexTrustStatus.None,
+            IndexProofService.ResolveAnchor(registry, "amethyst").Status);
         Assert.Equal(new RegisteredIndexAddress(Listed: true, IndexUrl),
             IndexProofService.TryReadIndexUrl(registry, "amethyst"));
     }
@@ -1184,7 +1189,8 @@ public sealed class IndexProofServiceTests : IDisposable
                          "repoIndexUrl": "https://accessibilitymods.com/registry/plugins/Amethyst/index.json" } ] }
         """;
 
-        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+        Assert.Equal(IndexTrustStatus.None,
+            IndexProofService.ResolveAnchor(registry, "amethyst").Status);
 
         var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
         Assert.True(address.Listed);
@@ -1211,7 +1217,8 @@ public sealed class IndexProofServiceTests : IDisposable
                          } } ] }
         """;
 
-        Assert.Null(IndexProofService.TryReadAnchor(registry, "amethyst"));
+        Assert.Equal(IndexTrustStatus.None,
+            IndexProofService.ResolveAnchor(registry, "amethyst").Status);
 
         var address = IndexProofService.TryReadIndexUrl(registry, "amethyst");
         Assert.True(address.IdCaseDiffers);

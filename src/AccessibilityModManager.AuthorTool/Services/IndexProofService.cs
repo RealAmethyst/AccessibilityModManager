@@ -52,43 +52,23 @@ public sealed class IndexProofService(
     /// <summary>
     /// Reads the trust anchor for a plugin out of the registry.
     ///
-    /// The caller must have verified the registry's signature first: everything here — the key, the
-    /// index address, the scheme — is only meaningful because the registry vouches for it. Returns
-    /// null when the entry carries no <c>indexTrust</c>, which is the normal state before an author
-    /// has published their signing key.
+    /// <para>The caller must have verified the registry's signature first: everything here — the
+    /// key, the index address, the scheme — is only meaningful because the registry vouches for
+    /// it.</para>
+    ///
+    /// <para>Three answers, and the third is the reason this returns a resolution rather than a
+    /// nullable anchor. <b>None</b> is the normal state before an author has published a signing
+    /// key. <b>Anchored</b> carries the key. <b>Unusable</b> means the entry names something where a
+    /// key belongs and it cannot be used — which every caller must refuse, because folding it into
+    /// "no anchor" is a permission to publish plaintext over a catalog the registry says is
+    /// signed.</para>
+    ///
+    /// <para>The parsing itself lives in <see cref="IndexTrustReader"/>, shared with the manager.
+    /// The value derived from it is hashed into every claim, so two implementations that disagree
+    /// about one byte produce catalogs the other cannot read.</para>
     /// </summary>
-    public static ClaimTrustAnchor? TryReadAnchor(string verifiedRegistryJson, string pluginId)
-    {
-        using var document = JsonDocument.Parse(verifiedRegistryJson);
-        if (!document.RootElement.TryGetProperty("plugins", out var plugins) ||
-            plugins.ValueKind != JsonValueKind.Array)
-        {
-            return null;
-        }
-
-        foreach (var plugin in plugins.EnumerateArray())
-        {
-            if (!plugin.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) continue;
-            if (!string.Equals(id.GetString(), pluginId, StringComparison.Ordinal)) continue;
-
-            if (!plugin.TryGetProperty("indexTrust", out var trust) || trust.ValueKind != JsonValueKind.Object)
-                return null;
-            if (!plugin.TryGetProperty("repoIndexUrl", out var url) || url.ValueKind != JsonValueKind.String)
-                return null;
-
-            return new ClaimTrustAnchor
-            {
-                PluginId = pluginId,
-                RepoIndexUrl = url.GetString()!,
-                Scheme = RequiredString(trust, "scheme"),
-                KeyId = RequiredString(trust, "keyId"),
-                Algorithm = RequiredString(trust, "algorithm"),
-                PublicKeyPem = RequiredString(trust, "publicKeyPem")
-            };
-        }
-
-        return null;
-    }
+    public static IndexTrustResolution ResolveAnchor(string verifiedRegistryJson, string pluginId) =>
+        IndexTrustReader.Resolve(verifiedRegistryJson, pluginId);
 
     /// <summary>
     /// Reads just the address the registry sends managers to for a plugin, independently of whether
@@ -151,13 +131,6 @@ public sealed class IndexProofService(
         }
 
         return looseMatch ?? new RegisteredIndexAddress(Listed: false, null);
-    }
-
-    private static string RequiredString(JsonElement parent, string name)
-    {
-        if (!parent.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
-            throw new ClaimFormatException($"the registry's indexTrust block has no '{name}'");
-        return value.GetString()!;
     }
 
     /// <summary>
@@ -539,10 +512,16 @@ public sealed class IndexProofService(
     private static (ClaimTrustAnchor Anchor, PluginRepoIndex Index, string IndexText) ReadInputs(
         string verifiedRegistryJson, string pluginId, byte[] localIndexJson)
     {
-        var anchor = TryReadAnchor(verifiedRegistryJson, pluginId)
-            ?? throw new InvalidOperationException(
+        var resolution = ResolveAnchor(verifiedRegistryJson, pluginId);
+        var anchor = resolution.Status switch
+        {
+            IndexTrustStatus.Anchored => resolution.Anchor!,
+            IndexTrustStatus.Unusable => throw new InvalidOperationException(
+                $"The registry's signing key for plugin '{pluginId}' can't be used: {resolution.Reason}"),
+            _ => throw new InvalidOperationException(
                 $"The registry has no signing key recorded for plugin '{pluginId}', so there is nothing " +
-                "to sign this index against yet.");
+                "to sign this index against yet.")
+        };
 
         var indexText = Encoding.UTF8.GetString(localIndexJson);
         var index = JsonSerializer.Deserialize<PluginRepoIndex>(indexText, IndexOptions)
