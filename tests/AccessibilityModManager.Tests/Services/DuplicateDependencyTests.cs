@@ -13,6 +13,11 @@ namespace AccessibilityModManager.Tests.Services;
 /// aborted before the correct entry was ever reached. The error blamed the check rule, which was
 /// right all along.</para>
 ///
+/// <para><b>Both entries are legitimate.</b> The game and its updater are separate executables in
+/// separate folders and each needs its own loader — so this is not "a duplicate to delete", it is two
+/// installs that must not share a NAME. The id keys the refcount receipt and the post-install
+/// re-check, so a shared one makes the second entry unreachable however the loop is written.</para>
+///
 /// <para>The severities here are deliberate and were the hard part. Refusing the whole index would
 /// have blanked the catalog of anyone whose already-published index contained one — the recorded
 /// rule that manager-side validation only tightens behind a scheme bump. Dropping it silently would
@@ -33,7 +38,7 @@ public sealed class DuplicateDependencyTests
         // But named, so the AuthorTool's publish gate stops it.
         var problem = Assert.Single(report.AuthoringProblems);
         Assert.Contains("melonloader", problem);
-        Assert.Contains("more than once", problem);
+        Assert.Contains("more than one entry", problem);
     }
 
     [Fact]
@@ -100,13 +105,59 @@ public sealed class DuplicateDependencyTests
         """;
 
     [Fact]
-    public void AnIndexWithNoDuplicates_HasNoAuthoringProblems()
+    public void TheSameLoaderInstalledTwiceUnderDistinctIds_IsPerfectlyValid()
     {
-        var report = PluginIndexValidation.Validate(
-            "amethyst", IndexWithDuplicateDependency(secondId: "bepinex"));
+        // The shape Pokémon TCG Live actually needs, and the reason the rule above is about the NAME
+        // rather than about installing something twice. The game and its updater are separate
+        // executables in separate folders; each needs MelonLoader beside it. Two ids, two targets,
+        // and — the part that was wrong live — a check path for each that matches where it goes.
+        var report = PluginIndexValidation.Validate("amethyst", """
+            {
+              "pluginId": "amethyst",
+              "repoVersion": "1",
+              "generatedAt": "2026-08-02T00:00:00Z",
+              "games": [
+                {
+                  "gameId": "tcg-live",
+                  "displayName": "Pokemon TCG Live",
+                  "dependencies": [
+                    {
+                      "id": "melonloader",
+                      "type": "framework",
+                      "check": { "filePath": "version.dll" },
+                      "fix": {
+                        "downloadUrl": "https://example.invalid/ml.zip",
+                        "autoInstall": {
+                          "kind": "extractZip",
+                          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+                        }
+                      },
+                      "required": true
+                    },
+                    {
+                      "id": "melonloader-updater",
+                      "type": "framework",
+                      "check": { "filePath": "Updater\\1.5.0\\version.dll" },
+                      "fix": {
+                        "downloadUrl": "https://example.invalid/ml.zip",
+                        "autoInstall": {
+                          "kind": "extractZip",
+                          "targetDir": "Updater\\1.5.0",
+                          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+                        }
+                      },
+                      "required": true
+                    }
+                  ]
+                }
+              ],
+              "releasesByGameId": {}
+            }
+            """);
 
         Assert.Empty(report.AuthoringProblems);
         Assert.Empty(report.TrustErrors);
+        Assert.Empty(report.PublishBlockers);
     }
 
     /// <summary>

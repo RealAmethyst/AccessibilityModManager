@@ -1633,22 +1633,26 @@ public sealed class InstallerEngine : IInstallerEngine
         _depAutoInstaller.LoadReceiptAsync(gameId, depId);
 
     /// <summary>
-    /// One id, one dependency — refuse a game that declares the same one twice.
+    /// One id, one dependency — refuse a game that declares the same id twice.
     ///
-    /// <para>A dependency id is a key: it names the refcount receipt, the acquisition, and the entry
-    /// the post-install re-check looks up. Two entries sharing one id are two different install
-    /// instructions under one name, and the loop below simply reaches the FIRST — so whichever the
-    /// author wrote first silently wins and the other is never applied.</para>
+    /// <para><b>Installing the same thing into two places is legitimate</b>, and this does not
+    /// forbid it. Pokémon TCG Live genuinely needs MelonLoader twice: the game and its updater are
+    /// separate Unity executables in separate folders, and each needs its own loader beside it. What
+    /// cannot be shared is the ID.</para>
     ///
-    /// <para>That is not hypothetical. It happened live on Pokémon TCG Live: <c>melonloader</c> was
-    /// declared twice, once extracting into <c>Updater\1.5.0</c> and once into the game root. The
-    /// first was installed, the check looked for <c>version.dll</c> in the game root — where the
-    /// SECOND entry would have put it — found nothing, and aborted before the correct entry was ever
-    /// reached. The install failed with a message about a check rule that was, in fact, right.</para>
+    /// <para>A dependency id is a key. It names the refcount receipt (one per game and id), the
+    /// acquisition, and — critically — the entry the post-install re-check looks up, which finds the
+    /// FIRST status with that id regardless of which entry was just installed. Two entries under one
+    /// id therefore have one refcount between them and an ambiguous re-check, so the second is
+    /// unreachable however the loop is written.</para>
     ///
-    /// <para>Refused rather than de-duplicated: picking one of two contradictory instructions is
-    /// guessing what the author meant, and the same ordering accident that caused this would decide
-    /// the guess.</para>
+    /// <para>That is what happened live: <c>melonloader</c> twice, one extracting into
+    /// <c>Updater\1.5.0</c> and one into the game root, both checking for <c>version.dll</c> in the
+    /// game root. The first installed into the subfolder, the check looked at the root, and the flow
+    /// aborted before the second was ever reached — reporting a check rule that was correct.</para>
+    ///
+    /// <para>The fix is two ids, each with a check path matching where it installs. Refused rather
+    /// than de-duplicated, because dropping one would silently discard an install the author needs.</para>
     /// </summary>
     private static void RequireDistinctDependencyIds(GameInstall game)
     {
@@ -1661,9 +1665,10 @@ public sealed class InstallerEngine : IInstallerEngine
         if (duplicates.Count == 0) return;
 
         throw new InvalidOperationException(
-            $"This mod's dependency list names {string.Join(" and ", duplicates.Select(d => $"'{d}'"))} " +
-            "more than once, so there is no single answer for where it installs or how it is checked. " +
-            "The developer needs to remove the duplicate and republish.");
+            $"This mod's dependency list uses the name {string.Join(" and ", duplicates.Select(d => $"'{d}'"))} " +
+            "for more than one entry, so only the first can ever be installed or checked. If the same " +
+            "thing genuinely needs installing in two places, each needs its own name. The developer " +
+            "needs to fix this and republish.");
     }
 
     /// <summary>

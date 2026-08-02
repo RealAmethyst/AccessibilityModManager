@@ -90,11 +90,12 @@ public static class PluginIndexValidation
             foreach (var dep in game.Dependencies)
                 CollectIdError(trustErrors, dep.Id, $"plugin '{pluginId}' dependency id");
 
-            // One id, one dependency. Two entries sharing an id are two different install
-            // instructions under one name, and the engine reaches the first — so whichever was
-            // written first silently wins and the other never applies. That is not theoretical: it
-            // shipped on Pokemon TCG Live, where 'melonloader' was declared twice with different
-            // target folders, and every install of that mod failed with a message blaming a check
+            // One id, one dependency. Installing the same thing into two places is legitimate —
+            // Pokemon TCG Live needs MelonLoader beside both the game and its updater, which are
+            // separate executables in separate folders — but the two entries cannot share a NAME.
+            // The id keys the refcount receipt and the post-install re-check, which looks up the
+            // first entry with that id whichever one was just installed, so the second is
+            // unreachable. Live, that made every install of the TCG mod fail while blaming a check
             // rule that was correct.
             //
             // Compared case-insensitively because dependency ids become folder and receipt names on
@@ -105,9 +106,9 @@ public static class PluginIndexValidation
                          .Select(g => g.Key))
             {
                 authoring.Add(
-                    $"Game '{game.GameId}' declares the dependency '{duplicate}' more than once. Only the " +
-                    "first is ever used, so the others silently do nothing — remove the duplicates and " +
-                    "keep the one that is correct.");
+                    $"Game '{game.GameId}' uses the dependency name '{duplicate}' for more than one entry. " +
+                    "Only the first can ever be installed or checked. If the same thing needs installing " +
+                    "in two places, give each entry its own id and a check path matching where it goes.");
             }
         }
 
