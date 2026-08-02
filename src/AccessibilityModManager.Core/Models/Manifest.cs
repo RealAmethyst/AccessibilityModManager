@@ -7,6 +7,21 @@ namespace AccessibilityModManager.Core.Models;
 /// </summary>
 public sealed class Manifest
 {
+    /// <summary>
+    /// The folder inside the ZIP that install-action sources are relative to.
+    ///
+    /// <para>A <c>copyFolder</c> whose <c>sourceDir</c> is <c>BepInEx</c> reads
+    /// <c>files/BepInEx/</c> out of the archive — the engine extracts the whole ZIP and then hands
+    /// the executor <c>&lt;extracted&gt;/files</c> as the package root, so the prefix never appears
+    /// in a manifest.</para>
+    ///
+    /// <para><b>Lifecycle scripts are the exception</b> and are relative to the ZIP ROOT, because
+    /// they are validated and run against the staging directory rather than the files folder. The
+    /// split is not obvious, which is exactly why it is written down here and referenced from both
+    /// sides instead of being spelled <c>"files"</c> in each of them.</para>
+    /// </summary>
+    public const string PackageFilesFolder = "files";
+
     public required string GameId { get; init; }
     public required string PluginId { get; init; }
     public required string ModVersion { get; init; }

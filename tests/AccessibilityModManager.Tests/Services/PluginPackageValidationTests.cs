@@ -135,12 +135,12 @@ public class PluginPackageValidationTests
         // Would fail mid-install, after the backup is taken.
         using var zip = BuildZip(archive =>
             AddEntry(archive, "manifest.json", ManifestJson(
-                actions: [new { type = "copyFile", source = "files/mod.dll", target = "mod.dll" }])));
+                actions: [new { type = "copyFile", source = "mod.dll", target = "mod.dll" }])));
 
         var report = Validate(zip);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Errors, e => e.Contains("files/mod.dll") && e.Contains("no such file"));
+        Assert.Contains(report.Errors, e => e.Contains("mod.dll") && e.Contains("no such file"));
     }
 
     [Fact]
@@ -149,14 +149,14 @@ public class PluginPackageValidationTests
         using var zip = BuildZip(archive =>
         {
             AddEntry(archive, "manifest.json", ManifestJson(
-                actions: [new { type = "copyFolder", sourceDir = "files/plugins", targetDir = "plugins" }]));
+                actions: [new { type = "copyFolder", sourceDir = "plugins", targetDir = "plugins" }]));
             AddEntry(archive, "files/other/thing.dll", "bytes");
         });
 
         var report = Validate(zip);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Errors, e => e.Contains("files/plugins"));
+        Assert.Contains(report.Errors, e => e.Contains("plugins"));
     }
 
     [Fact]
@@ -165,7 +165,7 @@ public class PluginPackageValidationTests
         using var zip = BuildZip(archive =>
         {
             AddEntry(archive, "manifest.json", ManifestJson(
-                actions: [new { type = "copyFolder", sourceDir = "files/plugins", targetDir = "plugins" }]));
+                actions: [new { type = "copyFolder", sourceDir = "plugins", targetDir = "plugins" }]));
             AddEntry(archive, "files/plugins/thing.dll", "bytes");
         });
 
@@ -182,8 +182,8 @@ public class PluginPackageValidationTests
         using var zip = BuildZip(archive =>
         {
             AddEntry(archive, "manifest.json", ManifestJson(
-                actions: [new { type = "copyFile", source = @"files\mod.dll", target = "mod.dll" }]));
-            AddEntry(archive, "files/mod.dll", "bytes");
+                actions: [new { type = "copyFile", source = @"sub\mod.dll", target = "mod.dll" }]));
+            AddEntry(archive, "files/sub/mod.dll", "bytes");
         });
 
         var report = Validate(zip);
@@ -277,7 +277,7 @@ public class PluginPackageValidationTests
         using var zip = BuildZip(archive =>
         {
             AddEntry(archive, "manifest.json", ManifestJson(
-                actions: [new { type = "copyFile", source = "files/mod.dll", target = "../../escape.dll" }]));
+                actions: [new { type = "copyFile", source = "mod.dll", target = "../../escape.dll" }]));
             AddEntry(archive, "files/mod.dll", "bytes");
         });
 
@@ -293,7 +293,7 @@ public class PluginPackageValidationTests
         using var zip = BuildZip(archive =>
         {
             AddEntry(archive, "manifest.json", ManifestJson(
-                actions: [new { type = "copyFile", source = "files/mod.dll", target = @"C:\Windows\System32\evil.dll" }]));
+                actions: [new { type = "copyFile", source = "mod.dll", target = @"C:\Windows\System32\evil.dll" }]));
             AddEntry(archive, "files/mod.dll", "bytes");
         });
 
@@ -426,7 +426,7 @@ public class PluginPackageValidationTests
             ["gameId"] = gameId,
             ["modVersion"] = version,
             ["installActions"] = actions ??
-                [new { type = "copyFile", source = "files/mod.dll", target = "mod.dll" }],
+                [new { type = "copyFile", source = "mod.dll", target = "mod.dll" }],
             ["verify"] = verify ?? Array.Empty<object>()
         };
         if (postInstall != null) manifest["postInstall"] = postInstall;

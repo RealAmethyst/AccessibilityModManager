@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
@@ -19,7 +19,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <Version>1.14.0</Version>
+    <Version>1.15.0</Version>
   </PropertyGroup>
 
 </Project>

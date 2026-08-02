@@ -580,7 +580,7 @@ public sealed class InstallerEngine : IInstallerEngine
                     $"Package version mismatch: the package's manifest says '{manifest.ModVersion}' but the selected " +
                     $"release is '{release.Version}'. The wrong file may have been uploaded for this release.");
 
-            var packageFilesDir = Path.Combine(tempDir, "files");
+            var packageFilesDir = Path.Combine(tempDir, Manifest.PackageFilesFolder);
             CheckForCollisions(manifest, packageFilesDir, otherReceipts);
 
             // Validate every declared lifecycle script before doing any other work — safer to

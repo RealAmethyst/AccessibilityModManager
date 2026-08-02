@@ -189,10 +189,20 @@ public static class PluginPackageValidation
             }
         }
 
+        // Install-action sources are relative to the ZIP's files/ folder, not its root: the engine
+        // extracts the archive and hands the executor `<extracted>/files` as the package root
+        // (InstallerEngine: packageFilesDir). Comparing a manifest source against the RAW entry
+        // names therefore never matches, and this check refused every real package — including ones
+        // already published and installing correctly. It went unnoticed because the tests wrote
+        // `sourceDir: "files/plugins"` into their manifests, which no package the AuthorTool builds
+        // ever contains.
+        string InPackage(string source) =>
+            Manifest.PackageFilesFolder + "/" + Normalize(source).TrimStart('/');
+
         void RequireFile(string source, string actionName)
         {
             if (string.IsNullOrWhiteSpace(source)) return; // parser-level concern
-            if (!entryNames.Contains(Normalize(source)))
+            if (!entryNames.Contains(InPackage(source)))
             {
                 errors.Add($"The manifest's {actionName} action copies '{source}', but the ZIP has no such " +
                            "file. The install would fail halfway through on the user's machine.");
@@ -202,7 +212,7 @@ public static class PluginPackageValidation
         void RequireFolder(string sourceDir)
         {
             if (string.IsNullOrWhiteSpace(sourceDir)) return;
-            var prefix = Normalize(sourceDir).TrimEnd('/') + "/";
+            var prefix = InPackage(sourceDir).TrimEnd('/') + "/";
             if (!entryNames.Any(n => n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
             {
                 errors.Add($"The manifest's copyFolder action copies from '{sourceDir}', but the ZIP has " +
