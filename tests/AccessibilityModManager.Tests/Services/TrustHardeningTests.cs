@@ -141,7 +141,7 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RepoClient_IndexClaimingDifferentPluginId_Refused()
     {
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<CatalogRefusedException>(() =>
             FetchIndexAsync(IndexJson(pluginId: "impostor")));
         Assert.Contains("identity mismatch", ex.Message);
     }
@@ -149,7 +149,7 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RepoClient_ReleaseClaimingDifferentPluginId_Refused()
     {
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<CatalogRefusedException>(() =>
             FetchIndexAsync(IndexJson(releasePluginId: "impostor")));
         Assert.Contains("claims plugin id", ex.Message);
     }
@@ -157,7 +157,7 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RepoClient_ReleaseFiledUnderWrongGame_Refused()
     {
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<CatalogRefusedException>(() =>
             FetchIndexAsync(IndexJson(releaseGameId: "other-game")));
         Assert.Contains("claims game id", ex.Message);
     }
@@ -165,7 +165,7 @@ public class TrustHardeningTests : IDisposable
     [Fact]
     public async Task RepoClient_UnsafeGameId_Refused()
     {
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<CatalogRefusedException>(() =>
             FetchIndexAsync(IndexJson(gameId: "games/escape")));
         Assert.Contains("letters, digits", ex.Message);
     }
@@ -334,14 +334,7 @@ public class TrustHardeningTests : IDisposable
         // Cache dir under the test temp root so test fetches never touch the real user cache.
         var client = new PluginRepoClient(new HttpClient(new RouteHandler(_ => indexJson)), TestLogger.Create(),
             Path.Combine(_tempRoot, "index-cache"));
-        var entry = new PluginEntry
-        {
-            Id = "plug-a",
-            Name = "Plug A",
-            Author = "Author",
-            Description = "desc",
-            RepoIndexUrl = new Uri("https://example.invalid/index.json")
-        };
+        var entry = TestPluginEntry.Unanchored();
         return (await client.FetchPluginIndexAsync(entry)).Value;
     }
 

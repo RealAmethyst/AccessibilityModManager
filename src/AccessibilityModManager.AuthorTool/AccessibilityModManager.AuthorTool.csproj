@@ -17,15 +17,11 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
-    <!-- For one P/Invoke: the durable file replace the publishing journal depends on. .NET's
-         File.Move does not pass MOVEFILE_WRITE_THROUGH, so a flushed file can still be followed by
-         a lost rename. LibraryImport's generated marshalling requires this switch. -->
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <RootNamespace>AccessibilityModManager.AuthorTool</RootNamespace>
     <AssemblyName>AccessibilityModManager.AuthorTool</AssemblyName>
-    <Version>0.24.0</Version>
+    <Version>0.25.0</Version>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(RegistryAdmin)' == 'true'">

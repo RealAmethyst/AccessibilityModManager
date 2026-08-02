@@ -1,29 +1,9 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using AccessibilityModManager.Core.Models;
 
 namespace AccessibilityModManager.Infrastructure.CatalogClaims;
-
-/// <summary>
-/// The trust anchor a claim is signed under, taken from the signed registry entry for a plugin.
-/// Everything here comes from the registry — never from the index being verified, which is the
-/// thing under suspicion.
-/// </summary>
-public sealed record ClaimTrustAnchor
-{
-    public required string PluginId { get; init; }
-
-    /// <summary>The exact repoIndexUrl from the signed registry, compared ordinally.</summary>
-    public required string RepoIndexUrl { get; init; }
-
-    public required string Scheme { get; init; }
-    public required string KeyId { get; init; }
-    public required string Algorithm { get; init; }
-    public required string PublicKeyPem { get; init; }
-
-    public const string SchemeV1 = "signed-claims-v1";
-    public const string AlgorithmRsaPssSha256 = "rsa-pss-sha256";
-}
 
 /// <summary>
 /// One key size, everywhere: creating, importing, signing and verifying.

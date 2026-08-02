@@ -3,6 +3,7 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.CatalogClaims;
 using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
@@ -73,18 +74,27 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         {
             try
             {
-                var response = await SendNoCacheAsync(registryUrl, ct);
+                // A deadline on the whole exchange. Headers-only completion takes the body out of
+                // HttpClient.Timeout's reach, so without this a host that answers and then stops
+                // sending stalls the catalog refresh indefinitely. Linked to the caller's token so
+                // the user cancelling stays distinguishable from the host going quiet.
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                deadline.CancelAfter(PluginRepoClient.DefaultResponseDeadline);
+
+                using var response = await SendNoCacheAsync(registryUrl, deadline.Token);
                 response.EnsureSuccessStatusCode();
 
-                json = await response.Content.ReadAsStringAsync(ct);
+                json = await ReadBoundedTextAsync(
+                    response.Content, MaxRegistryBytes, "plugin registry", deadline.Token);
 
                 var sigUrl = new Uri(registryUrl.AbsoluteUri + ".sig");
                 _logger.Information("Fetching registry signature from {Url}", sigUrl);
 
-                var sigResponse = await SendNoCacheAsync(sigUrl, ct);
+                using var sigResponse = await SendNoCacheAsync(sigUrl, deadline.Token);
                 sigResponse.EnsureSuccessStatusCode();
 
-                signatureBase64 = (await sigResponse.Content.ReadAsStringAsync(ct)).Trim();
+                signatureBase64 = (await ReadBoundedTextAsync(
+                    sigResponse.Content, MaxSignatureBytes, "registry signature", deadline.Token)).Trim();
             }
             catch (Exception ex) when (IsNetworkFailure(ex, ct))
             {
@@ -168,6 +178,30 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
             throw new InvalidOperationException(report.Errors[0]);
         }
 
+        // Who may sign each plugin's catalog, resolved ONCE here — from the VERIFIED RAW DOCUMENT,
+        // not the deserialized model — and stamped onto the accepted entries. Every component
+        // downstream reads the same answer because there is only one answer, computed at the one
+        // moment a registry becomes trusted.
+        //
+        // The raw JSON, not the model, because the trust context is hashed over the index address
+        // exactly as the registry spells it; a Uri round-trip normalises, and the manager and the
+        // AuthorTool must derive the same bytes or every signature check fails for that author.
+        //
+        // A per-plugin failure refuses only that plugin — the settled multi-author rule. A
+        // DOCUMENT-level failure refuses the registry: an unreadable or ambiguous trust root is not
+        // an anchor, and darkens everything however it is reported, so it says so once.
+        var trust = IndexTrustReader.ResolveAll(json, registry.Plugins.Select(p => p.Id));
+        if (trust.DocumentError is { } documentError)
+        {
+            throw new InvalidOperationException(
+                $"The plugin registry's signature verified, but the document itself couldn't be read " +
+                $"({documentError}), so there is no way to tell which key signs any catalog. The " +
+                "catalog wasn't refreshed.");
+        }
+
+        foreach (var plugin in registry.Plugins)
+            plugin.ResolveIndexTrust(trust.ByPluginId[plugin.Id]);
+
         // The shipped floor, applied before the marker and independently of it. On a machine with no
         // marker — a fresh install, or one whose app data was cleared — the marker refuses nothing,
         // and a validly signed pre-signing registry would be accepted and take the manager down the
@@ -218,14 +252,14 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
             // highwater — exactly the state the cache exists to prevent. The lock is REQUIRED
             // here: cache persistence is best-effort, so on a wedged lock the right degradation
             // is to skip this write (the catch below), never to write unlocked and racy.
-            using var crossProcessLock = await TryAcquireHighwaterLockAsync(required: true);
+            using var crossProcessLock = await AcquireHighwaterLockAsync();
 
             try
             {
                 if (File.Exists(RegistryCachePath))
                 {
                     var existing = JsonSerializer.Deserialize<RegistryCacheEnvelope>(
-                        await File.ReadAllBytesAsync(RegistryCachePath), JsonOptions);
+                        BoundedFile.ReadAllBytes(RegistryCachePath, MaxRegistryCacheBytes, "saved registry"), JsonOptions);
                     if (existing is not null &&
                         !string.IsNullOrEmpty(existing.RegistryVersion) &&
                         VersionComparer.Instance.Compare(existing.RegistryVersion, registryVersion) > 0)
@@ -268,7 +302,7 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
             if (File.Exists(RegistryCachePath))
             {
                 envelope = JsonSerializer.Deserialize<RegistryCacheEnvelope>(
-                    await File.ReadAllBytesAsync(RegistryCachePath), JsonOptions);
+                    BoundedFile.ReadAllBytes(RegistryCachePath, MaxRegistryCacheBytes, "saved registry"), JsonOptions);
             }
         }
         catch (Exception ex)
@@ -360,7 +394,7 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
             // and the handle is released by the OS however a holder dies, so a crashed process
             // cannot leave one behind. The network path used to proceed unlocked, which let two app
             // copies interleave and regress the marker to the older of two accepted registries.
-            using var crossProcessLock = await TryAcquireHighwaterLockAsync(required: true);
+            using var crossProcessLock = await AcquireHighwaterLockAsync();
             await EnforceRegistryHighwaterCoreAsync(registryVersion, registryJson, checkOnly);
         }
         finally
@@ -370,51 +404,13 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
     }
 
     /// <summary>
-    /// Cross-process serialization of the marker's read-compare-write: without it, two app copies
-    /// could each read the same marker and then write their acceptances in reverse order,
-    /// regressing the marker. Waits up to ten seconds (a marker transaction takes milliseconds);
-    /// after that, <paramref name="required"/> decides between failing closed and degrading to
-    /// the process-local guarantee.
+    /// Cross-process serialization of the marker's read-compare-write, via
+    /// <see cref="CrossProcessFileLock"/> — one implementation shared with the claim replay store,
+    /// because two copies of this logic are two ratchets that agree only until they don't.
     /// </summary>
-    private async Task<FileStream?> TryAcquireHighwaterLockAsync(bool required)
-    {
-        var lockPath = Path.Combine(_stateDirectory, "registry-highwater.lock");
-        try
-        {
-            Directory.CreateDirectory(_stateDirectory);
-        }
-        catch (Exception ex)
-        {
-            if (required)
-                throw new InvalidOperationException("couldn't prepare the registry marker lock", ex);
-            _logger.Warning(ex, "Couldn't create the state directory for the registry marker lock");
-            return null;
-        }
-
-        for (var attempt = 0; attempt < 100; attempt++)
-        {
-            try
-            {
-                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            }
-            catch (IOException)
-            {
-                await Task.Delay(100);
-            }
-            catch (Exception ex)
-            {
-                if (required)
-                    throw new InvalidOperationException("couldn't acquire the registry marker lock", ex);
-                _logger.Warning(ex, "Couldn't acquire the registry marker lock; continuing with in-process serialization only");
-                return null;
-            }
-        }
-
-        if (required)
-            throw new InvalidOperationException("the registry marker lock stayed busy");
-        _logger.Warning("Registry marker lock stayed busy; continuing with in-process serialization only");
-        return null;
-    }
+    private Task<FileStream> AcquireHighwaterLockAsync() =>
+        CrossProcessFileLock.AcquireAsync(
+            Path.Combine(_stateDirectory, "registry-highwater.lock"), "registry marker");
 
     private async Task EnforceRegistryHighwaterCoreAsync(string registryVersion, string registryJson, bool checkOnly)
     {
@@ -431,7 +427,12 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         var markerAbsent = false;
         try
         {
-            var lines = File.ReadAllLines(markerPath);
+            // Split on '\n' and trim, so a marker written with either line ending reads the same.
+            // File.ReadAllLines did that for free; it is spelled out here because the read is now
+            // bounded, and a marker is two short lines whatever wrote it.
+            var lines = System.Text.Encoding.UTF8
+                .GetString(BoundedFile.ReadAllBytes(markerPath, MaxMarkerBytes, "catalog marker"))
+                .Split('\n');
             seenVersion = lines.Length > 0 ? lines[0].Trim() : null;
             seenSha = lines.Length > 1 ? lines[1].Trim() : null;
         }
@@ -541,7 +542,10 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
 
         try
         {
-            await AtomicJson.WriteAtomicAsync(markerPath,
+            // Durable, for the same reason as the claim replay records: an atomic write that the
+            // cache has not committed is a marker this machine can come back without, and coming
+            // back without it is indistinguishable from never having accepted the registry.
+            DurableFile.Write(markerPath,
                 System.Text.Encoding.UTF8.GetBytes(registryVersion + Environment.NewLine + sha));
         }
         catch (Exception ex)
@@ -571,8 +575,55 @@ public sealed class PluginRegistryClient : IPluginRegistryClient
         var request = new HttpRequestMessage(HttpMethod.Get, AppendCacheBuster(url));
         request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
         request.Headers.Pragma.ParseAdd("no-cache");
-        return _httpClient.SendAsync(request, ct);
+
+        // Headers first, so the ceiling in ReadBoundedTextAsync is applied while the body streams.
+        // The default option buffers the whole body inside SendAsync, which makes any later bound a
+        // refusal issued after the damage.
+        return _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
+
+    /// <summary>The registry, and the detached signature beside it. Neither is a large document,
+    /// and the manager has no reason to buffer an unbounded reply from a host claiming to be one.</summary>
+    private const int MaxRegistryBytes = 8 * 1024 * 1024;
+    private const int MaxRegistryCacheBytes = 2 * MaxRegistryBytes;
+    private const int MaxMarkerBytes = 4096;
+    private const int MaxSignatureBytes = 16 * 1024;
+
+    /// <summary>
+    /// Reads a bounded body as text.
+    ///
+    /// <para>The bytes are decoded here rather than by <c>ReadAsStringAsync</c>, which honours a
+    /// server-supplied charset — and the registry's signature is verified over the UTF-8 bytes of
+    /// whatever string comes back, so letting the server pick the encoding lets it pick what was
+    /// signed. Invalid UTF-8 refuses instead of becoming U+FFFD.</para>
+    /// </summary>
+    private static async Task<string> ReadBoundedTextAsync(
+        HttpContent content, int maxBytes, string what, CancellationToken ct)
+    {
+        await using var stream = await content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+                throw new InvalidOperationException($"The {what} is larger than {maxBytes} bytes. Refusing it.");
+            buffer.Write(chunk, 0, read);
+        }
+
+        try
+        {
+            return StrictUtf8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+        }
+        catch (System.Text.DecoderFallbackException ex)
+        {
+            throw new InvalidOperationException($"The {what} is not valid UTF-8 text. Refusing it.", ex);
+        }
+    }
+
+    private static readonly System.Text.UTF8Encoding StrictUtf8 =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     /// <summary>
     /// Adds a fresh <c>_=&lt;unix-ms&gt;</c> query parameter so each request looks unique to

@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using AccessibilityModManager.Infrastructure.Security;
 using Serilog;

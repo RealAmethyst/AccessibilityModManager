@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using AccessibilityModManager.Core.Models;
 
 namespace AccessibilityModManager.Infrastructure.CatalogClaims;
 

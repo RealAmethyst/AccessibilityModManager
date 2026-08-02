@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Security;
 using AccessibilityModManager.Infrastructure.Services;
@@ -161,8 +162,19 @@ public class OfflineCacheTests : IDisposable
 
         // Rewrite the cached index to claim a different plugin id — identity binding must refuse.
         // (The cache file name is a hash of the id, so find the single envelope by enumeration.)
-        var cachePath = Assert.Single(Directory.EnumerateFiles(cacheDir, "*.json"));
-        File.WriteAllText(cachePath, File.ReadAllText(cachePath).Replace("plug-a", "plug-x"));
+        //
+        // The tamper goes through the base64, not the envelope text. The envelope stores the exact
+        // accepted BYTES so a signed catalog can be re-verified offline, which means a plain
+        // search-and-replace over the file finds nothing and silently tampers with nothing — this
+        // test passed against an untouched cache until it was written this way.
+        var cachePath = Assert.Single(
+            Directory.EnumerateFiles(Path.Combine(cacheDir, "cache", "indexes"), "*.json"));
+        var envelope = JsonNode.Parse(File.ReadAllText(cachePath))!;
+        var cached = Encoding.UTF8.GetString(Convert.FromBase64String((string)envelope["indexBase64"]!));
+        Assert.Contains("plug-a", cached);
+        envelope["indexBase64"] = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(cached.Replace("plug-a", "plug-x")));
+        File.WriteAllText(cachePath, envelope.ToJsonString());
 
         var offline = new PluginRepoClient(new HttpClient(new FailingHandler()), TestLogger.Create(), cacheDir);
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -197,14 +209,7 @@ public class OfflineCacheTests : IDisposable
         new(new HttpClient(new FailingHandler()), TestLogger.Create(),
             new RegistrySignatureVerifier(_rsa.ExportSubjectPublicKeyInfoPem(), TestLogger.Create()), _tempRoot);
 
-    private static PluginEntry Entry() => new()
-    {
-        Id = "plug-a",
-        Name = "Plug A",
-        Author = "Author",
-        Description = "desc",
-        RepoIndexUrl = new Uri("https://example.invalid/index.json")
-    };
+    private static PluginEntry Entry() => TestPluginEntry.Unanchored();
 
     private static string RegistryJson(string version) => $$"""
         {

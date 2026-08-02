@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using AccessibilityModManager.Core.Models;
 
 namespace AccessibilityModManager.Infrastructure.CatalogClaims;
 

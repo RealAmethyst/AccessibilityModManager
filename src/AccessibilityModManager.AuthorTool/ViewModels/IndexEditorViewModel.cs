@@ -9,6 +9,7 @@ using AccessibilityModManager.Infrastructure.CatalogClaims;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
+using AccessibilityModManager.Infrastructure.Security;
 
 namespace AccessibilityModManager.AuthorTool.ViewModels;
 

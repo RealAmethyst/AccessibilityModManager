@@ -123,6 +123,14 @@ public partial class GamesListViewModel : ObservableObject
             // Every registry-listed plugin is active. We don't filter by an "enabled" state
             // anymore — registry membership IS the gate.
             var activeIndexes = new Dictionary<string, PluginRepoIndex>();
+
+            // Every developer whose catalog could not be loaded, and why. A refusal used to be
+            // logged and then followed by a perfectly ordinary "Found N mods", so a plugin
+            // disappearing from the catalog — because it was refused, tampered with, or simply
+            // unreachable — was indistinguishable from that developer having published nothing.
+            // Verification makes refusals real, so they have to be said out loud.
+            var unavailable = new List<string>();
+
             foreach (var plugin in registry.Plugins)
             {
                 ct.ThrowIfCancellationRequested();
@@ -130,16 +138,40 @@ public partial class GamesListViewModel : ObservableObject
                 {
                     var indexFetch = await _repoClient.FetchPluginIndexAsync(plugin, ct);
                     activeIndexes[plugin.Id] = indexFetch.Value;
-                    if (indexFetch.FromCache)
+
+                    if (indexFetch.LiveRejectionReason is { } rejected)
+                    {
+                        // Said separately from "offline", and NOT counted as offline: the server was
+                        // reached, it answered, and what it answered failed its checks. Folding this
+                        // into the offline flag made the line claim both at once — "the live catalog
+                        // was refused" followed by "Offline" — and only one of them was true.
+                        unavailable.Add(
+                            $"{DescribeDeveloper(plugin)}'s live catalog was refused, so you're seeing the " +
+                            $"copy saved {CatalogStatus.FormatCachedAt(indexFetch.CachedAtUtc)}. {rejected}");
+                    }
+                    else if (indexFetch.FromCache)
                     {
                         anyFromCache = true;
                         if (oldestCachedAt is null || indexFetch.CachedAtUtc < oldestCachedAt)
                             oldestCachedAt = indexFetch.CachedAtUtc;
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    // The user cancelled, or the whole refresh is being torn down. That is not this
+                    // developer's catalog failing, and announcing it as one would be a lie the user
+                    // then has to investigate.
+                    throw;
+                }
                 catch (Exception ex)
                 {
+                    // The full exception goes to the log, where its type names, JSON paths and byte
+                    // offsets are useful. What gets SPOKEN is the reason alone — a screen reader
+                    // reading out framework text is not a message, it is noise the user then has to
+                    // decode.
                     _logger.Warning(ex, "Failed to fetch index for plugin {PluginId}", plugin.Id);
+                    unavailable.Add($"{DescribeDeveloper(plugin)}'s mods couldn't be loaded. " +
+                                    CatalogRefusedException.SpeakableReason(ex));
                 }
             }
 
@@ -243,8 +275,14 @@ public partial class GamesListViewModel : ObservableObject
 
             var detected = _allMods.Count(m => m.IsDetected);
             var summary = $"Found {_allMods.Count} mod{(_allMods.Count == 1 ? "" : "s")} ({detected} detected).";
-            StatusMessage = anyFromCache
-                ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(oldestCachedAt)}. {summary}"
+            if (anyFromCache)
+                summary = $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(oldestCachedAt)}. {summary}";
+
+            // The problem first, then the count. A screen reader speaks this line straight through,
+            // and a warning that arrives after "Found 12 mods" is a warning about a list the listener
+            // has already accepted as complete.
+            StatusMessage = unavailable.Count > 0
+                ? string.Join(" ", unavailable) + " " + summary
                 : summary;
         }
         catch (OperationCanceledException)
@@ -260,6 +298,19 @@ public partial class GamesListViewModel : ObservableObject
         {
             IsLoading = false;
         }
+    }
+
+    /// <summary>
+    /// How a developer is named when their catalog can't be loaded. The author's name, because that
+    /// is what the user recognises from the Developers tab — the plugin id is an internal handle and
+    /// the listing name is often a sentence. Falls back through the listing name to the id so the
+    /// notice never says whose mods are missing with a blank.
+    /// </summary>
+    private static string DescribeDeveloper(PluginEntry plugin)
+    {
+        if (!string.IsNullOrWhiteSpace(plugin.Author)) return plugin.Author;
+        if (!string.IsNullOrWhiteSpace(plugin.Name)) return plugin.Name;
+        return plugin.Id;
     }
 
     /// <summary>

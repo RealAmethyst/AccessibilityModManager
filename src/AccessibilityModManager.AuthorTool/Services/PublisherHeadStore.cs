@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Serilog;
+using AccessibilityModManager.Infrastructure.Security;
 
 namespace AccessibilityModManager.AuthorTool.Services;
 

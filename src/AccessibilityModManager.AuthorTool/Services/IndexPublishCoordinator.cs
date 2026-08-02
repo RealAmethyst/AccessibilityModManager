@@ -1,3 +1,4 @@
+using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using Serilog;
 

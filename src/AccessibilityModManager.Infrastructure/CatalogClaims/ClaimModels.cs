@@ -108,6 +108,35 @@ public sealed record ClaimAudience
         Public == other.Public &&
         string.Equals(CampaignId, other.CampaignId, StringComparison.Ordinal) &&
         new HashSet<string>(TierIds, StringComparer.Ordinal).SetEquals(other.TierIds);
+
+    /// <summary>
+    /// A stable string form for the manager's replay records, built like
+    /// <see cref="ClaimIdentity.ToStorageKey"/> from length-prefixed parts so no combination of
+    /// values can be crafted to collide with a different audience.
+    ///
+    /// <para>Tiers are deduplicated and sorted ordinally, and their count is its own part. Two
+    /// audiences that <see cref="SameAs"/> calls equal must produce one key, or the same object
+    /// would ratchet under two records and the lower one would never advance — a replay the store
+    /// exists to catch, hidden by the store's own bookkeeping. Serving order is the server's
+    /// choice, so it must not reach the key.</para>
+    /// </summary>
+    public string ToStorageKey()
+    {
+        var tiers = TierIds
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(t => t, StringComparer.Ordinal)
+            .ToList();
+
+        var parts = new List<string>(tiers.Count + 3)
+        {
+            Public ? "1" : "0",
+            CampaignId ?? "",
+            tiers.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        };
+        parts.AddRange(tiers);
+
+        return string.Join("|", parts.Select(p => $"{p.Length}:{p}"));
+    }
 }
 
 /// <summary>

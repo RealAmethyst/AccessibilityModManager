@@ -1,4 +1,5 @@
 using System.IO;
+using AccessibilityModManager.Infrastructure.Security;
 
 namespace AccessibilityModManager.AuthorTool.Services;
 

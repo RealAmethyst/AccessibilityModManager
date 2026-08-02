@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.AuthorTool.ViewModels;
+using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using AccessibilityModManager.Tests.Helpers;
 using Xunit;

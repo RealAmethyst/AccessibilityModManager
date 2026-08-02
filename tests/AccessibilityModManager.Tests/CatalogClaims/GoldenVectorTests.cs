@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using Xunit;
 

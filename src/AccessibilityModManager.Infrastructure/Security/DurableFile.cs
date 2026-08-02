@@ -1,7 +1,7 @@
 using System.IO;
 using System.Runtime.InteropServices;
 
-namespace AccessibilityModManager.AuthorTool.Services;
+namespace AccessibilityModManager.Infrastructure.Security;
 
 /// <summary>
 /// Writing a file so that a machine which loses power has either the old contents or the new ones,
@@ -15,10 +15,12 @@ namespace AccessibilityModManager.AuthorTool.Services;
 /// could still be followed by a lost rename.
 ///
 /// Used for every file whose disappearance would be a security problem rather than an
-/// inconvenience: the publishing journal, the registry high-water, the signing keys, and the config
-/// that says which key is which.
+/// inconvenience: on the publishing side the journal, the signing keys and the config that says
+/// which key is which; on the manager side the registry high-water marker and the claim replay
+/// records. Those last two are ratchets — losing a committed advance is exactly a rollback, and
+/// a rollback is what they exist to refuse — so an ordinary atomic write is not enough for them.
 /// </summary>
-internal static partial class DurableFile
+public static class DurableFile
 {
     public static void Write(string path, byte[] bytes)
     {
@@ -60,8 +62,14 @@ internal static partial class DurableFile
     private const uint MoveFileReplaceExisting = 0x1;
     private const uint MoveFileWriteThrough = 0x8;
 
-    [LibraryImport("kernel32.dll", EntryPoint = "MoveFileExW",
-        StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    /// <summary>
+    /// <c>DllImport</c> rather than <c>LibraryImport</c>: the source generator emits unsafe
+    /// marshalling code, which would mean turning <c>AllowUnsafeBlocks</c> on for the whole of
+    /// Infrastructure to gain nothing here. Two UTF-16 strings and a flag word marshal the same
+    /// either way.
+    /// </summary>
+    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW",
+        CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool MoveFileExW(string existingFileName, string newFileName, uint flags);
+    private static extern bool MoveFileExW(string existingFileName, string newFileName, uint flags);
 }

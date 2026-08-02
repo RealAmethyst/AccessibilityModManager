@@ -1,4 +1,5 @@
 using AccessibilityModManager.AuthorTool.Services;
+using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using AccessibilityModManager.Tests.Helpers;
 using Xunit;

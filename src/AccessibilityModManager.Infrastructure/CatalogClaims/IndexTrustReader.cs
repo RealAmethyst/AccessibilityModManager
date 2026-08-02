@@ -1,90 +1,47 @@
 using System.Text.Json;
+using AccessibilityModManager.Core.Models;
 
 namespace AccessibilityModManager.Infrastructure.CatalogClaims;
 
 /// <summary>
-/// What a signed registry says about who may sign a plugin's index.
+/// The trust state of every plugin in one registry document — or the single reason the document
+/// itself could not be read.
 ///
-/// <para><see cref="Unresolved"/> is the zero value on purpose. Any field or property that holds one
-/// of these and was never assigned reads as "nobody has asked the registry yet", which every
-/// consumer must refuse — rather than as <see cref="None"/>, which is a permission. The states that
-/// grant something are the ones you have to write down.</para>
+/// <para>The two are separate states rather than one map that happens to be empty. An empty map
+/// reads as "no plugin has an anchor", and that is the permission to treat every catalog as
+/// unsigned. A caller has to deal with <see cref="DocumentError"/> before it can reach the
+/// resolutions at all: <see cref="ByPluginId"/> throws while one is set.</para>
 /// </summary>
-public enum IndexTrustStatus
+public sealed record RegistryTrustResolutions
 {
-    /// <summary>Never computed. Not an answer; consumers fail closed on it.</summary>
-    Unresolved = 0,
+    private readonly IReadOnlyDictionary<string, IndexTrustResolution>? _byPluginId;
 
-    /// <summary>The registry names no signing key for this plugin — the unsigned path, unchanged.</summary>
-    None,
-
-    /// <summary>The registry names a key this manager can verify against.</summary>
-    Anchored,
-
-    /// <summary>
-    /// The registry names something where a key belongs, and it cannot be used. Never collapses into
-    /// <see cref="None"/>: "there is no anchor" is a permission to read an unsigned catalog, and a
-    /// broken anchor must never be able to grant it.
-    /// </summary>
-    Unusable
-}
-
-/// <summary>
-/// The resolved trust state for one plugin, plus the reason when there isn't one.
-///
-/// <para>The constructor is private and the properties are get-only, so the invalid combinations
-/// cannot be written down at all: no <see cref="IndexTrustStatus.None"/> carrying an anchor, no
-/// <see cref="IndexTrustStatus.Anchored"/> without one. A consumer that asks "is there an anchor?"
-/// and one that asks "is the status Anchored?" therefore cannot disagree — which matters, because
-/// several consumers ask it each way and the wrong answer grants the unsigned path.</para>
-/// </summary>
-public sealed record IndexTrustResolution
-{
-    private IndexTrustResolution(IndexTrustStatus status, ClaimTrustAnchor? anchor, string? reason)
+    private RegistryTrustResolutions(
+        string? documentError, IReadOnlyDictionary<string, IndexTrustResolution>? byPluginId)
     {
-        Status = status;
-        Anchor = anchor;
-        Reason = reason;
+        DocumentError = documentError;
+        _byPluginId = byPluginId;
     }
 
-    public IndexTrustStatus Status { get; }
+    /// <summary>Non-null exactly when the document could not be read at all.</summary>
+    public string? DocumentError { get; }
 
-    /// <summary>Non-null exactly when <see cref="Status"/> is <see cref="IndexTrustStatus.Anchored"/>.</summary>
-    public ClaimTrustAnchor? Anchor { get; }
+    /// <summary>One resolution per requested plugin id. Throws while <see cref="DocumentError"/> is set.</summary>
+    public IReadOnlyDictionary<string, IndexTrustResolution> ByPluginId =>
+        _byPluginId ?? throw new InvalidOperationException(
+            $"The registry document could not be read ({DocumentError}); there are no per-plugin " +
+            "resolutions to read.");
 
-    /// <summary>
-    /// Non-null exactly when <see cref="Status"/> is <see cref="IndexTrustStatus.Unusable"/>. Written
-    /// to be read aloud: it reaches the user as the reason a plugin is missing from their catalog,
-    /// and it is deliberately application-neutral — the same sentence is surfaced by the AuthorTool
-    /// while publishing and (later) by the manager while reading, so it must not tell a publisher to
-    /// update the manager. Callers add their own remedy.
-    /// </summary>
-    public string? Reason { get; }
-
-    public static readonly IndexTrustResolution NoAnchor = new(IndexTrustStatus.None, null, null);
-
-    /// <summary>
-    /// The arguments are checked at RUNTIME, not merely annotated. A private constructor stops an
-    /// object initializer writing down an invalid combination, and stops nothing at all coming
-    /// through here — `Anchored(null!)` would have produced an Anchored resolution with no anchor,
-    /// making the invariant above false while consumers dereference <c>Anchor!</c> on the strength
-    /// of it. Nullable annotations are a compiler courtesy, not enforcement.
-    /// </summary>
-    public static IndexTrustResolution Anchored(ClaimTrustAnchor anchor)
+    public static RegistryTrustResolutions Broken(string documentError)
     {
-        ArgumentNullException.ThrowIfNull(anchor);
-        return new(IndexTrustStatus.Anchored, anchor, null);
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentError);
+        return new(documentError, null);
     }
 
-    /// <summary>
-    /// A blank reason is refused as well as a null one: this text is the whole of what a user hears
-    /// about why a plugin vanished from their catalog, and an empty refusal is indistinguishable
-    /// from the failure having no explanation at all.
-    /// </summary>
-    public static IndexTrustResolution Unusable(string reason)
+    public static RegistryTrustResolutions Resolved(IReadOnlyDictionary<string, IndexTrustResolution> byPluginId)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
-        return new(IndexTrustStatus.Unusable, null, reason);
+        ArgumentNullException.ThrowIfNull(byPluginId);
+        return new(null, byPluginId);
     }
 }
 
@@ -130,21 +87,49 @@ public static class IndexTrustReader
     /// identity. An entry that differs only in capitalisation therefore resolves to
     /// <see cref="IndexTrustStatus.None"/> here, and is surfaced as its own refusal by
     /// <c>TryReadIndexUrl</c>, which exists to see exactly that disagreement.</para>
+    ///
+    /// <para>A document-level failure comes back as <see cref="IndexTrustStatus.Unusable"/> for this
+    /// plugin, which is the right answer for a caller asking about exactly one. A caller resolving a
+    /// whole registry wants <see cref="ResolveAll"/>, which reports that once instead of once per
+    /// plugin.</para>
     /// </summary>
     public static IndexTrustResolution Resolve(string verifiedRegistryJson, string pluginId)
     {
+        var all = ResolveAll(verifiedRegistryJson, [pluginId]);
+        return all.DocumentError is { } error
+            ? IndexTrustResolution.Unusable(error)
+            : all.ByPluginId[pluginId];
+    }
+
+    /// <summary>
+    /// Resolves every requested plugin from ONE parse of the registry.
+    ///
+    /// <para>Two levels of failure, deliberately distinct. A broken <b>anchor</b> refuses its own
+    /// plugin and leaves the rest of the catalog working — the settled rule, because on a
+    /// multi-author registry one author's typo must not dark every user's whole catalog. A broken
+    /// <b>document</b> is not an anchor: it is the signed trust root failing to parse, which darkens
+    /// everything whichever way it is reported, so it is reported once and clearly rather than as N
+    /// identical per-plugin refusals.</para>
+    /// </summary>
+    public static RegistryTrustResolutions ResolveAll(string verifiedRegistryJson, IEnumerable<string> pluginIds)
+    {
+        var wanted = new HashSet<string>(pluginIds, StringComparer.Ordinal);
+
         JsonDocument document;
         try
         {
-            // Duplicates refuse rather than resolving to first- or last-wins. The setting applies
-            // recursively, so it also covers two `indexTrust` members in one entry — an ambiguity
-            // where two readers can each behave "correctly" and reach different keys.
-            document = JsonDocument.Parse(
-                verifiedRegistryJson, new JsonDocumentOptions { AllowDuplicateProperties = false });
+            // Duplicates are ALLOWED at the parser and refused per plugin below.
+            //
+            // Rejecting them here instead reads as stricter and breaks the settled rule: the setting
+            // is recursive, so one author repeating `indexTrust` — or any member, anywhere in their
+            // entry — throws before anything knows which entry it was, and the whole registry goes
+            // dark. That is exactly the multi-author failure the per-plugin rule exists to prevent,
+            // arriving through the parser. Duplicates still refuse; they refuse locally.
+            document = JsonDocument.Parse(verifiedRegistryJson);
         }
         catch (JsonException ex)
         {
-            return IndexTrustResolution.Unusable($"the registry could not be read ({ex.Message})");
+            return RegistryTrustResolutions.Broken($"the registry could not be read ({ex.Message})");
         }
 
         using (document)
@@ -154,7 +139,12 @@ public static class IndexTrustReader
             // instead of returning false — so without this the reader would fault rather than
             // refuse, and a fault is not a decision anyone can act on.
             if (document.RootElement.ValueKind != JsonValueKind.Object)
-                return IndexTrustResolution.Unusable("the registry is not a set of values");
+                return RegistryTrustResolutions.Broken("the registry is not a set of values");
+
+            // A repeated member at the ROOT is not localisable to any plugin — two `plugins` arrays
+            // is two registries — so this one does refuse the document.
+            if (HasRepeatedMember(document.RootElement))
+                return RegistryTrustResolutions.Broken("the registry repeats a top-level entry");
 
             // Missing or non-array `plugins` is structural breakage, not "this plugin isn't listed".
             // Only a well-formed collection is allowed to establish genuine absence, because absence
@@ -162,10 +152,10 @@ public static class IndexTrustReader
             if (!document.RootElement.TryGetProperty("plugins", out var plugins) ||
                 plugins.ValueKind != JsonValueKind.Array)
             {
-                return IndexTrustResolution.Unusable("the registry carries no list of plugins");
+                return RegistryTrustResolutions.Broken("the registry carries no list of plugins");
             }
 
-            // The WHOLE array is scanned, and two entries sharing this id refuse.
+            // The WHOLE array is scanned, and two entries sharing an id refuse that id.
             //
             // Returning on the first match looks equivalent and is not: JSON permits repeated array
             // elements, and AllowDuplicateProperties only governs repeated MEMBERS of one object —
@@ -173,29 +163,65 @@ public static class IndexTrustReader
             // an unanchored entry placed before an anchored one would have resolved to None, and None
             // is permission to publish and read unsigned. Whoever writes the registry does not get to
             // choose which of two answers a reader sees.
-            JsonElement? match = null;
+            var matches = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            var duplicated = new HashSet<string>(StringComparer.Ordinal);
+
             foreach (var plugin in plugins.EnumerateArray())
             {
                 if (plugin.ValueKind != JsonValueKind.Object) continue;
                 if (!plugin.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) continue;
-                if (!string.Equals(id.GetString(), pluginId, StringComparison.Ordinal)) continue;
 
-                if (match is not null)
-                {
-                    return IndexTrustResolution.Unusable(
-                        $"the registry lists '{pluginId}' more than once, so which key signs its " +
-                        "catalog is ambiguous");
-                }
+                var pluginId = id.GetString()!;
+                if (!wanted.Contains(pluginId)) continue;
 
-                match = plugin;
+                if (!matches.TryAdd(pluginId, plugin)) duplicated.Add(pluginId);
             }
 
-            return match is null ? IndexTrustResolution.NoAnchor : ResolveEntry(match.Value, pluginId);
+            var resolved = new Dictionary<string, IndexTrustResolution>(StringComparer.Ordinal);
+            foreach (var pluginId in wanted)
+            {
+                resolved[pluginId] =
+                    duplicated.Contains(pluginId)
+                        ? IndexTrustResolution.Unusable(
+                            $"the registry lists '{pluginId}' more than once, so which key signs its " +
+                            "catalog is ambiguous")
+                        : matches.TryGetValue(pluginId, out var entry)
+                            ? ResolveEntry(entry, pluginId)
+                            : IndexTrustResolution.NoAnchor;
+            }
+
+            return RegistryTrustResolutions.Resolved(resolved);
         }
+    }
+
+    /// <summary>
+    /// True when an object names the same member twice.
+    ///
+    /// <para>Checked by hand because the parser's recursive setting cannot be scoped to one entry,
+    /// and this question has to be answerable per plugin. A repeated member means two readers can
+    /// each behave correctly and reach different keys — including two <c>indexTrust</c> blocks, where
+    /// one of the two answers may be "no anchor", which is permission.</para>
+    /// </summary>
+    private static bool HasRepeatedMember(JsonElement element)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var member in element.EnumerateObject())
+            if (!seen.Add(member.Name)) return true;
+
+        return false;
     }
 
     private static IndexTrustResolution ResolveEntry(JsonElement plugin, string pluginId)
     {
+        // Localised duplicate detection: this entry, and the trust block inside it. Anything else in
+        // the document repeating a member is somebody else's problem and must not be this plugin's.
+        if (HasRepeatedMember(plugin))
+        {
+            return IndexTrustResolution.Unusable(
+                $"the registry entry for '{pluginId}' names the same thing twice, so which key signs " +
+                "its catalog is ambiguous");
+        }
+
         if (!plugin.TryGetProperty("indexTrust", out var trust))
             return IndexTrustResolution.NoAnchor;
 
@@ -208,6 +234,13 @@ public static class IndexTrustReader
             return IndexTrustResolution.Unusable(
                 $"the registry entry for '{pluginId}' has a signing-key block that isn't a set of " +
                 "values, so there is no way to tell which key signs this catalog");
+        }
+
+        if (HasRepeatedMember(trust))
+        {
+            return IndexTrustResolution.Unusable(
+                $"the signing-key block for '{pluginId}' names the same thing twice, so which key " +
+                "signs its catalog is ambiguous");
         }
 
         foreach (var member in trust.EnumerateObject())

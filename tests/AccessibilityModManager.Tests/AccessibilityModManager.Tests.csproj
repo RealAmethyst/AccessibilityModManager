@@ -21,6 +21,9 @@
     <!-- The AuthorTool holds the signing-key store: security-critical, and previously untestable
          because nothing referenced it. -->
     <ProjectReference Include="..\..\src\AccessibilityModManager.AuthorTool\AccessibilityModManager.AuthorTool.csproj" />
+    <!-- The App holds what the user is TOLD. On an accessibility product the announcement is the
+         feature, so "a plugin was refused" being spoken needs pinning like any other behaviour. -->
+    <ProjectReference Include="..\..\src\AccessibilityModManager.App\AccessibilityModManager.App.csproj" />
   </ItemGroup>
 
   <ItemGroup>

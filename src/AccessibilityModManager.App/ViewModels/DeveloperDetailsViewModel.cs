@@ -36,6 +36,10 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     private PluginRepoIndex? _pluginIndex;
     private bool _indexFromCache;
     private DateTimeOffset? _indexCachedAtUtc;
+
+    /// <summary>Set when the LIVE catalog was reached and refused, so this view is showing an older
+    /// copy. Distinct from being offline, and it must be said rather than swallowed.</summary>
+    private string? _indexRejectionReason;
     private List<GameInstall> _installs = [];
 
     public string PluginId => _plugin.Id;
@@ -133,6 +137,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
                 _pluginIndex = indexFetch.Value;
                 _indexFromCache = indexFetch.FromCache;
                 _indexCachedAtUtc = indexFetch.CachedAtUtc;
+                _indexRejectionReason = indexFetch.LiveRejectionReason;
             }
 
             // Surface author info from the index (preferred) or fall back to the registry's
@@ -211,14 +216,21 @@ public partial class DeveloperDetailsViewModel : ObservableObject
 
             var detected = Mods.Count(m => m.IsDetected);
             var summary = $"{Mods.Count} mod{(Mods.Count == 1 ? "" : "s")} ({detected} detected).";
-            StatusMessage = _indexFromCache
+            // The refusal leads, and it is NOT called "offline": the server answered, and what it
+            // answered failed its checks. Saying only "Offline" here hid the security event
+            // completely.
+            StatusMessage = _indexRejectionReason is { } rejected
+                ? $"This developer's live catalog was refused, so you're seeing the copy saved " +
+                  $"{CatalogStatus.FormatCachedAt(_indexCachedAtUtc)}. {rejected} {summary}"
+                : _indexFromCache
                 ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(_indexCachedAtUtc)}. {summary}"
                 : summary;
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to load developer details for {PluginId}", _plugin.Id);
-            StatusMessage = $"Failed to load: {ex.Message}";
+            StatusMessage = "Couldn't load this developer's mods. " +
+                            CatalogRefusedException.SpeakableReason(ex);
         }
         finally
         {

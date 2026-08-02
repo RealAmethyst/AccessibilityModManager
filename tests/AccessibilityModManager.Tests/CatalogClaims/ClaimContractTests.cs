@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using Xunit;
 
