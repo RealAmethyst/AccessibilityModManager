@@ -31,14 +31,15 @@ public partial class MainWindow : Window
                 new Action(() => DeveloperDetailsViewControl.FocusList()),
                 DispatcherPriority.ApplicationIdle);
 
-        Loaded += async (_, _) =>
-        {
-            await viewModel.InitializeCommand.ExecuteAsync(null);
-            // Default tab is Mods (index 0). Focus its list at ApplicationIdle priority so the
-            // ListView's item containers are generated before we land on the first item.
+        // Default tab is Mods (index 0). Focus its list as soon as the mods are loaded — NOT after
+        // the whole of Initialize, which also waits on the update check and so held focus back for a
+        // network round trip. ApplicationIdle priority so the ListView's item containers are
+        // generated before we land on the first item.
+        viewModel.InitialTabLoaded += () =>
             _ = Dispatcher.BeginInvoke(
                 new Action(() => GamesTabView.FocusList()),
                 DispatcherPriority.ApplicationIdle);
-        };
+
+        Loaded += async (_, _) => await viewModel.InitializeCommand.ExecuteAsync(null);
     }
 }

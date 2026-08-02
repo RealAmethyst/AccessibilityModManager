@@ -125,6 +125,14 @@ public partial class MainViewModel : ObservableObject
         _runUpdate(AvailableUpdate);
     }
 
+    /// <summary>
+    /// Raised once the startup tab's content is loaded, before the best-effort update check is
+    /// waited on. The window puts keyboard focus on the first item when this fires: hanging that on
+    /// the whole of <see cref="InitializeAsync"/> made it wait for a network round trip that has
+    /// nothing to do with the list being ready.
+    /// </summary>
+    public event Action? InitialTabLoaded;
+
     [RelayCommand]
     private async Task InitializeAsync()
     {
@@ -132,6 +140,7 @@ public partial class MainViewModel : ObservableObject
         // Kick off the update check in parallel; it's best-effort and shouldn't block the UI.
         var checkTask = CheckForUpdateAsync();
         await LoadCurrentTabAsync();
+        InitialTabLoaded?.Invoke();
         await checkTask;
     }
 

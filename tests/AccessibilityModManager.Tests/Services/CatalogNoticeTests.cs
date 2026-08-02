@@ -117,6 +117,77 @@ public sealed class CatalogNoticeTests
         Assert.Contains("cancelled", vm.StatusMessage);
     }
 
+    [Fact]
+    public async Task RefreshingWithNothingChanged_DoesNotRebuildTheList()
+    {
+        // Every rebuild of the visible list destroys the row the user is focused on, which costs a
+        // screen-reader user a re-announcement. Startup does exactly this: the list renders, gets
+        // focused, and is refreshed again a moment later when the Patreon membership load finishes
+        // and asks every view to re-render. If nothing about the rows changed, nothing should move.
+        var vm = Build(new StubRepoClient(new Fetched<PluginRepoIndex> { Value = OneModIndex() }));
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+        var first = Assert.Single(vm.Mods);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+
+        // The very same row object, so its list item — and the focus on it — was never destroyed.
+        Assert.Same(first, Assert.Single(vm.Mods));
+    }
+
+    [Fact]
+    public async Task RefreshingWithAChangedRow_DoesRebuildTheList()
+    {
+        // The guard must not make the list stale. A row whose spoken text differs — a mod that got
+        // installed, updated, or appeared — has to come through.
+        var repo = new SwappableRepoClient(OneModIndex());
+        var vm = Build(repo);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+        var before = Assert.Single(vm.Mods);
+
+        repo.Index = OneModIndex(gameName: "Game One Deluxe");
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+
+        var after = Assert.Single(vm.Mods);
+        Assert.NotSame(before, after);
+        Assert.Contains("Deluxe", after.AnnouncementText);
+    }
+
+    private static PluginRepoIndex OneModIndex(string gameName = "Game One") => new()
+    {
+        PluginId = "amethyst",
+        RepoVersion = "1",
+        GeneratedAt = DateTime.UnixEpoch,
+        Games = [new GameDefinition { GameId = "game-1", DisplayName = gameName, ModName = "Mod" }],
+        ReleasesByGameId = new Dictionary<string, List<ModRelease>>
+        {
+            ["game-1"] =
+            [
+                new ModRelease
+                {
+                    PluginId = "amethyst", GameId = "game-1", Version = "1.0.0", Channel = "stable",
+                    PackageUrl = new Uri("https://example.invalid/p.zip"),
+                    Sha256 = new string('a', 64)
+                }
+            ]
+        }
+    };
+
+    private sealed class SwappableRepoClient(PluginRepoIndex index) : IPluginRepoClient
+    {
+        public PluginRepoIndex Index { get; set; } = index;
+
+        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default) =>
+            Task.FromResult(new Fetched<PluginRepoIndex> { Value = Index });
+
+        public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<bool> VerifySha256Async(string filePath, string expectedHash, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+    }
+
     // ------------------------------------------------------------------ harness
 
     private static GamesListViewModel Build(IPluginRepoClient repoClient) => new(

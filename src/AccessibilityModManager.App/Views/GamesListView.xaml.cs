@@ -7,6 +7,12 @@ public partial class GamesListView : UserControl
     public GamesListView()
     {
         InitializeComponent();
+
+        // The mods list is rebuilt more than once during an ordinary startup: it renders and gets
+        // focused, and is then cleared and refilled when the Patreon membership load finishes and
+        // asks every view to re-render. That destroys the item the user was on, so focus falls back
+        // to the list and the next thing they hear is the list announcing itself instead of a mod.
+        ListFocusHelper.RestoreFocusWhenRefilled(GamesList);
     }
 
     /// <summary>

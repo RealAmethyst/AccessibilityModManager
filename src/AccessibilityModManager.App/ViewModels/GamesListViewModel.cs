@@ -205,7 +205,9 @@ public partial class GamesListViewModel : ObservableObject
             _lastInstalls = installs;
             _lastGameMap = GameAggregator.GetGamesByGameId(activeIndexes);
             _allMods.Clear();
-            Mods.Clear();
+            // Mods itself is NOT cleared here: ApplyFilters below rebuilds it, and clearing it twice
+            // destroys the focused row twice. Every rebuild costs a screen-reader user an
+            // announcement, so the visible collection is touched once, and only when it changed.
 
             // One row per mod = one row per (developer, game) pair. Same shape as Developer Details.
             var rows = new List<ModItemViewModel>();
@@ -547,12 +549,43 @@ public partial class GamesListViewModel : ObservableObject
             (selectedAuthors.Count == 0 || selectedAuthors.Contains(m.PluginId))
         ).ToList();
 
-        Mods.Clear();
-        foreach (var m in filtered) Mods.Add(m);
+        // Rebuilt only when the result actually differs. A refresh that changes nothing — the
+        // routine one when the Patreon membership load finishes and asks every view to re-render —
+        // would otherwise clear the list, destroy the row the user is focused on, and make the
+        // screen reader announce it all over again for no reason.
+        if (!SameRows(filtered, Mods))
+        {
+            Mods.Clear();
+            foreach (var m in filtered) Mods.Add(m);
+        }
 
         MatchCountText = filtered.Count == _allMods.Count
             ? $"{_allMods.Count} mod{(_allMods.Count == 1 ? "" : "s")} shown."
             : $"{filtered.Count} of {_allMods.Count} mods shown.";
+    }
+
+    /// <summary>
+    /// Whether two row sequences are the same AS THE USER EXPERIENCES THEM — not the same objects.
+    /// A refresh builds fresh view models every time, so comparing references would report every
+    /// refresh as a change and rebuild the list regardless. What matters is the identity of each row
+    /// and the sentence the screen reader would read out for it, which is exactly what changes when
+    /// a mod is installed, updated, or appears.
+    /// </summary>
+    private static bool SameRows(IReadOnlyList<ModItemViewModel> a, IList<ModItemViewModel> b)
+    {
+        if (a.Count != b.Count) return false;
+
+        for (var i = 0; i < a.Count; i++)
+        {
+            if (!string.Equals(a[i].PluginId, b[i].PluginId, StringComparison.Ordinal) ||
+                !string.Equals(a[i].GameId, b[i].GameId, StringComparison.Ordinal) ||
+                !string.Equals(a[i].AnnouncementText, b[i].AnnouncementText, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task PersistFiltersAsync()
