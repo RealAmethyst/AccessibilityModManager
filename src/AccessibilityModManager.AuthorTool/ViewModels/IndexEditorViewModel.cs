@@ -1329,7 +1329,9 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         {
             var report = AccessibilityModManager.Infrastructure.Services.PluginIndexValidation
                 .Validate(_index.PluginId, Encoding.UTF8.GetString(candidate));
-            var problems = report.TrustErrors.Concat(report.UnobtainableReleases).ToList();
+            // Every severity, composed by the report itself — see IndexValidationReport
+            // .PublishBlockers for why that decision does not live here.
+            var problems = report.PublishBlockers;
             if (problems.Count > 0)
             {
                 const int shown = 6;

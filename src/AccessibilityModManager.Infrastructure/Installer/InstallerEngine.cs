@@ -1497,6 +1497,7 @@ public sealed class InstallerEngine : IInstallerEngine
         GameInstall game, string requestingPluginId, IDependencyHost? host,
         List<DepAcquisition> acquisitions, CancellationToken ct)
     {
+        RequireDistinctDependencyIds(game);
 
         // Game-installer deps (IsGameInstaller) are handled by the manager's pre-install step
         // before detection — by the time we get here the game is already installed. Drop them so
@@ -1611,10 +1612,17 @@ public sealed class InstallerEngine : IInstallerEngine
             var still = recheck.FirstOrDefault(s => s.Dependency.Id == dep.Id);
             if (still is { Status: not DependencyStatusKind.Installed })
             {
+                // Says where it LOOKED, not just what it looked for. The two differ whenever the
+                // dependency installs into a subfolder — the check path is always relative to the
+                // game folder, while autoInstall.targetDir is not — and naming only the rule sends
+                // the reader to inspect a rule that is often correct. Live on Pokémon TCG Live this
+                // reported a missing 'version.dll' while the file sat in Updater\1.5.0, and nothing
+                // in the message said so.
                 throw new InvalidOperationException(
                     $"Dependency '{dep.Id}' still reports {still.Status} after installing it — aborting so the mod " +
-                    $"isn't installed without its loader. Check rule: {DescribeCheck(dep)}. If the dependency's files " +
-                    "are actually in place, the check rule in the plugin index is wrong and needs fixing.");
+                    $"isn't installed without its loader. Check rule: {DescribeCheck(dep)}, looked for under " +
+                    $"'{game.InstallPath}'{DescribeInstallTarget(dep)}. If the dependency's files are actually in " +
+                    "place, the check rule in the plugin index is wrong and needs fixing.");
             }
         }
     }
@@ -1623,6 +1631,53 @@ public sealed class InstallerEngine : IInstallerEngine
     // without the engine taking its own IDependencyReceiptStore dependency.
     private Task<DependencyReceipt?> _depReceiptSafeLoadAsync(string gameId, string depId) =>
         _depAutoInstaller.LoadReceiptAsync(gameId, depId);
+
+    /// <summary>
+    /// One id, one dependency — refuse a game that declares the same one twice.
+    ///
+    /// <para>A dependency id is a key: it names the refcount receipt, the acquisition, and the entry
+    /// the post-install re-check looks up. Two entries sharing one id are two different install
+    /// instructions under one name, and the loop below simply reaches the FIRST — so whichever the
+    /// author wrote first silently wins and the other is never applied.</para>
+    ///
+    /// <para>That is not hypothetical. It happened live on Pokémon TCG Live: <c>melonloader</c> was
+    /// declared twice, once extracting into <c>Updater\1.5.0</c> and once into the game root. The
+    /// first was installed, the check looked for <c>version.dll</c> in the game root — where the
+    /// SECOND entry would have put it — found nothing, and aborted before the correct entry was ever
+    /// reached. The install failed with a message about a check rule that was, in fact, right.</para>
+    ///
+    /// <para>Refused rather than de-duplicated: picking one of two contradictory instructions is
+    /// guessing what the author meant, and the same ordering accident that caused this would decide
+    /// the guess.</para>
+    /// </summary>
+    private static void RequireDistinctDependencyIds(GameInstall game)
+    {
+        var duplicates = game.Game.Dependencies
+            .GroupBy(d => d.Id, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+
+        if (duplicates.Count == 0) return;
+
+        throw new InvalidOperationException(
+            $"This mod's dependency list names {string.Join(" and ", duplicates.Select(d => $"'{d}'"))} " +
+            "more than once, so there is no single answer for where it installs or how it is checked. " +
+            "The developer needs to remove the duplicate and republish.");
+    }
+
+    /// <summary>
+    /// Names the folder the dependency was extracted into, when that is not the game folder the
+    /// check searches. This is the whole of the Pokémon TCG Live failure in one clause: installed
+    /// into one place, looked for in another.
+    /// </summary>
+    private static string DescribeInstallTarget(Dependency dep)
+    {
+        var target = (dep.Fix?.AutoInstall as ExtractZipAutoInstall)?.TargetDir;
+        return string.IsNullOrWhiteSpace(target)
+            ? ""
+            : $", while the dependency was installed into '{target}' inside it";
+    }
 
     private static string DescribeCheck(Dependency dep)
     {

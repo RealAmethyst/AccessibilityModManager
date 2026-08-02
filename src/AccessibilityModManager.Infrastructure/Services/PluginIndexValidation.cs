@@ -12,7 +12,35 @@ namespace AccessibilityModManager.Infrastructure.Services;
 public sealed record IndexValidationReport(
     PluginRepoIndex Index,
     IReadOnlyList<string> TrustErrors,
-    IReadOnlyList<string> UnobtainableReleases);
+    IReadOnlyList<string> UnobtainableReleases)
+{
+    /// <summary>
+    /// Faults an AUTHOR must fix that a reader deliberately tolerates.
+    ///
+    /// <para>A third severity exists because the other two are both wrong for this class of problem.
+    /// A trust error refuses the whole index, and applying that to something already published would
+    /// blank every user's catalog the moment a manager tightened — the constraint this project
+    /// records as "manager-side validation may only be tightened behind a scheme bump". Dropping the
+    /// item silently, the way an unobtainable release is dropped, would hide the fault from the one
+    /// person who can fix it.</para>
+    ///
+    /// <para>So: the AuthorTool refuses to publish these, and a manager reading an index that already
+    /// contains one still shows the catalog. Where the fault actually bites — installing a game whose
+    /// dependency list is ambiguous — the engine refuses with a message naming it.</para>
+    /// </summary>
+    public IReadOnlyList<string> AuthoringProblems { get; init; } = [];
+
+    /// <summary>
+    /// Everything that must stop a PUBLISH — all three severities, because the author is the one
+    /// person who can fix any of them.
+    ///
+    /// <para>It lives here rather than being assembled at the call site so that "which severities
+    /// block publishing" is one decision with one test. Composed in the AuthorTool's view model it
+    /// was a line nothing could reach: dropping a severity from it left every test passing.</para>
+    /// </summary>
+    public IReadOnlyList<string> PublishBlockers =>
+        [.. TrustErrors, .. UnobtainableReleases, .. AuthoringProblems];
+}
 
 /// <summary>
 /// THE index validation — one implementation shared by the manager's fetch path and the
@@ -43,6 +71,7 @@ public static class PluginIndexValidation
 
         var trustErrors = new List<string>();
         var unobtainable = new List<string>();
+        var authoring = new List<string>();
 
         // Identity binding: the unsigned index must declare exactly the identity the SIGNED
         // registry entry promised — including case. Case-insensitive acceptance would let two
@@ -60,6 +89,26 @@ public static class PluginIndexValidation
             CollectIdError(trustErrors, game.GameId, $"plugin '{pluginId}' game id");
             foreach (var dep in game.Dependencies)
                 CollectIdError(trustErrors, dep.Id, $"plugin '{pluginId}' dependency id");
+
+            // One id, one dependency. Two entries sharing an id are two different install
+            // instructions under one name, and the engine reaches the first — so whichever was
+            // written first silently wins and the other never applies. That is not theoretical: it
+            // shipped on Pokemon TCG Live, where 'melonloader' was declared twice with different
+            // target folders, and every install of that mod failed with a message blaming a check
+            // rule that was correct.
+            //
+            // Compared case-insensitively because dependency ids become folder and receipt names on
+            // Windows, where two spellings are one thing.
+            foreach (var duplicate in game.Dependencies
+                         .GroupBy(d => d.Id, StringComparer.OrdinalIgnoreCase)
+                         .Where(g => g.Count() > 1)
+                         .Select(g => g.Key))
+            {
+                authoring.Add(
+                    $"Game '{game.GameId}' declares the dependency '{duplicate}' more than once. Only the " +
+                    "first is ever used, so the others silently do nothing — remove the duplicates and " +
+                    "keep the one that is correct.");
+            }
         }
 
         foreach (var (gameId, releases) in index.ReleasesByGameId)
@@ -145,7 +194,10 @@ public static class PluginIndexValidation
                 releases.Remove(release);
         }
 
-        return new IndexValidationReport(index, trustErrors, unobtainable);
+        return new IndexValidationReport(index, trustErrors, unobtainable)
+        {
+            AuthoringProblems = authoring
+        };
     }
 
     /// <summary>

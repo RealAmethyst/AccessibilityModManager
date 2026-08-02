@@ -3,7 +3,7 @@
 
 #define MyAppName "Accessibility Mod Manager"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.15.0"
+  #define MyAppVersion "1.15.1"
 #endif
 #define MyAppPublisher "Amethyst"
 #define MyAppExeName "AccessibilityModManager.App.exe"
