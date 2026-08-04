@@ -79,6 +79,9 @@ public partial class ProgressDialogViewModel : ObservableObject
         ScriptOutput = string.Empty;
         ScriptStatusHeader = $"Running {hookLabel.ToLowerInvariant()} script: {scriptName}";
         Message = ScriptStatusHeader;
+        // Starting a script IS a phase change, and StepDescription is the dialog's only spoken
+        // line — without this the switch from downloading to running a script would be silent.
+        StepDescription = ScriptStatusHeader;
         IsScriptRunning = true;
     }
 
@@ -100,6 +103,7 @@ public partial class ProgressDialogViewModel : ObservableObject
     {
         var status = succeeded ? "completed" : $"failed (exit code {exitCode})";
         ScriptStatusHeader = $"{ScriptStatusHeader} — {status}";
+        StepDescription = ScriptStatusHeader;
         // Keep IsScriptRunning true so the output stays visible until the dialog closes.
     }
 
@@ -109,5 +113,6 @@ public partial class ProgressDialogViewModel : ObservableObject
         _cts?.Cancel();
         IsCancellable = false;
         Message = "Cancelling...";
+        StepDescription = "Cancelling";
     }
 }

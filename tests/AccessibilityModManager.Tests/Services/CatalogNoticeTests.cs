@@ -199,8 +199,8 @@ public sealed class CatalogNoticeTests
         new GameAggregator(new StubSteamDetector(), new StubRegistryDetector(), new StubVerifier(), TestLogger.Create()),
         MakePatreonService(),
         TestLogger.Create(),
-        (_, _) => { },
         (_, _, _) => { },
+        (_, _, _, _) => { },
         _ => null);
 
     private static PatreonService MakePatreonService()

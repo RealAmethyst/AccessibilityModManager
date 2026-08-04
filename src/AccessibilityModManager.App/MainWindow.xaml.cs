@@ -31,6 +31,11 @@ public partial class MainWindow : Window
                 new Action(() => DeveloperDetailsViewControl.FocusList()),
                 DispatcherPriority.ApplicationIdle);
 
+        // When a developer's page is opened — from the Authors tab, or from a mod's Developer
+        // button — land on its Back button. The view no longer focuses itself on becoming visible,
+        // so this and the reshow handler above are the only two owners of focus on that page.
+        viewModel.DeveloperDetailsOpened += () => DeveloperDetailsViewControl.FocusBack();
+
         // Default tab is Mods (index 0). Focus its list as soon as the mods are loaded — NOT after
         // the whole of Initialize, which also waits on the update check and so held focus back for a
         // network round trip. ApplicationIdle priority so the ListView's item containers are

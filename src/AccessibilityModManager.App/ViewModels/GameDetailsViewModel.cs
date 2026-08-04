@@ -28,6 +28,12 @@ public partial class GameDetailsViewModel : ObservableObject
     private readonly Action _navigateBack;
 
     /// <summary>
+    /// Opens the developer's own page for the mod being shown. Null in contexts that have no
+    /// navigation host (tests), which simply hides the button.
+    /// </summary>
+    private readonly Action<PluginEntry>? _navigateToDeveloper;
+
+    /// <summary>
     /// Opens a progress dialog, runs <c>work</c> with the dialog's cancellation token, and closes
     /// the dialog when the work returns (success, failure, or cancel). The work delegate receives
     /// an <see cref="IScriptHost"/> wired to the same dialog so lifecycle script confirmations
@@ -121,6 +127,20 @@ public partial class GameDetailsViewModel : ObservableObject
     private string _pluginId = string.Empty;
     private Dictionary<string, PluginRepoIndex> _activeIndexes = [];
 
+    /// <summary>
+    /// The developer whose mod the user opened to get here — supplied by the caller that knows,
+    /// never inferred from <see cref="_pluginId"/>.
+    ///
+    /// <para>That distinction is the whole point: <see cref="_pluginId"/> comes from the
+    /// <see cref="GameInstall"/>, and when several developers support one game the mods list falls
+    /// back to whichever plugin's detection found the folder. Reading the owner off it could open a
+    /// different developer's page than the mod the user actually chose.</para>
+    ///
+    /// <para>Null when the caller couldn't supply one, which hides the button — better no shortcut
+    /// than a shortcut to the wrong person.</para>
+    /// </summary>
+    private PluginEntry? _ownerPlugin;
+
     public GameDetailsViewModel(
         IPluginRepoClient repoClient,
         IInstallerEngine installerEngine,
@@ -140,8 +160,10 @@ public partial class GameDetailsViewModel : ObservableObject
         Func<IScriptHost> createUninstallScriptHost,
         Action<string, string, string?, string?> showChangelog,
         Func<string, string, string?, string?> pickFile,
-        Func<string, string?> pickFolder)
+        Func<string, string?> pickFolder,
+        Action<PluginEntry>? navigateToDeveloper = null)
     {
+        _navigateToDeveloper = navigateToDeveloper;
         _repoClient = repoClient;
         _installerEngine = installerEngine;
         _receiptStore = receiptStore;
@@ -170,7 +192,35 @@ public partial class GameDetailsViewModel : ObservableObject
     /// </summary>
     public bool IsGameInstalled => _gameInstall != null;
 
-    public void Load(GameInstall gameInstall, Dictionary<string, PluginRepoIndex> activeIndexes)
+    /// <summary>The developer whose page the Developer button opens. Empty when there is none.</summary>
+    [ObservableProperty]
+    private string _developerName = string.Empty;
+
+    /// <summary>Drives the Developer button's visibility — hidden when the owner is unknown.</summary>
+    public bool CanOpenDeveloper => _ownerPlugin != null;
+
+    /// <summary>
+    /// Jumps to the developer's page: their other mods, their bio and their links. The page
+    /// REPLACES this one rather than stacking on top, so Back from there returns to the mods list.
+    /// </summary>
+    [RelayCommand]
+    private void OpenDeveloper()
+    {
+        if (_ownerPlugin is { } owner) _navigateToDeveloper?.Invoke(owner);
+    }
+
+    private void SetOwner(PluginEntry? owner, string pluginId)
+    {
+        _ownerPlugin = owner;
+        DeveloperName = DeveloperNames.Resolve(
+            _activeIndexes.GetValueOrDefault(pluginId), owner, pluginId);
+        OnPropertyChanged(nameof(CanOpenDeveloper));
+    }
+
+    public void Load(
+        GameInstall gameInstall,
+        Dictionary<string, PluginRepoIndex> activeIndexes,
+        PluginEntry? ownerPlugin = null)
     {
         _gameInstall = gameInstall;
         _gameDef = gameInstall.Game;
@@ -179,6 +229,8 @@ public partial class GameDetailsViewModel : ObservableObject
         GameId = gameInstall.Game.GameId;
         DisplayName = gameInstall.Game.DisplayName;
         InstallPath = gameInstall.InstallPath;
+        // Named off the OWNER the caller passed, not off gameInstall.PluginId — see _ownerPlugin.
+        SetOwner(ownerPlugin, ownerPlugin?.Id ?? gameInstall.PluginId);
         OnPropertyChanged(nameof(IsGameInstalled));
         _ = InitializeAsync();
     }
@@ -188,7 +240,11 @@ public partial class GameDetailsViewModel : ObservableObject
     /// The version picker + Install still show; the game itself is installed as the first step of
     /// the install (see <see cref="EnsureGameInstalledAsync"/>).
     /// </summary>
-    public void LoadUninstalled(GameDefinition game, string pluginId, Dictionary<string, PluginRepoIndex> activeIndexes)
+    public void LoadUninstalled(
+        GameDefinition game,
+        string pluginId,
+        Dictionary<string, PluginRepoIndex> activeIndexes,
+        PluginEntry? ownerPlugin = null)
     {
         _gameInstall = null;
         _gameDef = game;
@@ -197,6 +253,9 @@ public partial class GameDetailsViewModel : ObservableObject
         GameId = game.GameId;
         DisplayName = game.DisplayName;
         InstallPath = null;
+        // No GameInstall here, so pluginId IS the row's own developer — but the owner entry still
+        // comes from the caller, because only it holds the registry entry.
+        SetOwner(ownerPlugin, pluginId);
         OnPropertyChanged(nameof(IsGameInstalled));
         _ = InitializeAsync();
     }
@@ -277,6 +336,12 @@ public partial class GameDetailsViewModel : ObservableObject
                 ModGroups.Add(new ModReleaseGroup
                 {
                     PluginId = pluginId,
+                    // Resolved per group, not from DeveloperName: a page can hold more than one
+                    // developer's mods, and each card must name its own.
+                    DeveloperName = DeveloperNames.Resolve(
+                        index,
+                        pluginId == _ownerPlugin?.Id ? _ownerPlugin : null,
+                        pluginId),
                     Releases = filtered,
                     SelectedRelease = filtered.First(),
                     InstalledVersion = pluginReceipt?.InstalledVersion,
@@ -313,7 +378,8 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to load releases for {GameId}", GameId);
-            StatusMessage = $"Failed to load releases: {ex.Message}";
+            StatusMessage = "Couldn't load the versions for this mod. " +
+                            CatalogRefusedException.SpeakableReason(ex);
         }
         finally
         {
@@ -961,7 +1027,7 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "{Verb} failed for {PluginId}/{GameId}", verb, release.PluginId, GameId);
-            StatusMessage = $"{verb} failed: {ex.Message}";
+            StatusMessage = $"{verb} failed. Check the log for details.";
         }
         finally
         {
@@ -1005,7 +1071,7 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Uninstall failed for {PluginId}/{GameId}", group.PluginId, GameId);
-            StatusMessage = $"Uninstall failed: {ex.Message}";
+            StatusMessage = "Uninstall failed. Check the log for details.";
         }
     }
 
@@ -1020,7 +1086,7 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to open game folder");
-            StatusMessage = $"Could not open folder: {ex.Message}";
+            StatusMessage = "Couldn't open the game folder. Check the log for details.";
         }
     }
 
@@ -1074,7 +1140,7 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to launch {GameId}", GameId);
-            StatusMessage = $"Could not launch game: {ex.Message}";
+            StatusMessage = "Couldn't launch the game. Check the log for details.";
         }
     }
 
@@ -1099,7 +1165,7 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to recheck dependencies for {GameId}", GameId);
-            StatusMessage = $"Recheck failed: {ex.Message}";
+            StatusMessage = "Couldn't re-check what this mod needs. Check the log for details.";
         }
     }
 
@@ -1177,6 +1243,13 @@ public partial class GameDetailsViewModel : ObservableObject
 public partial class ModReleaseGroup : ObservableObject
 {
     public required string PluginId { get; init; }
+
+    /// <summary>
+    /// Who made this mod, for the "by ..." line. The card used to show <see cref="PluginId"/>
+    /// there, which is a slug like <c>digimon-tools</c> rather than a person's name.
+    /// </summary>
+    public required string DeveloperName { get; init; }
+
     public required List<ModRelease> Releases { get; init; }
 
     /// <summary>
@@ -1254,8 +1327,8 @@ public partial class ModReleaseGroup : ObservableObject
     /// </summary>
     public string AnnouncementText =>
         InstalledVersion is null
-            ? $"{ModName} by {PluginId}, not installed"
-            : $"{ModName} by {PluginId}, version {InstalledVersion} installed";
+            ? $"{ModName} by {DeveloperName}, not installed"
+            : $"{ModName} by {DeveloperName}, version {InstalledVersion} installed";
 
     public string InstallButtonName => $"Install {ModName}";
 
@@ -1339,7 +1412,7 @@ public partial class DependencyItemViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to fix dependency {DepId}", Name);
-            _reportStatus?.Invoke($"Couldn't open the download page for {Name}: {ex.Message}");
+            _reportStatus?.Invoke($"Couldn't open the download page for {Name}. Check the log for details.");
         }
     }
 }

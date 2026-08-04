@@ -9,20 +9,25 @@ public partial class DeveloperDetailsView : UserControl
     public DeveloperDetailsView()
     {
         InitializeComponent();
-        // Same focus pattern as GameDetailsView: when the page becomes visible, land on Back
-        // so the user can tab forward through the layout.
-        IsVisibleChanged += OnIsVisibleChanged;
+
+        // Focus is NOT taken here on becoming visible. Two different transitions make this page
+        // visible — opening it, and returning to it from a mod — and they want focus in different
+        // places, so MainWindow drives both explicitly. Self-focusing on visibility raced the
+        // reshow path and the winner depended on dispatcher ordering.
+
+        // The mod list is rebuilt by the post-install refresh, which clears the collection and
+        // destroys the focused row. Same helper, and same reason, as the Mods tab.
+        ListFocusHelper.RestoreFocusWhenRefilled(ModsList);
     }
 
-    private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
-    {
-        if (e.NewValue is true)
-        {
-            _ = Dispatcher.BeginInvoke(
-                new Action(() => BackButton.Focus()),
-                DispatcherPriority.ApplicationIdle);
-        }
-    }
+    /// <summary>
+    /// Land on Back, so the user can tab forward through bio, mods and links. Used when the page
+    /// is first opened.
+    /// </summary>
+    public void FocusBack() =>
+        _ = Dispatcher.BeginInvoke(
+            new Action(() => BackButton.Focus()),
+            DispatcherPriority.ApplicationIdle);
 
     /// <summary>
     /// Move focus to the mods list. Used by MainWindow when returning from Game Details so

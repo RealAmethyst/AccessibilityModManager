@@ -37,8 +37,11 @@
                                 AutomationProperties.Name="Clear all filters"/>
                     </DockPanel>
 
+                    <!-- Shown, never spoken. This count fires on every refresh and every filter
+                         toggle, and alongside the two other counts a refresh produces it turned an
+                         ordinary refresh into three overlapping sentences. -->
                     <TextBlock Text="{Binding MatchCountText}"
-                               AutomationProperties.LiveSetting="Polite"
+                               TextWrapping="Wrap"
                                Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
                                Margin="0,0,0,8"/>
 
@@ -93,8 +96,8 @@
                                 <controls:FlatItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected}"
-                                                  Content="{Binding PluginId}"
-                                                  AutomationProperties.Name="{Binding PluginId}"
+                                                  Content="{Binding Label}"
+                                                  AutomationProperties.Name="{Binding Label}"
                                                   Margin="0,2"/>
                                     </DataTemplate>
                                 </controls:FlatItemsControl.ItemTemplate>
@@ -141,6 +144,8 @@
                             <TextBlock Grid.Row="0" Grid.Column="0"
                                        FontSize="16" FontWeight="SemiBold">
                                 <Run Text="{Binding ModName, Mode=OneWay}"/>
+                                <Run Text=" by "/>
+                                <Run Text="{Binding DeveloperName, Mode=OneWay}"/>
                                 <Run Text=" for "/>
                                 <Run Text="{Binding GameDisplayName, Mode=OneWay}"/>
                             </TextBlock>
@@ -172,8 +177,11 @@
             </ListView.ItemTemplate>
         </ListView>
 
+        <!-- Always shown; spoken only when the view model marks it worth interrupting for. -->
         <TextBlock Grid.Row="1" Grid.Column="1"
                    Text="{Binding StatusMessage}"
+                   controls:LiveRegion.Announcement="{Binding StatusAnnouncement}"
+                   TextWrapping="Wrap"
                    AutomationProperties.LiveSetting="Polite"
                    Margin="12,8,0,0"/>
     </Grid>

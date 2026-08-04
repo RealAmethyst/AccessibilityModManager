@@ -62,14 +62,27 @@ public partial class SettingsViewModel : ObservableObject
 
     private void OnPatreonStateChanged() => PatreonStateChanged = !PatreonStateChanged;
 
+    /// <summary>
+    /// Blanks the status line before an action produces a new one.
+    ///
+    /// <para>The status line is announced by binding to its text, and an observable property
+    /// suppresses an assignment equal to what is already there. So pressing Save twice would set
+    /// "Settings saved." to the same value and say nothing the second time — the user gets silence
+    /// in response to a button they just pressed. Clearing first guarantees a real change.</para>
+    /// </summary>
+    private void ClearStatusBeforeNewResult() => StatusMessage = null;
+
     [RelayCommand]
     private async Task SignInOrOutOfPatreonAsync()
     {
         if (PatreonBusy) return;
         PatreonBusy = true;
+        ClearStatusBeforeNewResult();
+        // Captured up front so the failure message names the action the user actually asked for.
+        var wasSignedIn = _patreon.IsSignedIn;
         try
         {
-            if (_patreon.IsSignedIn)
+            if (wasSignedIn)
             {
                 // Q6=A+B: also revoke on Patreon's side, best-effort.
                 await _patreon.SignOutAsync(revokeOnPatreon: true, CancellationToken.None);
@@ -84,8 +97,12 @@ public partial class SettingsViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            // The exception text goes to the log, never to the status line: these messages are
+            // spoken now, and raw exception text is CLR type names, file paths and byte offsets.
             _logger.Error(ex, "Patreon sign-in/out failed");
-            StatusMessage = $"Patreon sign-in failed: {ex.Message}";
+            StatusMessage = wasSignedIn
+                ? "Couldn't sign out of Patreon. Check the log for details."
+                : "Couldn't sign in to Patreon. Check the log for details.";
         }
         finally
         {
@@ -98,6 +115,7 @@ public partial class SettingsViewModel : ObservableObject
     {
         if (PatreonBusy || !_patreon.IsSignedIn) return;
         PatreonBusy = true;
+        ClearStatusBeforeNewResult();
         try
         {
             var ok = await _patreon.RefreshEntitlementsAsync(CancellationToken.None);
@@ -123,13 +141,14 @@ public partial class SettingsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to load settings");
-            StatusMessage = $"Failed to load settings: {ex.Message}";
+            StatusMessage = "Couldn't load your settings. Check the log for details.";
         }
     }
 
     [RelayCommand]
     private async Task SaveSettingsAsync()
     {
+        ClearStatusBeforeNewResult();
         try
         {
             var config = await _configService.LoadAsync();
@@ -140,13 +159,14 @@ public partial class SettingsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to save settings");
-            StatusMessage = $"Failed to save settings: {ex.Message}";
+            StatusMessage = "Couldn't save your settings. Check the log for details.";
         }
     }
 
     [RelayCommand]
     private void OpenLogs()
     {
+        ClearStatusBeforeNewResult();
         var logDir = LoggingSetup.GetLogDirectory();
         try
         {
@@ -159,7 +179,7 @@ public partial class SettingsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to open log directory");
-            StatusMessage = $"Could not open logs folder: {ex.Message}";
+            StatusMessage = $"Couldn't open the logs folder. It's at {logDir}.";
         }
     }
 }

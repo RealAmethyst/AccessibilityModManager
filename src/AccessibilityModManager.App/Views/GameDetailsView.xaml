@@ -50,6 +50,14 @@
                     Visibility="{Binding AnyModInstalled, Converter={StaticResource BoolToVisConverter}}"
                     AutomationProperties.Name="{Binding DisplayName, StringFormat='Play {0}'}"
                     Margin="0,0,8,0"/>
+            <!-- Shortcut to the developer whose mod this page is showing: their other mods, their
+                 bio and their links. Hidden when the owning developer couldn't be resolved (the
+                 registry entry isn't in hand), so it never opens the wrong person's page. -->
+            <Button Content="Developer"
+                    Command="{Binding OpenDeveloperCommand}"
+                    Visibility="{Binding CanOpenDeveloper, Converter={StaticResource BoolToVisConverter}}"
+                    AutomationProperties.Name="{Binding DeveloperName, StringFormat='More from {0}'}"
+                    Margin="0,0,8,0"/>
             <Button Content="Open Folder"
                     Command="{Binding OpenGameFolderCommand}"
                     Visibility="{Binding IsGameInstalled, Converter={StaticResource BoolToVisConverter}}"
@@ -100,31 +108,28 @@
                             <TextBlock Grid.Row="0" FontSize="16" FontWeight="SemiBold">
                                 <Run Text="{Binding ModName, Mode=OneWay}"/>
                                 <Run Text=" by "/>
-                                <Run Text="{Binding PluginId, Mode=OneWay}"/>
+                                <Run Text="{Binding DeveloperName, Mode=OneWay}"/>
                                 <Run Text=" — "/>
                                 <Run Text="{Binding InstalledVersion, Mode=OneWay, TargetNullValue='not installed',
                                      StringFormat='v{0}'}"
                                      Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
                             </TextBlock>
 
-                            <!-- Mod description (only when set). TextBox + input-blocking is
-                                 the same pattern as ChangelogDialog: NVDA stays in focus mode
-                                 so the user can arrow through the text, but the box can't
-                                 actually be edited. Plain TextBlock would be invisible to the
-                                 screen reader because the surrounding ContentControl's
-                                 AutomationProperties.Name overrides nested elements. -->
+                            <!-- Mod description (only when set). A TextBox kept nominally editable,
+                                 with every edit swallowed by ReadOnlyText, so NVDA stays in focus
+                                 mode and the caret arrows through the text. A plain TextBlock would
+                                 be invisible to the screen reader here because the surrounding
+                                 ContentControl's AutomationProperties.Name overrides nested
+                                 elements. -->
                             <TextBox Grid.Row="1"
                                      Text="{Binding Description, Mode=OneWay}"
-                                     IsReadOnly="False"
+                                     controls:ReadOnlyText.IsEnabled="True"
                                      AcceptsReturn="True"
                                      TextWrapping="Wrap"
                                      BorderThickness="0"
                                      Background="Transparent"
                                      Padding="0"
                                      Margin="0,8,0,0"
-                                     Loaded="DescriptionBox_Loaded"
-                                     PreviewTextInput="DescriptionBox_PreviewTextInput"
-                                     PreviewKeyDown="DescriptionBox_PreviewKeyDown"
                                      AutomationProperties.Name="Mod description"
                                      Visibility="{Binding HasDescription, Converter={StaticResource BoolToVisConverter}}"/>
 
@@ -181,7 +186,8 @@
         <!-- Status -->
         <TextBlock Grid.Row="5"
                    x:Name="StatusMessageBlock"
-                   Text="{Binding StatusMessage}"
+                   controls:LiveRegion.Text="{Binding StatusMessage}"
+                   TextWrapping="Wrap"
                    AutomationProperties.LiveSetting="Assertive"
                    Margin="0,8,0,0"/>
     </Grid>

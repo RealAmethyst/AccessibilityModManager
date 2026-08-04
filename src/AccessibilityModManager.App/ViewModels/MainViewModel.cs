@@ -200,13 +200,63 @@ public partial class MainViewModel : ObservableObject
 
     public void ShowDeveloperDetails(DeveloperDetailsViewModel detailsVm)
     {
+        _developerDetailsReturnsToMods = false;
         DeveloperDetailsVm = detailsVm;
+        DeveloperDetailsOpened?.Invoke();
+    }
+
+    /// <summary>
+    /// Where Back from the developer page goes. Normally the Authors tab, because that is where
+    /// the page was opened from. False by default; set when the page was reached from a mod via
+    /// the Developer button, where returning to the Authors tab would strand the user on a tab
+    /// they never visited.
+    /// </summary>
+    private bool _developerDetailsReturnsToMods;
+
+    /// <summary>
+    /// The Developer button on a mod's page: replaces Game Details with that developer's page in
+    /// one step, so the user is never three levels deep and Back means the mods list.
+    ///
+    /// <para>Done as a single transition rather than CloseGameDetails() followed by
+    /// ShowDeveloperDetails(). Closing raises one of the ordinary focus events — which would send
+    /// focus to the Games list or the Authors list, or re-show a developer page underneath — while
+    /// the new page separately grabs focus as it becomes visible. Two focus moves race, and the
+    /// user hears whichever wins. Here the state is settled first and exactly one focus event is
+    /// raised at the end.</para>
+    /// </summary>
+    public void SwitchFromGameDetailsToDeveloper(DeveloperDetailsViewModel detailsVm)
+    {
+        // Cleared BEFORE the overlay flips so CloseGameDetails' developer-return branch can't run
+        // for a page that is being replaced rather than closed.
+        _gameDetailsOriginPlugin = null;
+        GameDetailsVm = null;
+        IsDetailsOpen = false;
+
+        _developerDetailsReturnsToMods = true;
+        DeveloperDetailsVm = detailsVm;
+
+        // Exactly one focus event for the whole transition. Raising GameDetailsClosed as well would
+        // pull focus to the Games list sitting behind the new page.
+        DeveloperDetailsOpened?.Invoke();
     }
 
     public void CloseDeveloperDetails()
     {
+        var returnsToMods = _developerDetailsReturnsToMods;
+        _developerDetailsReturnsToMods = false;
         DeveloperDetailsVm = null;
-        DeveloperDetailsClosed?.Invoke();
+
+        // A developer page reached from a mod belongs to the Mods tab, not the Authors tab. Sending
+        // focus to the Authors list here would land the user somewhere they never navigated to.
+        if (returnsToMods)
+        {
+            SelectedTabIndex = 0;
+            GameDetailsClosed?.Invoke();
+        }
+        else
+        {
+            DeveloperDetailsClosed?.Invoke();
+        }
     }
 
     /// <summary>Raised when Game Details is closed and we go back to the main tabs (i.e. NOT
@@ -216,6 +266,17 @@ public partial class MainViewModel : ObservableObject
     /// <summary>Raised when Developer Details is closed (Back from it). MainWindow restores
     /// focus to the Developers list.</summary>
     public event Action? DeveloperDetailsClosed;
+
+    /// <summary>
+    /// Raised when a developer's page is OPENED (from the Authors tab or from a mod's Developer
+    /// button). MainWindow focuses its Back button.
+    ///
+    /// <para>The view used to focus itself when it became visible. That fought the reshow path,
+    /// which focuses the mod list instead — two focus moves on one transition, and which one the
+    /// user ended on depended on dispatcher ordering. Focus is driven from here now, so each
+    /// transition has exactly one owner.</para>
+    /// </summary>
+    public event Action? DeveloperDetailsOpened;
 
     /// <summary>Raised when Game Details closes and Developer Details becomes visible again.
     /// The Developer Details view restores focus to its mod list.</summary>

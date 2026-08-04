@@ -184,7 +184,9 @@ public sealed class PluginRepoClient : IPluginRepoClient
                 Value = cached.Value,
                 FromCache = true,
                 CachedAtUtc = cached.CachedAtUtc,
-                LiveRejectionReason = liveFailure.Message
+                // The SPEAKABLE reason, not the raw message: this string is interpolated straight
+                // into the Mods and Developer status lines, which are now announced.
+                LiveRejectionReason = CatalogRefusedException.SpeakableReason(liveFailure)
             };
         }
         catch (Exception ex)

@@ -23,7 +23,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     private readonly GameAggregator _gameAggregator;
     private readonly ILogger _logger;
     private readonly Action _navigateBack;
-    private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>, string> _navigateToGameDetails;
+    private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>, PluginEntry> _navigateToGameDetails;
     /// <summary>
     /// Opens Game Details for a not-detected game that can install itself (declares a
     /// game-installer dependency). Args: game definition, owning plugin id, scoped indexes.
@@ -50,6 +50,13 @@ public partial class DeveloperDetailsViewModel : ObservableObject
 
     [ObservableProperty]
     private string? _statusMessage;
+
+    /// <summary>
+    /// Set only when the status is worth interrupting for. "3 mods (1 detected)." is shown and left
+    /// unspoken; a refused or offline catalog is not.
+    /// </summary>
+    [ObservableProperty]
+    private string? _statusAnnouncement;
 
     [ObservableProperty]
     private string? _displayName;
@@ -79,13 +86,6 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     public bool HasGitHub => !string.IsNullOrWhiteSpace(GitHubUrl);
     public bool HasDonation => !string.IsNullOrWhiteSpace(DonationUrl);
 
-    /// <summary>
-    /// True when the author hasn't set a bio or any social/donation links. Lets the view
-    /// show a clear "no info published yet" line instead of empty space.
-    /// </summary>
-    public bool HasNoAuthorInfo =>
-        !HasBio && !HasWebsite && !HasDiscord && !HasPatreon && !HasGitHub && !HasDonation;
-
     public ObservableCollection<DeveloperModItemViewModel> Mods { get; } = [];
 
     public DeveloperDetailsViewModel(
@@ -96,7 +96,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         GameAggregator gameAggregator,
         ILogger logger,
         Action navigateBack,
-        Action<GameInstall, Dictionary<string, PluginRepoIndex>, string> navigateToGameDetails,
+        Action<GameInstall, Dictionary<string, PluginRepoIndex>, PluginEntry> navigateToGameDetails,
         Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> navigateToGameDetailsUninstalled)
     {
         _plugin = plugin;
@@ -109,9 +109,11 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         _navigateToGameDetails = navigateToGameDetails;
         _navigateToGameDetailsUninstalled = navigateToGameDetailsUninstalled;
 
-        // Seed DisplayName from the registry's PluginEntry so the header renders something
-        // sensible before LoadAsync replaces it with the per-plugin index's author info.
-        _displayName = _plugin.Author;
+        // Seed DisplayName so the header renders something sensible before LoadAsync replaces it
+        // with the per-plugin index's author info. Through the shared resolver, so a registry entry
+        // whose author is blank or whitespace still produces a name here rather than an empty
+        // heading and an empty Back button announcement.
+        _displayName = DeveloperNames.Resolve(index: null, _plugin, _plugin.Id);
 
         _ = LoadAsync(refetchIndex: true);
     }
@@ -128,6 +130,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
     {
         IsLoading = true;
         StatusMessage = "Loading mods...";
+        StatusAnnouncement = null;
 
         try
         {
@@ -142,7 +145,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
 
             // Surface author info from the index (preferred) or fall back to the registry's
             // PluginEntry. Either way the bio + social links light up the Authors view.
-            DisplayName = _pluginIndex.Author?.DisplayName ?? _plugin.Author;
+            DisplayName = DeveloperNames.Resolve(_pluginIndex, _plugin, _plugin.Id);
             Bio = _pluginIndex.Author?.Bio;
             WebsiteUrl = _pluginIndex.Author?.WebsiteUrl;
             DiscordUrl = _pluginIndex.Author?.DiscordUrl;
@@ -155,7 +158,6 @@ public partial class DeveloperDetailsViewModel : ObservableObject
             OnPropertyChanged(nameof(HasPatreon));
             OnPropertyChanged(nameof(HasGitHub));
             OnPropertyChanged(nameof(HasDonation));
-            OnPropertyChanged(nameof(HasNoAuthorInfo));
 
             // Reuse GameAggregator with a single-entry dictionary so we get the same Steam
             // detection + manual-override behavior the Games tab uses, just scoped to this
@@ -225,12 +227,15 @@ public partial class DeveloperDetailsViewModel : ObservableObject
                 : _indexFromCache
                 ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(_indexCachedAtUtc)}. {summary}"
                 : summary;
+            // A refusal or an offline catalog is news. A plain count of their mods is not.
+            StatusAnnouncement = _indexRejectionReason is not null || _indexFromCache ? StatusMessage : null;
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to load developer details for {PluginId}", _plugin.Id);
             StatusMessage = "Couldn't load this developer's mods. " +
                             CatalogRefusedException.SpeakableReason(ex);
+            StatusAnnouncement = StatusMessage;
         }
         finally
         {
@@ -248,8 +253,9 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         var install = _installs.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
         if (install != null)
         {
-            // Pass the plugin id so MainViewModel knows to return here when the user presses Back.
-            _navigateToGameDetails(install, indexes, _plugin.Id);
+            // Pass the entry so MainViewModel knows to return here when the user presses Back, and
+            // so Game Details can name and open this same developer.
+            _navigateToGameDetails(install, indexes, _plugin);
             return;
         }
 
@@ -267,7 +273,9 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         }
 
         // Not detected and can't self-install — point them at the Games tab's Browse for Folder.
-        StatusMessage = $"Cannot open {mod.GameDisplayName} — game not detected. Open it from the Games tab to use Browse for Folder.";
+        // The answer to a key they just pressed on a row, so it speaks.
+        StatusAnnouncement = StatusMessage =
+            $"Cannot open {mod.GameDisplayName} — game not detected. Open it from the Games tab to use Browse for Folder.";
     }
 
     [RelayCommand]
@@ -281,7 +289,8 @@ public partial class DeveloperDetailsViewModel : ObservableObject
         // never a file:/custom-scheme URI that would trigger a shell action.
         if (!ExternalLink.TryOpen(url, _logger))
         {
-            StatusMessage = "Couldn't open that link in your browser — it may not be a safe https address, or no browser responded.";
+            StatusAnnouncement = StatusMessage =
+                "Couldn't open that link in your browser — it may not be a safe https address, or no browser responded.";
         }
     }
 

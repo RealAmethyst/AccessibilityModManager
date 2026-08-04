@@ -21,6 +21,13 @@ public partial class PluginsViewModel : ObservableObject
     [ObservableProperty]
     private string? _statusMessage;
 
+    /// <summary>
+    /// Set only when the status is worth interrupting for. "Loaded 3 developers." is shown and left
+    /// unspoken — it was one of three counts a single refresh read out.
+    /// </summary>
+    [ObservableProperty]
+    private string? _statusAnnouncement;
+
     public ObservableCollection<PluginItemViewModel> Plugins { get; } = [];
 
     public PluginsViewModel(
@@ -51,6 +58,7 @@ public partial class PluginsViewModel : ObservableObject
     {
         IsLoading = true;
         StatusMessage = "Loading developers...";
+        StatusAnnouncement = null;
 
         try
         {
@@ -64,22 +72,31 @@ public partial class PluginsViewModel : ObservableObject
             Plugins.Clear();
             foreach (var entry in registry.Plugins.OrderBy(p => p.Name))
             {
-                Plugins.Add(new PluginItemViewModel(entry, _logger, msg => StatusMessage = msg));
+                // A failed link is the result of a button the user just pressed, so it speaks.
+                Plugins.Add(new PluginItemViewModel(entry, _logger, msg =>
+                {
+                    StatusMessage = msg;
+                    StatusAnnouncement = msg;
+                }));
             }
 
             var summary = $"Loaded {Plugins.Count} developer{(Plugins.Count == 1 ? "" : "s")}.";
             StatusMessage = registryFetch.FromCache
                 ? $"Offline — showing the saved catalog from {CatalogStatus.FormatCachedAt(registryFetch.CachedAtUtc)}. {summary}"
                 : summary;
+            // Being offline matters; the count on its own does not.
+            StatusAnnouncement = registryFetch.FromCache ? StatusMessage : null;
         }
         catch (OperationCanceledException)
         {
-            StatusMessage = "Loading cancelled.";
+            StatusMessage = "Loading cancelled.";  // they cancelled it; shown, not announced
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to load developers");
-            StatusMessage = $"Failed to load developers: {ex.Message}";
+            StatusMessage = "Couldn't load the developer list. " +
+                            CatalogRefusedException.SpeakableReason(ex);
+            StatusAnnouncement = StatusMessage;
         }
         finally
         {
@@ -98,7 +115,6 @@ public partial class PluginItemViewModel : ObservableObject
     public string Id => Entry.Id;
     public string Name => Entry.Name;
     public string Author => Entry.Author;
-    public string Description => Entry.Description;
     public Uri? Website => Entry.Website;
     public Dictionary<string, Uri> Links => Entry.Links;
     public bool HasLinks => Website != null || Links.Count > 0;

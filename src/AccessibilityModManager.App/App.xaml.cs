@@ -120,35 +120,8 @@ public partial class App : Application
                 sp.GetRequiredService<IPluginRegistryClient>(),
                 sp.GetRequiredService<IConfigService>(),
                 sp.GetRequiredService<ILogger>(),
-                plugin =>
-                {
-                    var devVm = new DeveloperDetailsViewModel(
-                        plugin,
-                        sp.GetRequiredService<IPluginRepoClient>(),
-                        sp.GetRequiredService<IConfigService>(),
-                        sp.GetRequiredService<IReceiptStore>(),
-                        sp.GetRequiredService<GameAggregator>(),
-                        sp.GetRequiredService<ILogger>(),
-                        () => mainVm!.CloseDeveloperDetails(),
-                        (gameInstall, activeIndexes, originPluginId) =>
-                        {
-                            // Game Details opened from inside Developer Details: pass the
-                            // origin plugin so Back returns to Developer Details, not main.
-                            var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
-                            detailsVm.Load(gameInstall, activeIndexes);
-                            mainVm!.ShowGameDetails(detailsVm, plugin);
-                        },
-                        (game, pluginId, activeIndexes) =>
-                        {
-                            // Not-detected game with a game-installer dep, opened from Developer
-                            // Details: open Game Details in the not-installed state, returning here
-                            // on Back.
-                            var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
-                            detailsVm.LoadUninstalled(game, pluginId, activeIndexes);
-                            mainVm!.ShowGameDetails(detailsVm, plugin);
-                        });
-                    mainVm!.ShowDeveloperDetails(devVm);
-                });
+                plugin => mainVm!.ShowDeveloperDetails(
+                    CreateDeveloperDetailsViewModel(sp, mainVm!, plugin)));
 
             var gamesListVm = new GamesListViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),
@@ -159,20 +132,22 @@ public partial class App : Application
                 sp.GetRequiredService<GameAggregator>(),
                 sp.GetRequiredService<PatreonService>(),
                 sp.GetRequiredService<ILogger>(),
-                (gameInstall, activeIndexes) =>
+                (gameInstall, activeIndexes, owner) =>
                 {
-                    // Game Details opened from the Games tab: no origin plugin, Back goes
-                    // straight to the main tabs.
+                    // Game Details opened from the Mods tab: no ORIGIN plugin, so Back goes
+                    // straight to the main tabs. The owner is passed separately — it names the
+                    // developer and powers the Developer button, and must not be confused with
+                    // the origin, which is about where Back lands.
                     var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
-                    detailsVm.Load(gameInstall, activeIndexes);
+                    detailsVm.Load(gameInstall, activeIndexes, owner);
                     mainVm!.ShowGameDetails(detailsVm);
                 },
-                (game, pluginId, activeIndexes) =>
+                (game, pluginId, activeIndexes, owner) =>
                 {
                     // Not-detected game with a game-installer dependency: open Game Details in the
                     // not-installed state so Install can fetch the game first, then the mod.
                     var detailsVm = CreateGameDetailsViewModel(sp, mainVm!);
-                    detailsVm.LoadUninstalled(game, pluginId, activeIndexes);
+                    detailsVm.LoadUninstalled(game, pluginId, activeIndexes, owner);
                     mainVm!.ShowGameDetails(detailsVm);
                 },
                 BrowseForFolder);
@@ -190,6 +165,39 @@ public partial class App : Application
 
         // Windows
         services.AddTransient<MainWindow>();
+    }
+
+    /// <summary>
+    /// Builds a developer's page. Shared by the Authors tab (which opens it directly) and the
+    /// Developer button on a mod's page, so both routes produce an identically wired page.
+    /// </summary>
+    private static DeveloperDetailsViewModel CreateDeveloperDetailsViewModel(
+        IServiceProvider sp, MainViewModel mainVm, PluginEntry plugin)
+    {
+        return new DeveloperDetailsViewModel(
+            plugin,
+            sp.GetRequiredService<IPluginRepoClient>(),
+            sp.GetRequiredService<IConfigService>(),
+            sp.GetRequiredService<IReceiptStore>(),
+            sp.GetRequiredService<GameAggregator>(),
+            sp.GetRequiredService<ILogger>(),
+            () => mainVm.CloseDeveloperDetails(),
+            (gameInstall, activeIndexes, originPlugin) =>
+            {
+                // Opened from inside a developer's page: that developer is BOTH the origin (so
+                // Back reveals this page again) and the owner (so the mod is named after them).
+                var detailsVm = CreateGameDetailsViewModel(sp, mainVm);
+                detailsVm.Load(gameInstall, activeIndexes, originPlugin);
+                mainVm.ShowGameDetails(detailsVm, originPlugin);
+            },
+            (game, pluginId, activeIndexes) =>
+            {
+                // Not-detected game with a game-installer dep, opened from a developer's page:
+                // open Game Details in the not-installed state, returning here on Back.
+                var detailsVm = CreateGameDetailsViewModel(sp, mainVm);
+                detailsVm.LoadUninstalled(game, pluginId, activeIndexes, plugin);
+                mainVm.ShowGameDetails(detailsVm, plugin);
+            });
     }
 
     private static GameDetailsViewModel CreateGameDetailsViewModel(IServiceProvider sp, MainViewModel mainVm)
@@ -256,7 +264,11 @@ public partial class App : Application
                 sp.GetRequiredService<ProgressDialogViewModel>()),
             ShowChangelog,
             PickFile,
-            BrowseForFolderTitled);
+            BrowseForFolderTitled,
+            // The Developer button: swap this page for that developer's own, in one transition so
+            // only one thing claims focus. Back from there returns to the mods list.
+            owner => mainVm.SwitchFromGameDetailsToDeveloper(
+                CreateDeveloperDetailsViewModel(sp, mainVm, owner)));
     }
 
     /// <summary>
@@ -358,7 +370,10 @@ public partial class App : Application
                 {
                     Percentage = fraction * 100,
                     StatusText = $"Downloading version {info.Version} ({(int)(fraction * 100)}%)",
-                    StepDescription = $"{(int)(fraction * 100)}% complete"
+                    // A STABLE phase label. StepDescription is the progress dialog's only spoken
+                    // line, and this callback fires after every 80 KB — a percentage here would
+                    // have the screen reader counting the whole update download out loud.
+                    StepDescription = "Downloading update"
                 });
             });
 

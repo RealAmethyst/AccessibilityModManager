@@ -20,13 +20,18 @@ public partial class GamesListViewModel : ObservableObject
     private readonly GameAggregator _gameAggregator;
     private readonly PatreonService _patreon;
     private readonly ILogger _logger;
-    private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>> _navigateToDetails;
+    /// <summary>
+    /// Opens Game Details. Args: the install, the scoped indexes, and the registry entry of the
+    /// developer whose ROW was chosen — passed explicitly because the install can belong to a
+    /// different plugin that happened to detect the same game folder.
+    /// </summary>
+    private readonly Action<GameInstall, Dictionary<string, PluginRepoIndex>, PluginEntry?> _navigateToDetails;
     /// <summary>
     /// Opens Game Details for a game that isn't installed yet but declares a game-installer
     /// dependency (so the user can install the game + mod in one flow). Args: game definition,
-    /// owning plugin id, scoped indexes. Wired in App.xaml.cs.
+    /// owning plugin id, scoped indexes, owning registry entry. Wired in App.xaml.cs.
     /// </summary>
-    private readonly Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> _navigateToDetailsUninstalled;
+    private readonly Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>, PluginEntry?> _navigateToDetailsUninstalled;
     /// <summary>
     /// Returns the user-selected folder, or null if cancelled. The string param is an optional
     /// initial directory. Wired to <c>Microsoft.Win32.OpenFolderDialog</c> in App.xaml.cs.
@@ -38,14 +43,52 @@ public partial class GamesListViewModel : ObservableObject
     private List<GameInstall> _lastInstalls = [];
     private Dictionary<string, List<(string PluginId, GameDefinition Game)>> _lastGameMap = [];
 
+    /// <summary>
+    /// The accepted registry entries from the last refresh, by plugin id. Needed for two things a
+    /// row alone can't answer: the developer's fallback name when their index has no author block,
+    /// and the entry Game Details needs to open that developer's page. It is NOT read off the
+    /// GameInstall — detection can hand back another plugin's install for the same game, which
+    /// would name the wrong developer.
+    /// </summary>
+    private Dictionary<string, PluginEntry> _lastPluginEntries = [];
+
+    /// <summary>
+    /// Author filter ids the user has selected that aren't in the current filter list, because that
+    /// developer's catalog failed to load or is fully gated this refresh. Held so persisting the
+    /// filters doesn't silently drop a selection the user never cleared.
+    /// </summary>
+    private readonly HashSet<string> _hiddenSelectedAuthors = new(StringComparer.OrdinalIgnoreCase);
+
     [ObservableProperty]
     private bool _isLoading;
 
     [ObservableProperty]
     private string? _statusMessage;
 
+    /// <summary>
+    /// Set only when the status line is worth interrupting for — a refused catalog, an offline
+    /// catalog, a failure. Left null for the routine "found N mods", which is shown but not spoken.
+    ///
+    /// <para>Amethyst, after hearing the first build: a refresh announced a filter count, a mod
+    /// count and a developer count one after another, and clicking a mod said them again. Counts
+    /// are information you can go and read; a refused catalog is not.</para>
+    /// </summary>
+    [ObservableProperty]
+    private string? _statusAnnouncement;
+
+    /// <summary>Shown beside the filters, never announced — see <see cref="StatusAnnouncement"/>.</summary>
     [ObservableProperty]
     private string? _matchCountText;
+
+    /// <summary>
+    /// Show a message AND say it. For problems, and for the result of something the user just did
+    /// deliberately. Routine counts assign <see cref="StatusMessage"/> directly and stay quiet.
+    /// </summary>
+    private void ReportSpoken(string message)
+    {
+        StatusMessage = message;
+        StatusAnnouncement = message;
+    }
 
     public ObservableCollection<ModItemViewModel> Mods { get; } = [];
 
@@ -56,10 +99,17 @@ public partial class GamesListViewModel : ObservableObject
     public ObservableCollection<LanguageFilterItem> LanguageFilters { get; } = [];
     public ObservableCollection<AuthorFilterItem> AuthorFilters { get; } = [];
 
+    /// <summary>
+    /// Drives the Clear button. Counts author selections being held for developers with no checkbox
+    /// this refresh: without them the Clear button goes disabled while a saved selection is still
+    /// in effect, so the user has no way to get rid of a filter that will silently come back when
+    /// that developer's catalog loads again.
+    /// </summary>
     public bool HasAnyFilterSelected =>
         TagFilters.Any(f => f.IsSelected) ||
         LanguageFilters.Any(f => f.IsSelected) ||
-        AuthorFilters.Any(f => f.IsSelected);
+        AuthorFilters.Any(f => f.IsSelected) ||
+        _hiddenSelectedAuthors.Count > 0;
 
     public GamesListViewModel(
         IPluginRegistryClient registryClient,
@@ -70,8 +120,8 @@ public partial class GamesListViewModel : ObservableObject
         GameAggregator gameAggregator,
         PatreonService patreon,
         ILogger logger,
-        Action<GameInstall, Dictionary<string, PluginRepoIndex>> navigateToDetails,
-        Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>> navigateToDetailsUninstalled,
+        Action<GameInstall, Dictionary<string, PluginRepoIndex>, PluginEntry?> navigateToDetails,
+        Action<GameDefinition, string, Dictionary<string, PluginRepoIndex>, PluginEntry?> navigateToDetailsUninstalled,
         Func<string?, string?> browseForFolder)
     {
         _registryClient = registryClient;
@@ -108,6 +158,9 @@ public partial class GamesListViewModel : ObservableObject
     {
         IsLoading = true;
         StatusMessage = "Detecting mods...";
+        // Re-armed for this pass: clearing guarantees the next notable message counts as a change
+        // even when it repeats the last one word for word.
+        StatusAnnouncement = null;
 
         try
         {
@@ -203,6 +256,7 @@ public partial class GamesListViewModel : ObservableObject
 
             _lastActiveIndexes = activeIndexes;
             _lastInstalls = installs;
+            _lastPluginEntries = registry.Plugins.ToDictionary(p => p.Id, StringComparer.Ordinal);
             _lastGameMap = GameAggregator.GetGamesByGameId(activeIndexes);
             _allMods.Clear();
             // Mods itself is NOT cleared here: ApplyFilters below rebuilds it, and clearing it twice
@@ -253,6 +307,10 @@ public partial class GamesListViewModel : ObservableObject
                         GameDisplayName = game.DisplayName,
                         ModName = modName,
                         PluginId = pluginId,
+                        DeveloperName = DeveloperNames.Resolve(
+                            index,
+                            _lastPluginEntries.GetValueOrDefault(pluginId),
+                            pluginId),
                         IsDetected = install != null,
                         HasGameInstaller = game.Dependencies.Any(d => d.IsGameInstaller),
                         InstallPath = install?.InstallPath,
@@ -286,15 +344,19 @@ public partial class GamesListViewModel : ObservableObject
             StatusMessage = unavailable.Count > 0
                 ? string.Join(" ", unavailable) + " " + summary
                 : summary;
+
+            // Spoken only when something is actually wrong. A plain count is shown and left alone.
+            StatusAnnouncement = unavailable.Count > 0 || anyFromCache ? StatusMessage : null;
         }
         catch (OperationCanceledException)
         {
+            // The user cancelled; they know. Shown, not announced.
             StatusMessage = "Detection cancelled.";
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to detect mods");
-            StatusMessage = $"Failed to detect mods: {ex.Message}";
+            ReportSpoken("Couldn't load the catalog. " + CatalogRefusedException.SpeakableReason(ex));
         }
         finally
         {
@@ -303,17 +365,12 @@ public partial class GamesListViewModel : ObservableObject
     }
 
     /// <summary>
-    /// How a developer is named when their catalog can't be loaded. The author's name, because that
-    /// is what the user recognises from the Developers tab — the plugin id is an internal handle and
-    /// the listing name is often a sentence. Falls back through the listing name to the id so the
-    /// notice never says whose mods are missing with a blank.
+    /// How a developer is named when their catalog can't be loaded. Their index is exactly what
+    /// failed to arrive, so there is no display name to prefer here — the registry entry is all
+    /// there is, which is what <see cref="DeveloperNames"/> falls back to.
     /// </summary>
     private static string DescribeDeveloper(PluginEntry plugin)
-    {
-        if (!string.IsNullOrWhiteSpace(plugin.Author)) return plugin.Author;
-        if (!string.IsNullOrWhiteSpace(plugin.Name)) return plugin.Name;
-        return plugin.Id;
-    }
+        => DeveloperNames.Resolve(index: null, plugin, plugin.Id);
 
     /// <summary>
     /// Q3=A: a release is visible if it isn't Patreon-gated, or if the user is currently
@@ -368,6 +425,9 @@ public partial class GamesListViewModel : ObservableObject
         // mod card (not every developer's mods for that game). Matches Developer Details flow.
         if (!_lastActiveIndexes.TryGetValue(mod.PluginId, out var pluginIndex)) return;
         var scoped = new Dictionary<string, PluginRepoIndex> { [mod.PluginId] = pluginIndex };
+        // THIS row's developer. Taken from the row, never from the install found below, which may
+        // have been detected under a different plugin that supports the same game.
+        var owner = _lastPluginEntries.GetValueOrDefault(mod.PluginId);
 
         if (mod.IsDetected)
         {
@@ -379,7 +439,7 @@ public partial class GamesListViewModel : ObservableObject
                               i.Game.GameId == mod.GameId && i.PluginId == mod.PluginId && i.IsValid)
                           ?? _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
             if (install == null) return;
-            _navigateToDetails(install, scoped);
+            _navigateToDetails(install, scoped, owner);
         }
         else
         {
@@ -388,7 +448,7 @@ public partial class GamesListViewModel : ObservableObject
             // which runs the game installer first, then the mod.
             var def = pluginIndex.Games.FirstOrDefault(g => g.GameId == mod.GameId);
             if (def == null) return;
-            _navigateToDetailsUninstalled(def, mod.PluginId, scoped);
+            _navigateToDetailsUninstalled(def, mod.PluginId, scoped, owner);
         }
     }
 
@@ -403,7 +463,7 @@ public partial class GamesListViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to open game folder");
-            StatusMessage = $"Could not open folder: {ex.Message}";
+            ReportSpoken("Couldn't open the game folder. Check the log for details.");
         }
     }
 
@@ -418,7 +478,7 @@ public partial class GamesListViewModel : ObservableObject
         if (mod == null) return;
         if (!_lastGameMap.TryGetValue(mod.GameId, out var pluginGames) || pluginGames.Count == 0)
         {
-            StatusMessage = "Game definition not loaded — try refreshing first.";
+            ReportSpoken("Game definition not loaded — try refreshing first.");
             return;
         }
 
@@ -434,8 +494,8 @@ public partial class GamesListViewModel : ObservableObject
         if (validatingDefinition == null)
         {
             var firstName = pluginGames[0].Game.DisplayName;
-            StatusMessage = $"That folder doesn't look like a {firstName} install — " +
-                            "expected files were not found. Override not saved.";
+            ReportSpoken($"That folder doesn't look like a {firstName} install — " +
+                         "expected files were not found. Override not saved.");
             _logger.Warning("Browse rejected for {GameId} at {Path}: probe rules failed", mod.GameId, pickedPath);
             return;
         }
@@ -447,13 +507,14 @@ public partial class GamesListViewModel : ObservableObject
             await _configService.SaveAsync(config);
             _logger.Information("Saved manual override for {GameId}: {Path}", mod.GameId, pickedPath);
 
-            StatusMessage = $"Saved location for {validatingDefinition.DisplayName}. Refreshing...";
+            // The user just picked this folder; confirming it took is the answer to their action.
+            ReportSpoken($"Saved location for {validatingDefinition.DisplayName}. Refreshing...");
             await RefreshGamesCommand.ExecuteAsync(null);
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to save game override");
-            StatusMessage = $"Could not save location: {ex.Message}";
+            ReportSpoken("Couldn't save that game location. Check the log for details.");
         }
     }
 
@@ -514,17 +575,36 @@ public partial class GamesListViewModel : ObservableObject
         }
 
         AuthorFilters.Clear();
+        // Labelled with the developer's name; still keyed by plugin id, which is what filtering
+        // and the saved config use. Sorted by what the user reads, not by the internal id.
         var presentAuthors = _allMods
-            .Select(m => m.PluginId)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase);
-        foreach (var pluginId in presentAuthors)
+            .GroupBy(m => m.PluginId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => (PluginId: g.Key, Label: g.First().DeveloperName))
+            .OrderBy(a => a.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(a => a.PluginId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var (pluginId, label) in presentAuthors)
         {
             AuthorFilters.Add(new AuthorFilterItem(
                 pluginId,
+                label,
                 isSelected: savedAuthors.Contains(pluginId),
                 onToggle: OnFilterToggled));
         }
+
+        // A developer whose catalog was refused or is fully gated has no rows this pass, so they
+        // have no checkbox — but the user never unticked them. Remembered here and merged back on
+        // save, otherwise the next unrelated toggle would quietly rewrite the saved list without
+        // them and the filter would come back changed.
+        _hiddenSelectedAuthors.Clear();
+        var present = presentAuthors.Select(a => a.PluginId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var saved in savedAuthors.Where(s => !present.Contains(s)))
+            _hiddenSelectedAuthors.Add(saved);
+
+        // Rebuilding changes what is selected, so the Clear button's enabled state has to be
+        // re-evaluated — it is computed, and nothing else notifies it from here.
+        OnPropertyChanged(nameof(HasAnyFilterSelected));
     }
 
     private bool _suppressFilterChanges;
@@ -595,7 +675,12 @@ public partial class GamesListViewModel : ObservableObject
             var config = await _configService.LoadAsync();
             config.SelectedTagFilters = TagFilters.Where(f => f.IsSelected).Select(f => f.Id).ToList();
             config.SelectedLanguageFilters = LanguageFilters.Where(f => f.IsSelected).Select(f => f.Code).ToList();
-            config.SelectedAuthorFilters = AuthorFilters.Where(f => f.IsSelected).Select(f => f.PluginId).ToList();
+            config.SelectedAuthorFilters = AuthorFilters
+                .Where(f => f.IsSelected)
+                .Select(f => f.PluginId)
+                .Concat(_hiddenSelectedAuthors)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
             await _configService.SaveAsync(config);
         }
         catch (Exception ex)
@@ -613,6 +698,9 @@ public partial class GamesListViewModel : ObservableObject
             foreach (var f in TagFilters) f.IsSelected = false;
             foreach (var f in LanguageFilters) f.IsSelected = false;
             foreach (var f in AuthorFilters) f.IsSelected = false;
+            // Clear means clear: this is the explicit act that also drops selections being held
+            // for developers who have no checkbox right now.
+            _hiddenSelectedAuthors.Clear();
         }
         finally { _suppressFilterChanges = false; }
 
@@ -669,20 +757,26 @@ public sealed partial class LanguageFilterItem : ObservableObject
 public sealed partial class AuthorFilterItem : ObservableObject
 {
     private readonly Action _onToggle;
+
+    /// <summary>Identity: what filtering compares and what the config persists. Never displayed.</summary>
     public string PluginId { get; }
+
+    /// <summary>What the user sees and hears — the developer's name, not the id slug.</summary>
+    public string Label { get; }
 
     [ObservableProperty]
     private bool _isSelected;
 
-    public AuthorFilterItem(string pluginId, bool isSelected, Action onToggle)
+    public AuthorFilterItem(string pluginId, string label, bool isSelected, Action onToggle)
     {
         PluginId = pluginId;
+        Label = label;
         _isSelected = isSelected;
         _onToggle = onToggle;
     }
 
     partial void OnIsSelectedChanged(bool value) => _onToggle();
-    public override string ToString() => PluginId;
+    public override string ToString() => Label;
 }
 
 /// <summary>
@@ -695,6 +789,13 @@ public partial class ModItemViewModel : ObservableObject
     public required string GameDisplayName { get; init; }
     public required string ModName { get; init; }
     public required string PluginId { get; init; }
+
+    /// <summary>
+    /// Who made this mod, as a person's name rather than the plugin id slug. Resolved through
+    /// <see cref="DeveloperNames"/> so every place that names a developer agrees.
+    /// </summary>
+    public required string DeveloperName { get; init; }
+
     public required bool IsDetected { get; init; }
     /// <summary>True when the game declares a game-installer dependency, so it can be installed
     /// from the not-detected state.</summary>
@@ -713,7 +814,12 @@ public partial class ModItemViewModel : ObservableObject
         (true, _, false) => $"v{InstalledVersion} installed",
     };
 
-    public string AnnouncementText => $"{ModName} for {GameDisplayName}, {StatusText}";
+    /// <summary>
+    /// "Blind Access FF7 by Amethyst for Final Fantasy VII, v1.2 installed". The developer sits
+    /// with the mod rather than next to the status: the mod and who made it are one thought, and
+    /// the game is what the user scans past when hunting down the list.
+    /// </summary>
+    public string AnnouncementText => $"{ModName} by {DeveloperName} for {GameDisplayName}, {StatusText}";
 
     public override string ToString() => AnnouncementText;
 }
