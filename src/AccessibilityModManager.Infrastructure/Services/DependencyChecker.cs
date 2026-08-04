@@ -136,21 +136,9 @@ public sealed class DependencyChecker : IDependencyChecker
                 };
             }
 
-            if (File.Exists(fullPath) || Directory.Exists(fullPath))
-            {
-                return new DependencyStatus
-                {
-                    Dependency = dep,
-                    Status = DependencyStatusKind.Installed
-                };
-            }
-
-            return new DependencyStatus
-            {
-                Dependency = dep,
-                Status = DependencyStatusKind.Missing,
-                Details = $"Not found: {dep.Check.FilePath}"
-            };
+            // Same rules as an absolute system path, including MinVersion: a loader that keeps its
+            // versions in folders beside the game is no different from one under Program Files.
+            return CheckPath(dep, fullPath, dep.Check.FilePath);
         }
 
         // Registry fallback for framework deps
@@ -378,24 +366,121 @@ public sealed class DependencyChecker : IDependencyChecker
         char.IsDigit(s[0]) &&
         s.All(c => char.IsLetterOrDigit(c) || c == '.' || c == '-');
 
-    private DependencyStatus CheckAbsoluteFile(Dependency dep)
-    {
-        var path = dep.Check!.FilePath!;
+    private DependencyStatus CheckAbsoluteFile(Dependency dep) =>
+        CheckPath(dep, dep.Check!.FilePath!, dep.Check!.FilePath!);
 
-        if (File.Exists(path) || Directory.Exists(path))
+    /// <summary>
+    /// Presence, and — when the dependency states a <see cref="Dependency.MinVersion"/> — which
+    /// version is actually there.
+    ///
+    /// <para>Without a MinVersion this is existence only, exactly as it always was: no index in the
+    /// field states one, and a check that merely asks "is it there" must keep meaning that.</para>
+    ///
+    /// <para>With one, the shape of what is on disk decides how the version is read. A runtime that
+    /// installs side-by-side keeps each version in its own FOLDER — .NET's
+    /// <c>Microsoft.WindowsDesktop.App</c> holds 8.0.23 next to 9.0.18 — so the newest versioned
+    /// subfolder is the installed version. A single FILE carries its version in its own metadata.
+    /// Both are answered here rather than left to the author to pin an exact patch number, which
+    /// would report a perfectly good runtime as missing the moment somebody updated it.</para>
+    ///
+    /// <para>Deliberately NOT satisfied by the registry for .NET: modern .NET no longer writes
+    /// per-runtime entries under <c>HKLM\SOFTWARE\dotnet\Setup\InstalledVersions</c> — a machine
+    /// with 9 and 10 installed can carry nothing but a <c>sharedhost</c> key — so a registry check
+    /// reports it missing and offers to install it again forever.</para>
+    /// </summary>
+    /// <param name="displayPath">What to name in a message: the author's own text, not the resolved
+    /// absolute path, which for a game-relative check is machine noise.</param>
+    private DependencyStatus CheckPath(Dependency dep, string fullPath, string displayPath)
+    {
+        var isDirectory = Directory.Exists(fullPath);
+        var isFile = File.Exists(fullPath);
+
+        if (!isDirectory && !isFile)
         {
             return new DependencyStatus
             {
                 Dependency = dep,
-                Status = DependencyStatusKind.Installed
+                Status = DependencyStatusKind.Missing,
+                Details = $"Not found: {displayPath}"
             };
         }
 
-        return new DependencyStatus
+        if (string.IsNullOrWhiteSpace(dep.MinVersion))
+            return new DependencyStatus { Dependency = dep, Status = DependencyStatusKind.Installed };
+
+        var installed = isDirectory ? NewestVersionedChild(fullPath) : FileVersion(fullPath);
+        if (installed is null)
         {
-            Dependency = dep,
-            Status = DependencyStatusKind.Missing,
-            Details = $"Not found: {path}"
-        };
+            // Passing here would claim a version check happened when none could. The author asked
+            // for one, so not being able to answer is a failure, not a pass.
+            return new DependencyStatus
+            {
+                Dependency = dep,
+                Status = DependencyStatusKind.Incompatible,
+                Details = isDirectory
+                    ? $"{displayPath} holds no version-numbered folders, so its version can't be read"
+                    : $"No version could be read from {displayPath}"
+            };
+        }
+
+        if (VersionComparer.Instance.Compare(installed, dep.MinVersion) < 0)
+        {
+            return new DependencyStatus
+            {
+                Dependency = dep,
+                Status = DependencyStatusKind.Incompatible,
+                Details = $"Installed: {installed}, required: >= {dep.MinVersion}"
+            };
+        }
+
+        return new DependencyStatus { Dependency = dep, Status = DependencyStatusKind.Installed };
+    }
+
+    /// <summary>
+    /// The highest version-looking subfolder name, or null when there are none. Same filter and
+    /// same comparer the registry path uses on value names, so the two agree about what a version
+    /// is and which of two is newer.
+    /// </summary>
+    private string? NewestVersionedChild(string directory)
+    {
+        try
+        {
+            return new DirectoryInfo(directory).EnumerateDirectories()
+                .Select(d => d.Name)
+                .Where(LooksLikeVersion)
+                .OrderByDescending(v => v, VersionComparer.Instance)
+                .FirstOrDefault();
+        }
+        catch (Exception ex)
+        {
+            // Unreadable is not empty, but from here neither can be told apart by the caller, and
+            // both mean the same thing: this version can't be established.
+            _logger.Warning(ex, "Couldn't list versioned folders under {Directory}", directory);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// A file's own version. Build metadata is stripped because <see cref="LooksLikeVersion"/>
+    /// rejects '+' and .NET stamps assemblies as "9.0.18+abc123"; the part after it never orders
+    /// anything anyway.
+    /// </summary>
+    private string? FileVersion(string path)
+    {
+        try
+        {
+            var info = FileVersionInfo.GetVersionInfo(path);
+            var raw = info.ProductVersion ?? info.FileVersion;
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+
+            var plus = raw.IndexOf('+');
+            var trimmed = (plus < 0 ? raw : raw[..plus]).Trim();
+            return LooksLikeVersion(trimmed) ? trimmed : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't read a version from {Path}", path);
+            return null;
+        }
     }
 }
