@@ -21,7 +21,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>AccessibilityModManager.AuthorTool</RootNamespace>
     <AssemblyName>AccessibilityModManager.AuthorTool</AssemblyName>
-    <Version>0.25.1</Version>
+    <Version>0.26.0</Version>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(RegistryAdmin)' == 'true'">
