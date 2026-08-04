@@ -314,6 +314,37 @@ public sealed class AuthorConfigService
     public string? GetLastPublishedIndexSha(string projectPath) =>
         GetRecent(projectPath)?.LastPublishedIndexSha256;
 
+    /// <summary>
+    /// The author's explicit publishing destination for this project, or
+    /// <see cref="PublishDestination.Unset"/> when they have not chosen one.
+    ///
+    /// <para>Unset is also what a choice made for a DIFFERENT plugin reads as. Folders get
+    /// repurposed, and "server" answered about one catalog is not an answer about another —
+    /// especially since one of those catalogs may be signed and the other not.</para>
+    /// </summary>
+    public PublishDestination GetPublishDestination(string projectPath, string pluginId)
+    {
+        var target = GetRecent(projectPath)?.PublishTarget;
+        if (target is null) return PublishDestination.Unset;
+
+        // Ordinal: plugin identity is exact-case everywhere it matters (index identity binding,
+        // trust context), so a case-only difference is a different plugin here too.
+        return string.Equals(target.PluginId, pluginId, StringComparison.Ordinal)
+            ? target.Destination
+            : PublishDestination.Unset;
+    }
+
+    public void SetPublishDestination(string projectPath, string pluginId, PublishDestination destination)
+    {
+        var config = Load();
+        var project = config.RecentProjects.FirstOrDefault(p =>
+            string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase));
+        if (project == null) return;
+
+        project.PublishTarget = new PublishTarget { PluginId = pluginId, Destination = destination };
+        Save(config);
+    }
+
     public void SetGameSourceRepo(string projectPath, string gameId, string sourceRepo)
     {
         var config = Load();

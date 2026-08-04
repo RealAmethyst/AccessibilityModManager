@@ -196,11 +196,42 @@ public sealed class ServerUploadConfig
     public int Port { get; set; } = 22;
 }
 
+/// <summary>
+/// Where a project's index.json is published. <see cref="Unset"/> is the zero value ON PURPOSE:
+/// an unanswered question must never deserialize into a destination, because a wrong answer here
+/// sends somebody's catalog to the wrong place — or, worse, sends an unsigned index over a signed
+/// one. Everything that reads this treats Unset as "ask".
+/// </summary>
+public enum PublishDestination
+{
+    Unset = 0,
+    Server = 1,
+    GitHub = 2
+}
+
+/// <summary>
+/// A project's publishing destination, bound to the plugin id it was chosen for.
+///
+/// <para>The binding matters: a folder can be repurposed for a different catalog, and a choice made
+/// for one plugin is not an answer for another. A mismatch reads as <see cref="PublishDestination.Unset"/>
+/// rather than being silently reused.</para>
+/// </summary>
+public sealed class PublishTarget
+{
+    public string PluginId { get; set; } = "";
+    public PublishDestination Destination { get; set; }
+}
+
 public sealed class RecentProject
 {
     public required string Path { get; set; }
     public string? DisplayName { get; set; }
     public string? GitHubRepo { get; set; }
+
+    /// <summary>Author's explicit publishing choice. Never an inferred default — see
+    /// <see cref="PublishDestination"/>.</summary>
+    public PublishTarget? PublishTarget { get; set; }
+
     public Dictionary<string, string> GameSourceRepos { get; set; } = new();
 
     /// <summary>

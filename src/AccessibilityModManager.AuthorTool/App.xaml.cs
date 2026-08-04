@@ -55,6 +55,8 @@ public partial class App : Application
         services.AddSingleton<IndexProofService>();
         services.AddSingleton<ProjectReconciler>();
         services.AddSingleton<IndexPublishCoordinator>();
+        services.AddSingleton<GitHubIndexPublisher>();
+        services.AddSingleton<UnsignedPublishGate>();
 
         services.AddTransient<ProjectPickerViewModel>();
         services.AddTransient<IndexEditorViewModel>();
@@ -150,6 +152,8 @@ public partial class App : Application
             sp.GetRequiredService<RegistryMembershipChecker>(),
             sp.GetRequiredService<ProjectReconciler>(),
             sp.GetRequiredService<IndexPublishCoordinator>(),
+            sp.GetRequiredService<GitHubIndexPublisher>(),
+            sp.GetRequiredService<UnsignedPublishGate>(),
             (pluginId, trust) => ShowClaimSigningDialog(sp, pluginId, trust));
     }
 

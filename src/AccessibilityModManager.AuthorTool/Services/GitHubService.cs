@@ -122,6 +122,39 @@ public sealed class GitHubService
             ? value.GetString() ?? ""
             : "";
 
+    /// <summary>
+    /// Whether a repository is private, or null when that can't be established.
+    ///
+    /// <para>It matters for publishing an index: the manager fetches a catalog anonymously, so a
+    /// private repository's raw URL returns 404 to everyone but collaborators. A push would look
+    /// like a success that nobody outside the repository could read.</para>
+    ///
+    /// <para>Null rather than an assumption when the call fails — treating "couldn't ask" as
+    /// "private" would block a perfectly good publish over a network blip, and treating it as
+    /// "public" would claim a check that never ran. The caller decides.</para>
+    /// </summary>
+    public async Task<bool?> IsRepoPrivateAsync(string nameWithOwner, CancellationToken ct = default)
+    {
+        try
+        {
+            var result = await ProcessRunner.RunAsync("gh",
+                new[] { "api", $"repos/{nameWithOwner}", "--jq", ".private" }, ct: ct);
+            if (!result.Success) return null;
+
+            return result.Stdout.Trim().ToLowerInvariant() switch
+            {
+                "true" => true,
+                "false" => false,
+                _ => null
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Couldn't read repository visibility for {Repo}", nameWithOwner);
+            return null;
+        }
+    }
+
     public async Task<List<GitHubRelease>> ListReleasesAsync(string repo, int limit = 30, CancellationToken ct = default)
     {
         _logger.Information("gh release list --repo {Repo}", repo);

@@ -160,6 +160,16 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// </summary>
     public ObservableCollection<string> AvailableGitHubRepos { get; } = [];
 
+    private readonly GitHubIndexPublisher _gitHubPublisher;
+    private readonly UnsignedPublishGate _unsignedGate;
+
+    /// <summary>
+    /// Resolved once per publish and cached only within it — a branch can be switched or a remote
+    /// re-pointed between publishes, and a stale target would push somewhere the author has moved on
+    /// from.
+    /// </summary>
+    private GitPublishTarget? _gitTarget;
+
     public IndexEditorViewModel(
         string projectPath,
         AuthorConfigService configService,
@@ -181,8 +191,12 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         RegistryMembershipChecker registryChecker,
         ProjectReconciler reconciler,
         IndexPublishCoordinator publishCoordinator,
+        GitHubIndexPublisher gitHubPublisher,
+        UnsignedPublishGate unsignedGate,
         Action<string, RegistryTrustState> showClaimSigningDialog)
     {
+        _gitHubPublisher = gitHubPublisher;
+        _unsignedGate = unsignedGate;
         _projectPath = projectPath;
         _configService = configService;
         _indexFileService = indexFileService;
@@ -493,9 +507,65 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         }
     }
 
-    /// <summary>The plugin's canonical live index URL, derived from the registry's fixed home.</summary>
-    private Uri LiveIndexUrl => new(RegistryMembershipChecker.RegistryUrl,
-        $"plugins/{Uri.EscapeDataString(_index.PluginId)}/index.json");
+    /// <summary>
+    /// Where THIS project's published index is read from.
+    ///
+    /// <para>Destination-aware on purpose: it is used both to verify a publish and to reconcile the
+    /// folder when the project opens, and a GitHub-hosted catalog reconciled against the server
+    /// address would compare against somebody else's index — or nothing at all — and offer to
+    /// replace the author's work with it.</para>
+    /// </summary>
+    private Uri LiveIndexUrl =>
+        _gitTarget is { } target && CurrentDestination == PublishDestination.GitHub
+            ? new Uri(target.BranchRawUrl)
+            : new Uri(RegistryMembershipChecker.RegistryUrl,
+                $"plugins/{Uri.EscapeDataString(_index.PluginId)}/index.json");
+
+    /// <summary>The author's chosen destination for this project, or Unset if never chosen.</summary>
+    private PublishDestination CurrentDestination =>
+        _configService.GetPublishDestination(_projectPath, _index.PluginId);
+
+    /// <summary>
+    /// Names the destination on the button that changes it, so the current setting is readable
+    /// without opening anything — this decides where an author's catalog goes, and a control that
+    /// only says "destination" would make them press it to find out.
+    /// </summary>
+    public string PublishDestinationLabel => CurrentDestination switch
+    {
+        PublishDestination.GitHub => "Publishing to: GitHub",
+        PublishDestination.Server => "Publishing to: your server",
+        _ => "Publishing to: not set"
+    };
+
+    /// <summary>Names the destination on the Publish button itself, for the same reason.</summary>
+    public string PublishButtonName => CurrentDestination switch
+    {
+        PublishDestination.GitHub => "Publish index to GitHub",
+        PublishDestination.Server => "Publish index to your server",
+        _ => "Publish index"
+    };
+
+    /// <summary>
+    /// Changes where this project publishes. Separate from the first-publish question so a wrong
+    /// answer there is not permanent — the setting decides where an author's catalog goes, and
+    /// there has to be a way back.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(IsNotBusy))]
+    private void ChangePublishDestination()
+    {
+        var current = CurrentDestination;
+        var chosen = AskWhereThisPublishes();
+
+        _configService.SetPublishDestination(_projectPath, _index.PluginId, chosen);
+        _gitTarget = null;   // a new destination invalidates any resolved git target
+
+        OnPropertyChanged(nameof(PublishDestinationLabel));
+        OnPropertyChanged(nameof(PublishButtonName));
+
+        StatusMessage = current == chosen
+            ? PublishDestinationLabel + ", unchanged."
+            : PublishDestinationLabel + ".";
+    }
 
     /// <summary>
     /// Whether a download address actually answers.
@@ -1040,7 +1110,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             return;
         }
 
-        await PublishIndexToServerAsync(SuggestCommitMessage(), confirmFirst: true);
+        await PublishToDestinationAsync(SuggestCommitMessage(), confirmFirst: true);
     }
 
     /// <summary>
@@ -1410,7 +1480,6 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         return await PublishPresentation.ApplyAsync(result, _index.PluginId, new PublishEffects(
             RecordPublishedSource: () => RecordPublishedIndex(candidate),
             ShowDialog: _showInfoDialog,
-            CommitHistoryAsync: () => CommitLocalHistoryAsync(commitMessage),
             SetStatus: message => StatusMessage = message,
             OfferKeyBackup: () =>
             {
@@ -1541,7 +1610,6 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             _liveIndexAtLoad = candidate;
             RecordPublishedIndex(candidate);
             StatusMessage = "Published the index and verified it live from the public address.";
-            await CommitLocalHistoryAsync(commitMessage);
             return true;
         }
         catch (IndexPublishFailedException ex) when (ex.RenameAttempted)
@@ -1569,27 +1637,10 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         }
     }
 
-    /// <summary>
-    /// Records what went out in local git history. Best-effort by design: a git hiccup must never
-    /// repaint a live publish as failed.
-    /// </summary>
-    private async Task CommitLocalHistoryAsync(string commitMessage)
-    {
-        try
-        {
-            if (await _gitService.IsRepoAsync(_projectPath))
-            {
-                await _gitService.AddAsync(_projectPath, "index.json");
-                var status = await _gitService.StatusPorcelainAsync(_projectPath);
-                if (!string.IsNullOrWhiteSpace(status.Stdout))
-                    await _gitService.CommitAsync(_projectPath, commitMessage);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "Local history commit after index publish failed");
-        }
-    }
+    // A server publish used to also make a local git commit that went nowhere. It is gone: for a
+    // server project the upload IS the publish and the folder is a working copy, and now that GitHub
+    // is a real destination a commit that looks like publishing but isn't is worse than no commit at
+    // all. The commit on the GitHub path is the opposite of best-effort — it is the publication.
 
     /// <summary>
     /// Writes <c>index.json</c> to disk, including all in-progress game edits. Returns false on
@@ -1623,6 +1674,182 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     }
 
     /// <summary>
+    /// THE publish entry point. Every route — the Publish button, Save, and each release change —
+    /// comes through here, so a destination can never apply to one of them and not the others.
+    ///
+    /// <para>That is not a tidiness argument. Save publishes too, so wiring the destination into
+    /// only the Publish button would have left a project set to GitHub quietly uploading to the
+    /// server every time the author pressed Save.</para>
+    ///
+    /// <para>Returns whether the published catalog now describes the local file — the same contract
+    /// the server path always had, which the Patreon gate transition depends on.</para>
+    /// </summary>
+    private async Task<bool> PublishToDestinationAsync(string commitMessage, bool confirmFirst)
+    {
+        var destination = CurrentDestination;
+        if (destination == PublishDestination.Unset)
+        {
+            destination = AskWhereThisPublishes();
+            if (destination == PublishDestination.Unset)
+            {
+                StatusMessage = "Saved locally. Choose where this index publishes when you're ready.";
+                return false;
+            }
+            _configService.SetPublishDestination(_projectPath, _index.PluginId, destination);
+            OnPropertyChanged(nameof(PublishDestinationLabel));
+            OnPropertyChanged(nameof(PublishButtonName));
+        }
+
+        return destination == PublishDestination.GitHub
+            ? await PublishIndexToGitHubAsync(commitMessage, confirmFirst)
+            : await PublishIndexToServerAsync(commitMessage, confirmFirst);
+    }
+
+    /// <summary>
+    /// Publishes by committing and pushing index.json to the project's GitHub repository.
+    ///
+    /// <para>Unsigned only. A catalog the registry anchors a key for must be published as a signed
+    /// one, and <see cref="UnsignedPublishGate"/> refuses here rather than letting a plain push put
+    /// an unsigned index over a signed catalog — which cannot be undone by publishing again.</para>
+    ///
+    /// <para>The gate runs twice: once before anything is touched, for a clear early refusal, and
+    /// once with the commit made and the push not yet attempted, because a registry can be
+    /// re-pointed or a key anchored in between and the check that counts is the last one.</para>
+    /// </summary>
+    private async Task<bool> PublishIndexToGitHubAsync(string commitMessage, bool confirmFirst)
+    {
+        var (target, targetError) = await _gitHubPublisher.ResolveTargetAsync(_projectPath);
+        if (target is null)
+        {
+            _showInfoDialog("Can't publish to GitHub", targetError ?? "This project can't be published to GitHub.");
+            StatusMessage = "Saved locally. Publishing to GitHub isn't possible from this folder yet.";
+            return false;
+        }
+        _gitTarget = target;
+
+        var registry = new RegistryVerifiedSource(_registryChecker);
+        var authorized = await _unsignedGate.AuthorizeAsync(registry, _index.PluginId, CancellationToken.None);
+        if (!authorized.Allowed)
+        {
+            _showInfoDialog(authorized.Title, authorized.Message);
+            StatusMessage = "Saved locally. Nothing was published.";
+            return false;
+        }
+
+        // A private repository serves 404 to the manager's anonymous fetch, so a push would look
+        // like a success nobody could read. Checked BEFORE committing, since it is the author's
+        // repository setting rather than anything this publish can fix.
+        if (await _gitHubService.IsRepoPrivateAsync($"{target.Owner}/{target.Repo}") is true)
+        {
+            _showInfoDialog("That repository is private",
+                $"{target.Describe} is private, so {target.BranchRawUrl} returns nothing to anyone but " +
+                "you — the manager fetches it signed out. Make the repository public before publishing " +
+                "its index. Nothing was committed or pushed.");
+            StatusMessage = "Saved locally. The repository is private.";
+            return false;
+        }
+
+        // The address managers are told to read, when the registry lists this plugin at all, must be
+        // the one about to be written. Publishing to a place nobody reads is the quietest failure
+        // this tool has: everything reports success and no manager sees a thing.
+        if (authorized.RegisteredIndexUrl is { } registered &&
+            !string.Equals(registered.TrimEnd('/'), target.BranchRawUrl, StringComparison.Ordinal))
+        {
+            _showInfoDialog("The registry points somewhere else",
+                $"The registry tells managers to read '{_index.PluginId}' from:\n\n{registered}\n\n" +
+                $"but publishing here would write to:\n\n{target.BranchRawUrl}\n\n" +
+                "Publishing now would look like it worked while every manager kept reading the old " +
+                "address. Nothing was committed or pushed.");
+            StatusMessage = "Saved locally. The registry names a different address.";
+            return false;
+        }
+
+        var candidate = await File.ReadAllBytesAsync(Path.Combine(_projectPath, "index.json"));
+
+        // Creating a branch publishes everything already committed in the folder, because git pushes
+        // a commit with its whole ancestry. Said before it happens, not after.
+        var branchExists = await _gitHubPublisher.RemoteBranchExistsAsync(target);
+        var branchNote = branchExists is false
+            ? $"\n\nBranch '{target.Branch}' doesn't exist on that repository yet, so this creates it — " +
+              "which publishes everything already committed in this folder, not just index.json."
+            : "";
+
+        if (confirmFirst &&
+            !_confirmDialog("Publish index",
+                $"This commits index.json for '{_index.PluginId}' and pushes it to {target.Describe}." +
+                branchNote + "\n\n" +
+                (authorized.Listed
+                    ? "Managers see the change on their next refresh."
+                    : "Note: this plugin isn't listed in the registry yet, so the manager won't show it " +
+                      "to anyone until it is — hosting it is not the same as publishing it.") +
+                $"\n\nChange: {commitMessage}\n\nProceed?"))
+        {
+            StatusMessage = "Saved locally. Publish index when ready.";
+            return false;
+        }
+
+        StatusMessage = "Publishing index to GitHub...";
+
+        var result = await _gitHubPublisher.PublishAsync(target, candidate, commitMessage,
+            async () =>
+            {
+                var again = await _unsignedGate.AuthorizeAsync(registry, _index.PluginId, CancellationToken.None);
+                return again.Allowed ? null : again.Message;
+            });
+
+        switch (result.Outcome)
+        {
+            case GitPublishOutcome.Published:
+            case GitPublishOutcome.PublishedPendingCdn:
+                // What was COMMITTED, not what was read off disk: the publisher normalizes line
+                // endings, and recording the pre-normalization bytes would make the next
+                // project-open decide this folder differs from what is live.
+                var published = result.PublishedBytes ?? candidate;
+                _liveIndexAtLoad = published;
+                RecordPublishedIndex(published);
+                StatusMessage = authorized.Listed
+                    ? $"Published to {target.Describe}."
+                    : $"Pushed to {target.Describe}. It still needs adding to the registry before " +
+                      "anyone's manager will show it.";
+                if (!authorized.Listed)
+                {
+                    _showInfoDialog("Pushed, but not listed yet",
+                        $"index.json is live at:\n\n{target.BranchRawUrl}\n\n" +
+                        "The manager only reads catalogs the registry lists, so nobody will see these " +
+                        "mods until that exact address is added to the registry and it is signed.");
+                }
+                return true;
+
+            case GitPublishOutcome.CommittedNotPushed:
+                _showInfoDialog(result.Title, result.Message);
+                StatusMessage = "Committed locally, but not pushed — managers can't see it.";
+                return false;
+
+            default:
+                _showInfoDialog(result.Title, result.Message);
+                StatusMessage = "Nothing was published.";
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Asks once, and only when nothing is recorded. Deliberately not inferred: this project folder
+    /// is a git repository AND publishes to the server, so "is there a remote" would answer GitHub
+    /// for the one catalog that must never go there.
+    /// </summary>
+    private PublishDestination AskWhereThisPublishes()
+    {
+        var gitHub = _confirmDialog("Where does this index publish?",
+            $"'{_index.PluginId}' hasn't been published from this folder before, so there's no record " +
+            "of where its index.json belongs.\n\n" +
+            "Yes — commit and push it to this project's GitHub repository.\n" +
+            "No — upload it to your server over SFTP.\n\n" +
+            "You can change this later. Publish to GitHub?");
+
+        return gitHub ? PublishDestination.GitHub : PublishDestination.Server;
+    }
+
+    /// <summary>
     /// Auto-save + auto-publish prompt that runs after a release is added or edited. The
     /// release dialog only stages the new <see cref="ModRelease"/> in memory and uploads the
     /// asset — without this, the user has to remember to also click Save and Publish for the
@@ -1636,7 +1863,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         if (!TrySaveIndexToDisk())
             return;
 
-        var catalogMatches = await PublishIndexToServerAsync(commitMessage, confirmFirst: true);
+        var catalogMatches = await PublishToDestinationAsync(commitMessage, confirmFirst: true);
 
         if (gateChange == null) return;
 

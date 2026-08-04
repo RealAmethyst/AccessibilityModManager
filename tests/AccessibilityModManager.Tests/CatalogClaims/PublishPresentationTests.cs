@@ -50,7 +50,6 @@ public sealed class PublishPresentationTests
 
         Assert.False(presentation.CatalogMatchesLocal);
         Assert.False(presentation.RecordLocalSourceAsPublished);
-        Assert.False(presentation.CommitLocalHistory);
     }
 
     public static TheoryData<PublishStatus> EveryPresentableStatus() =>
@@ -59,14 +58,13 @@ public sealed class PublishPresentationTests
     // ---- a publish that put this folder live ----
 
     [Fact]
-    public void A_publish_of_this_folder_records_it_commits_it_and_lets_the_gate_change_follow()
+    public void A_publish_of_this_folder_records_it_and_lets_the_gate_change_follow()
     {
         var presentation = PublishPresentation.For(
             Result(PublishStatus.Published, localSourceIsLive: true));
 
         Assert.True(presentation.CatalogMatchesLocal);
         Assert.True(presentation.RecordLocalSourceAsPublished);
-        Assert.True(presentation.CommitLocalHistory);
         Assert.False(presentation.PromptForFreshKeyBackup);
 
         // No dialog: the author pressed Publish and watched it happen. The status line is enough.
@@ -85,7 +83,6 @@ public sealed class PublishPresentationTests
         // attempt's bytes and anything edited since is still unpublished.
         Assert.False(presentation.CatalogMatchesLocal);
         Assert.False(presentation.RecordLocalSourceAsPublished);
-        Assert.False(presentation.CommitLocalHistory);
 
         // And it is worth stopping for: a status line is exactly what gets skimmed past, and the
         // thing to be understood here is that the edits did not go out.
@@ -126,7 +123,6 @@ public sealed class PublishPresentationTests
         Assert.True(presentation.RecordLocalSourceAsPublished);
 
         // Nothing went out, so there is nothing for local history to record.
-        Assert.False(presentation.CommitLocalHistory);
         Assert.False(presentation.ShowDialog);
     }
 
@@ -194,7 +190,6 @@ public sealed class PublishPresentationTests
     private sealed class Spy
     {
         public int Recorded;
-        public int Commits;
         public int BackupOffers;
         public readonly List<string> Dialogs = [];
         public string? Status;
@@ -202,13 +197,12 @@ public sealed class PublishPresentationTests
         public PublishEffects Effects => new(
             RecordPublishedSource: () => Recorded++,
             ShowDialog: (title, _) => Dialogs.Add(title),
-            CommitHistoryAsync: () => { Commits++; return Task.CompletedTask; },
             SetStatus: status => Status = status,
             OfferKeyBackup: () => BackupOffers++);
     }
 
     [Fact]
-    public async Task Publishing_this_folder_records_it_once_and_commits_once()
+    public async Task Publishing_this_folder_records_it_once()
     {
         var spy = new Spy();
 
@@ -217,7 +211,6 @@ public sealed class PublishPresentationTests
 
         Assert.True(matches);
         Assert.Equal(1, spy.Recorded);
-        Assert.Equal(1, spy.Commits);
         Assert.Empty(spy.Dialogs);
         Assert.Equal("Message", spy.Status);
     }
@@ -235,7 +228,6 @@ public sealed class PublishPresentationTests
 
         Assert.False(matches);
         Assert.Equal(0, spy.Recorded);
-        Assert.Equal(0, spy.Commits);
         Assert.Single(spy.Dialogs);
     }
 
@@ -249,7 +241,6 @@ public sealed class PublishPresentationTests
 
         Assert.False(matches);
         Assert.Equal(0, spy.Recorded);
-        Assert.Equal(0, spy.Commits);
     }
 
     [Fact]
@@ -301,7 +292,6 @@ public sealed class PublishPresentationTests
 
         Assert.False(matches);
         Assert.Equal(0, spy.Recorded);
-        Assert.Equal(0, spy.Commits);
         Assert.Equal(["Title"], spy.Dialogs);
         Assert.Equal("Title", spy.Status);
     }
@@ -318,6 +308,5 @@ public sealed class PublishPresentationTests
 
         Assert.False(matches);
         Assert.Equal(0, spy.Recorded);
-        Assert.Equal(0, spy.Commits);
     }
 }

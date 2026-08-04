@@ -9,7 +9,6 @@ namespace AccessibilityModManager.AuthorTool.Services;
 /// not describe the folder is what lets a later project-open replace unpublished work.
 /// </param>
 /// <param name="ShowDialog">Title then message, both read aloud.</param>
-/// <param name="CommitHistoryAsync">The best-effort local git commit.</param>
 /// <param name="SetStatus">The status line, which is a screen-reader live region.</param>
 /// <param name="OfferSigningSetup">
 /// Asks whether to open the catalog-signing screen, and opens it on yes. Only ever reached when the
@@ -23,7 +22,6 @@ namespace AccessibilityModManager.AuthorTool.Services;
 public readonly record struct PublishEffects(
     Action RecordPublishedSource,
     Action<string, string> ShowDialog,
-    Func<Task> CommitHistoryAsync,
     Action<string> SetStatus,
     Action? OfferSigningSetup = null,
     Action? OfferKeyBackup = null);
@@ -63,7 +61,6 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
     public bool RecordLocalSourceAsPublished { get; init; }
 
     /// <summary>Whether to make the local git commit that records what went out.</summary>
-    public bool CommitLocalHistory { get; init; }
 
     /// <summary>
     /// Whether to tell the author their key backup no longer covers what it was taken for. True
@@ -105,7 +102,6 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
                 {
                     CatalogMatchesLocal = result.LocalSourceIsLive,
                     RecordLocalSourceAsPublished = result.LocalSourceIsLive,
-                    CommitLocalHistory = result.LocalSourceIsLive,
                     PromptForFreshKeyBackup = result.StartedHistory
                 };
 
@@ -182,7 +178,6 @@ public sealed record PublishPresentation(bool ShowDialog, string StatusMessage)
 
         if (presentation.OfferSigningSetup) effects.OfferSigningSetup?.Invoke();
 
-        if (presentation.CommitLocalHistory) await effects.CommitHistoryAsync();
 
         // Last, so that what remains in the live region is what remains true after every dialog
         // has been dismissed.

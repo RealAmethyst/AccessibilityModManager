@@ -36,7 +36,12 @@
                 <Button Content="Server settings..."
                         Command="{Binding EditServerUploadSettingsCommand}"
                         AutomationProperties.Name="Edit download server settings"
-                        AutomationProperties.HelpText="Your server's address and SSH key. This is what lets you host releases on your own server instead of GitHub, and it's where the registry and your index are published."
+                        AutomationProperties.HelpText="Your server's address and SSH key. This is what lets you host releases on your own server instead of GitHub. Whether this project's index is published there or committed to its GitHub repository is set separately, under publishing destination."
+                        Margin="0,0,8,0"/>
+                <Button Content="{Binding PublishDestinationLabel}"
+                        Command="{Binding ChangePublishDestinationCommand}"
+                        AutomationProperties.Name="{Binding PublishDestinationLabel}"
+                        AutomationProperties.HelpText="Where this project's index.json is published: committed and pushed to its GitHub repository, or uploaded to your server. Set per project, so one catalog going to GitHub never changes where another one goes."
                         Margin="0,0,8,0"/>
                 <Button Content="Catalog signing..."
                         Command="{Binding EditCatalogSigningCommand}"
@@ -49,7 +54,7 @@
                         Margin="0,0,8,0"/>
                 <Button Content="Publish index"
                         Command="{Binding PublishIndexCommand}"
-                        AutomationProperties.Name="Publish index to your server"
+                        AutomationProperties.Name="{Binding PublishButtonName}"
                         Margin="0,0,8,0"/>
                 <Button Content="Close project"
                         Command="{Binding CloseProjectCommand}"
