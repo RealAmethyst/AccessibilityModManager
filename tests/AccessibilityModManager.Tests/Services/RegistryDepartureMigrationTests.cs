@@ -25,6 +25,7 @@ public sealed class RegistryDepartureMigrationTests
             [],
             ["amethyst", "buu420"],
             Addresses("amethyst", "buu420"),
+            [],
             Now);
 
         var moved = Assert.Single(carried);
@@ -43,6 +44,7 @@ public sealed class RegistryDepartureMigrationTests
             [],
             ["amethyst"],
             Addresses("amethyst", "buu420"),
+            [],
             Now);
 
         Assert.Empty(carried);
@@ -56,6 +58,7 @@ public sealed class RegistryDepartureMigrationTests
             [],
             ["amethyst", "buu420"],
             Addresses("amethyst", "buu420"),
+            [],
             Now);
 
         Assert.Empty(carried);
@@ -69,7 +72,35 @@ public sealed class RegistryDepartureMigrationTests
             [TestUserSource.Accepted("buu420", "Buu")],
             ["buu420"],
             Addresses("buu420"),
+            [],
             Now);
+
+        Assert.Empty(carried);
+    }
+
+    [Fact]
+    public void A_developer_carried_over_before_is_never_carried_over_again()
+    {
+        // The defect Amethyst hit: she removed the carried-over source and the next refresh put it
+        // straight back, so "That source can't be added — you have already added a source using the
+        // developer id buu420" was about an entry she had just deleted. Carrying someone over is a
+        // ONE-TIME continuity event; after it, the decision is hers.
+        var carried = RegistryDepartureMigration.FindDepartures(
+            [TestPluginEntry.Unanchored("amethyst")],
+            [],                       // she removed it, so it is not a source any more
+            ["buu420"],               // his mods are still installed
+            Addresses("buu420"),
+            ["buu420"],               // but he has been carried over once already
+            Now);
+
+        Assert.Empty(carried);
+    }
+
+    [Fact]
+    public void The_already_carried_check_uses_the_same_id_rules_as_everything_else()
+    {
+        var carried = RegistryDepartureMigration.FindDepartures(
+            [], [], ["buu420"], Addresses("buu420"), ["BUU420"], Now);
 
         Assert.Empty(carried);
     }
@@ -85,6 +116,7 @@ public sealed class RegistryDepartureMigrationTests
             [],
             ["buu420"],
             Addresses("amethyst"),
+            [],
             Now);
 
         Assert.Empty(carried);
@@ -96,7 +128,7 @@ public sealed class RegistryDepartureMigrationTests
         // The user never saw the risk notice for one of these. Writing an acceptance timestamp
         // would be recording a decision they did not make.
         var moved = Assert.Single(RegistryDepartureMigration.FindDepartures(
-            [], [], ["buu420"], Addresses("buu420"), Now));
+            [], [], ["buu420"], Addresses("buu420"), [], Now));
 
         Assert.Null(moved.Source.NoticeAcceptedUtc);
         Assert.NotNull(moved.Source.MigratedFromRegistryUtc);
@@ -108,7 +140,7 @@ public sealed class RegistryDepartureMigrationTests
         // If the loader refused what the migration writes, the developer would be carried over,
         // announced, and then silently dropped on the next start.
         var moved = Assert.Single(RegistryDepartureMigration.FindDepartures(
-            [], [], ["buu420"], Addresses("buu420"), Now));
+            [], [], ["buu420"], Addresses("buu420"), [], Now));
 
         var accepted = UserPluginSourceValidation.Accept([moved.Source]);
         Assert.Single(accepted.Accepted);
@@ -121,7 +153,7 @@ public sealed class RegistryDepartureMigrationTests
         // The identity binding applies to a migrated source exactly as it does to an accepted one,
         // so a migration cannot be edited into pointing somewhere else.
         var moved = Assert.Single(RegistryDepartureMigration.FindDepartures(
-            [], [], ["buu420"], Addresses("buu420"), Now)).Source;
+            [], [], ["buu420"], Addresses("buu420"), [], Now)).Source;
         moved.IndexUrl = "https://somewhere-else.invalid/index.json";
 
         Assert.Single(UserPluginSourceValidation.Accept([moved]).Rejected);
@@ -133,6 +165,7 @@ public sealed class RegistryDepartureMigrationTests
         var carried = RegistryDepartureMigration.FindDepartures(
             [], [], ["buu420"],
             new Dictionary<string, string> { ["buu420"] = "http://example.invalid/index.json" },
+            [],
             Now);
 
         Assert.Empty(carried);
@@ -144,6 +177,7 @@ public sealed class RegistryDepartureMigrationTests
         var carried = RegistryDepartureMigration.FindDepartures(
             [], [], ["amethyst."],
             new Dictionary<string, string> { ["amethyst."] = "https://example.invalid/index.json" },
+            [],
             Now);
 
         Assert.Empty(carried);
@@ -159,6 +193,7 @@ public sealed class RegistryDepartureMigrationTests
             [],
             ["buu420"],
             Addresses("buu420"),
+            [],
             Now);
 
         Assert.Empty(carried);

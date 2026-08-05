@@ -130,6 +130,46 @@ public sealed class UserSourcesInModsListTests
     }
 
     [Fact]
+    public async Task Removing_a_carried_over_source_sticks()
+    {
+        // End to end, through the refresh, because that is where it went wrong: the removal itself
+        // always worked, and the next refresh undid it.
+        AppConfig? cfg = null;
+        var vm = Build(c =>
+        {
+            cfg = c;
+            c.KnownPluginAddresses["buu420"] = "https://example.invalid/buu420/index.json";
+        }, installed: ["amethyst", "buu420"]);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+        Assert.Single(cfg!.UserPluginSources);           // carried over once
+        Assert.Contains("buu420", cfg.CarriedOverPluginIds);
+
+        // The user removes it, then anything triggers another refresh.
+        cfg.UserPluginSources.Clear();
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+
+        Assert.Empty(cfg.UserPluginSources);
+    }
+
+    [Fact]
+    public async Task The_carry_over_is_announced_once_not_every_refresh()
+    {
+        AppConfig? cfg = null;
+        var vm = Build(c =>
+        {
+            cfg = c;
+            c.KnownPluginAddresses["buu420"] = "https://example.invalid/buu420/index.json";
+        }, installed: ["buu420"]);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+        Assert.Contains("kept as a source", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+        Assert.DoesNotContain("kept as a source", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task A_developer_who_leaves_with_NOTHING_installed_is_not_carried_over()
     {
         var vm = Build(c =>

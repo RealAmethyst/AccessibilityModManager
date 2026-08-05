@@ -211,7 +211,7 @@ public partial class GamesListViewModel : ObservableObject
             var installedPluginIds = await _receiptStore.InstalledPluginIdsAsync();
             var carried = RegistryDepartureMigration.FindDepartures(
                 registry.Plugins, config.UserPluginSources, installedPluginIds,
-                config.KnownPluginAddresses, DateTimeOffset.UtcNow);
+                config.KnownPluginAddresses, config.CarriedOverPluginIds, DateTimeOffset.UtcNow);
 
             if (carried.Count > 0)
             {
@@ -222,10 +222,17 @@ public partial class GamesListViewModel : ObservableObject
                     // back by hand, while this refresh was running.
                     var stillMissing = RegistryDepartureMigration.FindDepartures(
                         registry.Plugins, c.UserPluginSources, installedPluginIds,
-                        c.KnownPluginAddresses, DateTimeOffset.UtcNow);
+                        c.KnownPluginAddresses, c.CarriedOverPluginIds, DateTimeOffset.UtcNow);
 
                     foreach (var departure in stillMissing)
+                    {
                         c.UserPluginSources.Add(departure.Source);
+
+                        // Recorded in the SAME transaction as the add. Split, a crash in between
+                        // would leave the source added but not recorded, and the next refresh would
+                        // add it again.
+                        c.CarriedOverPluginIds.Add(departure.Source.PluginId);
+                    }
                 });
 
                 foreach (var departure in carried)

@@ -31,17 +31,28 @@ public static class RegistryDepartureMigration
     /// <param name="existingSources">Sources already configured, so nobody is carried over twice.</param>
     /// <param name="installedPluginIds">Plugin ids with something installed under them.</param>
     /// <param name="knownAddresses">Last index address the registry gave, by plugin id.</param>
+    /// <param name="alreadyCarriedOver">
+    /// Ids carried over before. Carrying someone over happens ONCE; after that the user decides.
+    /// Without this the migration re-adds a source the moment it is removed, which makes removing
+    /// one impossible and repeats the announcement on every refresh.
+    /// </param>
     public static IReadOnlyList<CarriedOverSource> FindDepartures(
         IEnumerable<PluginEntry> registryPlugins,
         IEnumerable<UserPluginSource> existingSources,
         IEnumerable<string> installedPluginIds,
         IReadOnlyDictionary<string, string> knownAddresses,
+        IEnumerable<string> alreadyCarriedOver,
         DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(registryPlugins);
         ArgumentNullException.ThrowIfNull(existingSources);
         ArgumentNullException.ThrowIfNull(installedPluginIds);
         ArgumentNullException.ThrowIfNull(knownAddresses);
+        ArgumentNullException.ThrowIfNull(alreadyCarriedOver);
+
+        var carriedBefore = alreadyCarriedOver
+            .Select(SafeId.Canonical)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var inRegistry = registryPlugins
             .Select(p => SafeId.Canonical(p.Id))
@@ -64,8 +75,12 @@ public static class RegistryDepartureMigration
             // Still listed: nothing to do. This is the ordinary case for everyone.
             if (inRegistry.Contains(key)) continue;
 
-            // Already carried over, or the user added them back themselves.
+            // Already there, either carried over earlier or added back by the user.
             if (alreadyASource.Contains(key)) continue;
+
+            // Carried over once before and since removed. That removal was a decision, and
+            // re-adding would overrule it every refresh — the user could never get rid of it.
+            if (carriedBefore.Contains(key)) continue;
 
             // No address on record — the manager never saw this developer under a registry that
             // named where their catalog lives, so there is nothing to point at. Their mods stay

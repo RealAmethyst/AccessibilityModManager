@@ -41,6 +41,17 @@ public sealed class AppConfig
     /// </summary>
     public Dictionary<string, string> KnownPluginAddresses { get; set; } = [];
 
+    /// <summary>
+    /// Developer ids that have already been carried over after leaving the signed registry.
+    ///
+    /// <para>Carrying someone over is a ONE-TIME continuity event, not a standing policy. Without
+    /// this record it repeats on every refresh — so removing a carried-over source does nothing at
+    /// all: it comes straight back, with its announcement, and the user cannot get rid of it. Once
+    /// an id is written here the decision belongs to the user, who can remove the source and have it
+    /// stay removed, or add it back themselves.</para>
+    /// </summary>
+    public List<string> CarriedOverPluginIds { get; set; } = [];
+
     public string DefaultChannel { get; set; } = "stable";
     public Dictionary<string, string> KnownGameOverrides { get; set; } = [];
 
