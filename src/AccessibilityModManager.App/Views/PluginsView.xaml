@@ -157,9 +157,13 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
+            <!-- No access key. An underscore here makes Alt+A, and a screen reader announces that
+                 accelerator after the label — it arrives as a stray "A" on the end of the field's
+                 description. Nothing else in this app uses one. -->
             <Label Grid.Column="0"
-                   Content="_Add a source"
+                   Content="Add a source"
                    Target="{Binding ElementName=NewSourceAddressBox}"
+                   AutomationProperties.Name="Add a source"
                    VerticalAlignment="Center"/>
 
             <TextBox Grid.Column="1"
