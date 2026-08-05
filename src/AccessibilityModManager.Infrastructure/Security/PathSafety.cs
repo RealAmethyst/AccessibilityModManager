@@ -1,3 +1,5 @@
+using AccessibilityModManager.Core.Models;
+
 namespace AccessibilityModManager.Infrastructure.Security;
 
 /// <summary>
@@ -148,14 +150,20 @@ public static class PathSafety
         // Deliberately NO trimming: callers persist the original value, so a padded id that
         // "passes after trim" would still reach dictionaries and folder names with whitespace
         // in it. Whitespace fails the charset check like any other unsafe character.
-        if (string.IsNullOrEmpty(value) || value == "." || value == ".." ||
-            !value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.' or '_'))
+        //
+        // The rule itself lives in Core.SafeId, because the catalog claim gate has to compare ids
+        // for identity and Core cannot see Infrastructure. Keeping a second copy here is what let
+        // the two drift apart before — and the charset check alone missed the cases that matter
+        // most on Windows: a trailing dot, which the OS strips so two "different" ids become one
+        // folder, and reserved device names like CON and NUL.
+        if (!SafeId.IsValid(value, out var reason))
         {
-            throw new InvalidOperationException(
-                $"{description} '{value}' must use only letters, digits, dashes, dots, and underscores " +
-                "(no spaces).");
+            throw new InvalidOperationException($"{description} '{value}' cannot be used because {reason}.");
         }
-        return value;
+        // Non-null by construction: IsValid refuses null and empty. Stated rather than assumed,
+        // so a future change to IsValid that stopped refusing them would fail here loudly instead
+        // of returning a null id into a path build.
+        return value ?? throw new InvalidOperationException($"{description} cannot be empty.");
     }
 
     /// <summary>

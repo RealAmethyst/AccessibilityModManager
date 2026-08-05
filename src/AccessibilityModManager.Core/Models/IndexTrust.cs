@@ -42,6 +42,22 @@ public enum IndexTrustStatus
     /// <summary>The registry names no signing key for this plugin — the unsigned path, unchanged.</summary>
     None,
 
+    /// <summary>
+    /// A source the USER added themselves, which no registry vouches for. Unsigned, like
+    /// <see cref="None"/>, and given the same capabilities once accepted — but deliberately its own
+    /// state rather than a reuse of it.
+    ///
+    /// <para>The two are different facts. <see cref="None"/> means "the signed registry lists this
+    /// plugin and names no key for it"; this means "no registry mentions it at all". Collapsing them
+    /// would leave nothing in the type saying where an entry came from, so every place that needs
+    /// to tell them apart would need a second, parallel flag — and two mechanisms that must agree
+    /// are how a gap opens. A registry entry can never be stamped with this state
+    /// (<see cref="PluginEntry.ResolveIndexTrust"/> refuses it) and a user source can never be
+    /// stamped with any other, so the pairing of origin and trust is decided once, at
+    /// construction.</para>
+    /// </summary>
+    UserApprovedUnsigned,
+
     /// <summary>The registry names a key this manager can verify against.</summary>
     Anchored,
 
@@ -93,6 +109,13 @@ public sealed record IndexTrustResolution
     public static readonly IndexTrustResolution Unresolved = new(IndexTrustStatus.Unresolved, null, null);
 
     public static readonly IndexTrustResolution NoAnchor = new(IndexTrustStatus.None, null, null);
+
+    /// <summary>
+    /// A user-added source: unsigned, and no registry vouches for it. Carries no anchor, because
+    /// there is nothing to anchor to — the user's decision to add it is the whole of its trust.
+    /// </summary>
+    public static readonly IndexTrustResolution UserApprovedUnsigned =
+        new(IndexTrustStatus.UserApprovedUnsigned, null, null);
 
     /// <summary>
     /// The arguments are checked at RUNTIME, not merely annotated. A private constructor stops an

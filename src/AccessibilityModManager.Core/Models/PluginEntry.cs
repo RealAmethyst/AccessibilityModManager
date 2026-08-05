@@ -46,6 +46,19 @@ public sealed class PluginEntry
                 nameof(resolution));
         }
 
+        // A registry entry is, by definition, one the signed registry vouches for. Stamping it with
+        // the user-source state would say the opposite while the entry still carried a registry id
+        // and a registry index URL — an entry claiming both provenances at once. Refused here so
+        // that the pairing cannot be written down, rather than being a rule each consumer has to
+        // remember to check.
+        if (resolution.Status == IndexTrustStatus.UserApprovedUnsigned)
+        {
+            throw new ArgumentException(
+                $"'{IndexTrustStatus.UserApprovedUnsigned}' belongs to sources the user added themselves. " +
+                $"A registry entry ('{Id}') cannot hold it — build a user source through its own factory instead.",
+                nameof(resolution));
+        }
+
         if (_indexTrust is not null)
         {
             throw new InvalidOperationException(

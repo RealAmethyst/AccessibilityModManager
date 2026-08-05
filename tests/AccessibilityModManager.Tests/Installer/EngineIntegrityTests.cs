@@ -765,6 +765,9 @@ public class EngineIntegrityTests : IDisposable
         public Task<List<string>> UnreadablePluginIdsForGameAsync(string gameId) =>
             Task.FromResult(new List<string>());
 
+        public Task<List<string>> InstalledPluginIdsAsync() =>
+            Task.FromResult(new List<string>());
+
         public string GetReceiptDirectory(string gameId, string pluginId) =>
             Path.Combine(_dirRoot, pluginId, gameId);
     }

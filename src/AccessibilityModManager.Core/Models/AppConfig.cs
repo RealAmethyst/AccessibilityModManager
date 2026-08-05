@@ -14,6 +14,18 @@ public sealed class AppConfig
     /// </summary>
     public string PluginRegistryUrl => "https://accessibilitymods.com/registry/plugin-registry.json";
 
+    /// <summary>
+    /// Catalogs the user added themselves, in the order they added them. That order is the rule for
+    /// who owns a plugin id when two sources want the same one, so nothing may sort this list in
+    /// place — display code sorts a copy.
+    ///
+    /// <para>Unlike <see cref="PluginRegistryUrl"/> this is genuinely user data and is
+    /// deserialized. That is safe because a source is only ever one author's INDEX: it contributes
+    /// a single plugin id and cannot introduce a second author or move the trust anchor. Adding a
+    /// source and redirecting the registry stay different operations.</para>
+    /// </summary>
+    public List<UserPluginSource> UserPluginSources { get; set; } = [];
+
     public string DefaultChannel { get; set; } = "stable";
     public Dictionary<string, string> KnownGameOverrides { get; set; } = [];
 

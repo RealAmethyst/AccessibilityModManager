@@ -23,4 +23,15 @@ public interface IReceiptStore
     /// uninstalls must not report "nothing to uninstall".
     /// </summary>
     Task<List<string>> UnreadablePluginIdsForGameAsync(string gameId);
+
+    /// <summary>
+    /// Every plugin id that has something installed under it, read from the receipt folder names.
+    ///
+    /// <para>Used to keep an identity reserved when no catalog offers it any more: a source removed
+    /// while its mods stayed installed leaves its receipts behind, and a different source taking
+    /// that id would inherit them. Deliberately reads the folder layout rather than the receipt
+    /// contents — the answer is "is this id spoken for", which the directory name already carries,
+    /// so an unreadable receipt still reserves its id instead of freeing it.</para>
+    /// </summary>
+    Task<List<string>> InstalledPluginIdsAsync();
 }

@@ -178,7 +178,7 @@ public sealed class CatalogNoticeTests
     {
         public PluginRepoIndex Index { get; set; } = index;
 
-        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default) =>
+        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromResult(new Fetched<PluginRepoIndex> { Value = Index });
 
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
@@ -242,7 +242,7 @@ public sealed class CatalogNoticeTests
 
     private sealed class ThrowingRepoClient(Exception failure) : IPluginRepoClient
     {
-        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default) =>
+        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromException<Fetched<PluginRepoIndex>>(failure);
 
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
@@ -254,7 +254,7 @@ public sealed class CatalogNoticeTests
 
     private sealed class StubRepoClient(Fetched<PluginRepoIndex> result) : IPluginRepoClient
     {
-        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default) =>
+        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromResult(result);
 
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
@@ -281,6 +281,7 @@ public sealed class CatalogNoticeTests
         public Task<List<InstallReceipt>> LoadAllForGameAsync(string gameId) => Task.FromResult(new List<InstallReceipt>());
         public string GetReceiptDirectory(string gameId, string pluginId) => "";
         public Task<List<string>> UnreadablePluginIdsForGameAsync(string gameId) => Task.FromResult(new List<string>());
+        public Task<List<string>> InstalledPluginIdsAsync() => Task.FromResult(new List<string>());
     }
 
     private sealed class StubVerifier : IGameVerifier

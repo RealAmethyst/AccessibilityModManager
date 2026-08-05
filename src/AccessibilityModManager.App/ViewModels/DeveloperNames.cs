@@ -24,10 +24,45 @@ public static class DeveloperNames
     /// row never announces a mod with no author at all.
     /// </summary>
     public static string Resolve(PluginRepoIndex? index, PluginEntry? entry, string pluginId)
+        => Resolve(index, entry, userSourceName: null, pluginId);
+
+    /// <summary>
+    /// As above, plus the name the user saw when they added a source. A user-added source has no
+    /// registry listing to fall back to, so without this its rows would announce a slug like
+    /// <c>buu420</c> instead of a person. It sits BELOW the index's own author block, which the
+    /// author still controls and keeps current, and above the bare id.
+    /// </summary>
+    public static string Resolve(
+        PluginRepoIndex? index, PluginEntry? entry, string? userSourceName, string pluginId)
         => Trimmed(index?.Author?.DisplayName)
            ?? Trimmed(entry?.Author)
            ?? Trimmed(entry?.Name)
+           ?? Trimmed(userSourceName)
            ?? pluginId;
+
+    /// <summary>
+    /// The name for a USER-ADDED source, which is not allowed to present itself under a reserved
+    /// name (see <see cref="ReservedDeveloperNames"/>).
+    ///
+    /// <para>The plugin id is the fallback when it tries. That is deliberately not a refusal of the
+    /// whole catalog: the name lives in a document the source re-serves on every refresh, so a
+    /// source could rename itself into a ban at any moment and simply vanish from the user's mods
+    /// list, which is a confusing outcome for something they chose to install. Announcing it by its
+    /// id instead is equally effective — the impersonation is what fails, not the source.</para>
+    ///
+    /// <para><paramref name="wasReserved"/> reports that it happened, so the refusal can be said out
+    /// loud rather than looking like the source simply having a scruffy name.</para>
+    /// </summary>
+    public static string ResolveUserSource(
+        PluginRepoIndex? index, string? savedName, string pluginId, out bool wasReserved)
+    {
+        var candidate = Trimmed(index?.Author?.DisplayName) ?? Trimmed(savedName);
+
+        wasReserved = ReservedDeveloperNames.IsReserved(candidate);
+        if (wasReserved) return pluginId;
+
+        return candidate ?? pluginId;
+    }
 
     private static string? Trimmed(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

@@ -53,6 +53,16 @@ public partial class GamesListViewModel : ObservableObject
     private Dictionary<string, PluginEntry> _lastPluginEntries = [];
 
     /// <summary>
+    /// Display names for user-added sources this refresh, by plugin id. A source has no registry
+    /// listing to fall back to, so without this a source the user saved as "Buu" announces as the
+    /// slug <c>buu420</c> whenever its index carries no author block.
+    /// </summary>
+    private Dictionary<string, string> _lastUserSourceNames = [];
+
+    /// <summary>Plugin ids that came from a source the user added, for this refresh.</summary>
+    private HashSet<string> _lastUserSourceIds = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Author filter ids the user has selected that aren't in the current filter list, because that
     /// developer's catalog failed to load or is fully gated this refresh. Held so persisting the
     /// filters doesn't silently drop a selection the user never cleared.
@@ -184,13 +194,37 @@ public partial class GamesListViewModel : ObservableObject
             // Verification makes refusals real, so they have to be said out loud.
             var unavailable = new List<string>();
 
-            foreach (var plugin in registry.Plugins)
+            // Sources caught presenting a reserved developer name this refresh. Collected while the
+            // rows are built and said once at the end, rather than once per mod.
+            var impersonators = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // The registry and the user's own sources become one ordered list here, and this is the
+            // only place that happens. The resolver seeds the registry's identities first, so a
+            // source can never publish under a plugin id the signed catalog already uses.
+            var accepted = UserPluginSourceValidation.Accept(config.UserPluginSources);
+            foreach (var dropped in accepted.Rejected)
+                unavailable.Add($"The source {dropped.Describe} wasn't loaded because {dropped.Reason}.");
+
+            var resolution = CatalogSourceResolver.Resolve(registry.Plugins, accepted.Accepted);
+            foreach (var refusal in resolution.Refused)
+                unavailable.Add($"{refusal.Describe} isn't being shown because {refusal.Reason}.");
+
+            _lastUserSourceIds = resolution.Sources
+                .Where(s => s.IsUserAdded)
+                .Select(s => s.PluginId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            _lastUserSourceNames = resolution.Sources
+                .Where(s => s.IsUserAdded && !string.IsNullOrWhiteSpace(s.UserDisplayName))
+                .ToDictionary(s => s.PluginId, s => s.UserDisplayName!, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var plugin in resolution.Sources)
             {
                 ct.ThrowIfCancellationRequested();
                 try
                 {
                     var indexFetch = await _repoClient.FetchPluginIndexAsync(plugin, ct);
-                    activeIndexes[plugin.Id] = indexFetch.Value;
+                    activeIndexes[plugin.PluginId] = indexFetch.Value;
 
                     if (indexFetch.LiveRejectionReason is { } rejected)
                     {
@@ -222,7 +256,7 @@ public partial class GamesListViewModel : ObservableObject
                     // offsets are useful. What gets SPOKEN is the reason alone — a screen reader
                     // reading out framework text is not a message, it is noise the user then has to
                     // decode.
-                    _logger.Warning(ex, "Failed to fetch index for plugin {PluginId}", plugin.Id);
+                    _logger.Warning(ex, "Failed to fetch index for plugin {PluginId}", plugin.PluginId);
                     unavailable.Add($"{DescribeDeveloper(plugin)}'s mods couldn't be loaded. " +
                                     CatalogRefusedException.SpeakableReason(ex));
                 }
@@ -307,10 +341,7 @@ public partial class GamesListViewModel : ObservableObject
                         GameDisplayName = game.DisplayName,
                         ModName = modName,
                         PluginId = pluginId,
-                        DeveloperName = DeveloperNames.Resolve(
-                            index,
-                            _lastPluginEntries.GetValueOrDefault(pluginId),
-                            pluginId),
+                        DeveloperName = ResolveDeveloperName(pluginId, index, impersonators),
                         IsDetected = install != null,
                         HasGameInstaller = game.Dependencies.Any(d => d.IsGameInstaller),
                         InstallPath = install?.InstallPath,
@@ -328,6 +359,16 @@ public partial class GamesListViewModel : ObservableObject
                 .ThenBy(r => r.ModName, StringComparer.OrdinalIgnoreCase))
             {
                 _allMods.Add(row);
+            }
+
+            // Said once per refresh, not once per mod. A source presenting a reserved name is the
+            // user's business — they chose to add it, and it just tried to pass itself off as
+            // someone else — so this leads the status line like any other refusal.
+            foreach (var pluginId in impersonators.OrderBy(id => id, StringComparer.Ordinal))
+            {
+                unavailable.Add(
+                    $"The source \"{pluginId}\" tried to use a developer name it isn't allowed to use, " +
+                    "so it's being shown by its id instead.");
             }
 
             RebuildFilters(config);
@@ -365,12 +406,90 @@ public partial class GamesListViewModel : ObservableObject
     }
 
     /// <summary>
+    /// The install this row will operate on, always described by THIS row's developer.
+    ///
+    /// <para>Several developers may define the same game — that is supported, and now includes
+    /// sources the user added, which nothing vouches for. The install this returns carries a
+    /// <see cref="GameDefinition"/>, and that definition supplies the dependencies, the setup
+    /// scripts and the text of the consent prompts for everything done next. Handing back another
+    /// developer's detection therefore hands them the operation: an unsigned source that declared a
+    /// registry game id could supply the dependency installer — possibly an elevated one — used
+    /// while installing the registry developer's mod, with the screen naming the registry developer
+    /// throughout.</para>
+    ///
+    /// <para>So another developer's detection contributes only the FOLDER. The definition always
+    /// comes from the row's own index, and the borrowed path is re-verified against it before it is
+    /// used. That also tightens the pre-existing case where one registry plugin could supply the
+    /// definition for another's row.</para>
+    /// </summary>
+    private GameInstall? ResolveOwnedInstall(ModItemViewModel mod, PluginRepoIndex pluginIndex)
+    {
+        // The row's own developer detected it: nothing is borrowed.
+        var own = _lastInstalls.FirstOrDefault(i =>
+            i.Game.GameId == mod.GameId && i.PluginId == mod.PluginId && i.IsValid);
+        if (own != null) return own;
+
+        // Someone else detected the same game. Take the location only.
+        var elsewhere = _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
+        if (elsewhere == null) return null;
+
+        var ownDefinition = pluginIndex.Games.FirstOrDefault(g => g.GameId == mod.GameId);
+        if (ownDefinition == null) return null;
+
+        // The borrowed folder has to satisfy THIS developer's idea of the game, not the one whose
+        // detection found it. Without this, a source could point a row at any folder its own probe
+        // rules happened to match.
+        if (!_gameVerifier.VerifyInstallPath(ownDefinition, elsewhere.InstallPath))
+        {
+            _logger.Information(
+                "Not using {OtherPlugin}'s detection of {GameId} for {OwnPlugin}: the folder doesn't verify against {OwnPlugin}'s own definition",
+                elsewhere.PluginId, mod.GameId, mod.PluginId);
+            return null;
+        }
+
+        return new GameInstall
+        {
+            Game = ownDefinition,
+            PluginId = mod.PluginId,
+            InstallPath = elsewhere.InstallPath,
+            IsValid = true,
+            DetectedVersion = elsewhere.DetectedVersion
+        };
+    }
+
+    /// <summary>
+    /// The developer name for one row. A user-added source may not present itself under a reserved
+    /// name; anything from the signed registry is left exactly as it is.
+    /// </summary>
+    private string ResolveDeveloperName(
+        string pluginId, PluginRepoIndex index, HashSet<string> impersonators)
+    {
+        if (!_lastUserSourceIds.Contains(pluginId))
+        {
+            return DeveloperNames.Resolve(index, _lastPluginEntries.GetValueOrDefault(pluginId), pluginId);
+        }
+
+        var name = DeveloperNames.ResolveUserSource(
+            index, _lastUserSourceNames.GetValueOrDefault(pluginId), pluginId, out var wasReserved);
+
+        if (wasReserved) impersonators.Add(pluginId);
+        return name;
+    }
+
+    /// <summary>
     /// How a developer is named when their catalog can't be loaded. Their index is exactly what
     /// failed to arrive, so there is no display name to prefer here — the registry entry is all
     /// there is, which is what <see cref="DeveloperNames"/> falls back to.
     /// </summary>
     private static string DescribeDeveloper(PluginEntry plugin)
         => DeveloperNames.Resolve(index: null, plugin, plugin.Id);
+
+    /// <summary>
+    /// Same question for a catalog that may have come from the registry or from the user. A user
+    /// source has no registry listing, so its saved display name stands in before the bare id.
+    /// </summary>
+    private static string DescribeDeveloper(CatalogSource source)
+        => DeveloperNames.Resolve(index: null, source.RegistryEntry, source.UserDisplayName, source.PluginId);
 
     /// <summary>
     /// Q3=A: a release is visible if it isn't Patreon-gated, or if the user is currently
@@ -431,13 +550,7 @@ public partial class GamesListViewModel : ObservableObject
 
         if (mod.IsDetected)
         {
-            // Prefer the install detected under THIS row's plugin: several plugins can define
-            // the same game, and the GameInstall carries its plugin's definition (mod name and
-            // more), which flows into consent prompts. Any-plugin detection remains the
-            // fallback — the physical game is the same folder either way.
-            var install = _lastInstalls.FirstOrDefault(i =>
-                              i.Game.GameId == mod.GameId && i.PluginId == mod.PluginId && i.IsValid)
-                          ?? _lastInstalls.FirstOrDefault(i => i.Game.GameId == mod.GameId && i.IsValid);
+            var install = ResolveOwnedInstall(mod, pluginIndex);
             if (install == null) return;
             _navigateToDetails(install, scoped, owner);
         }

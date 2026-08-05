@@ -185,6 +185,63 @@ public sealed class ReceiptStore : IReceiptStore
     public string GetReceiptDirectory(string gameId, string pluginId) =>
         PathSafety.CombineContained(_root, pluginId, gameId);
 
+    /// <summary>
+    /// Plugin ids with something installed, taken from the top-level receipt folder names — the
+    /// layout is <c>{root}/{pluginId}/{gameId}/receipt.json</c>, so the directory name IS the id.
+    ///
+    /// <para>Reads names only. The question is whether an identity is spoken for, and a receipt too
+    /// damaged to parse still means it is — so an unreadable one reserves its id rather than
+    /// quietly freeing it for someone else to claim.</para>
+    /// </summary>
+    public Task<List<string>> InstalledPluginIdsAsync()
+    {
+        if (!Directory.Exists(_root)) return Task.FromResult(new List<string>());
+
+        try
+        {
+            // A folder alone is not an install. DeleteAsync removes the receipt and its sidecars but
+            // leaves the {pluginId}/{gameId} directories behind, so counting bare directories would
+            // reserve the id of a developer whose mods were ALL uninstalled — permanently, and
+            // invisibly, because nothing would ever clean it up. Requiring a file underneath means
+            // the reservation lasts exactly as long as something is actually installed.
+            var ids = Directory.EnumerateDirectories(_root)
+                .Where(HasAnyReceipt)
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!)
+                .ToList();
+            return Task.FromResult(ids);
+        }
+        catch (Exception ex)
+        {
+            // Failing to read the folder must not be read as "nothing is installed" — that would
+            // free every installed identity at once. Report none reserved is exactly the wrong
+            // answer, so this rethrows rather than swallowing.
+            _logger.Error(ex, "Couldn't enumerate receipt folders under {Root}", _root);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Whether a plugin folder still holds anything an install left behind — a receipt, its hash
+    /// sidecar, a preserved corrupt copy, or a cached uninstall script. A DAMAGED receipt counts:
+    /// the question is whether the identity is spoken for, and something too broken to parse is
+    /// still something to uninstall.
+    /// </summary>
+    private static bool HasAnyReceipt(string pluginDirectory)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(pluginDirectory, "*", SearchOption.AllDirectories).Any();
+        }
+        catch
+        {
+            // Unreadable means "cannot prove it is empty", and the safe answer to that is that the
+            // id stays reserved.
+            return true;
+        }
+    }
+
     private string GetReceiptPath(string pluginId, string gameId) =>
         PathSafety.CombineContained(_root, pluginId, gameId, "receipt.json");
 

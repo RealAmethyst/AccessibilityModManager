@@ -154,9 +154,9 @@ public class AuthorFilterRetentionTests
     /// <summary>Stands in for a developer whose catalog is refused or unreachable this refresh.</summary>
     private sealed class ThrowingRepoClient : IPluginRepoClient
     {
-        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default) =>
+        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromException<Fetched<PluginRepoIndex>>(
-                new CatalogRefusedException(plugin.Id, "Its signature didn't check out."));
+                new CatalogRefusedException(source.PluginId, "Its signature didn't check out."));
 
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
@@ -168,12 +168,12 @@ public class AuthorFilterRetentionTests
     /// <summary>A developer whose catalog loads fine and simply has nothing in it.</summary>
     private sealed class EmptyRepoClient : IPluginRepoClient
     {
-        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default) =>
+        public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromResult(new Fetched<PluginRepoIndex>
             {
                 Value = new PluginRepoIndex
                 {
-                    PluginId = plugin.Id,
+                    PluginId = source.PluginId,
                     RepoVersion = "1",
                     GeneratedAt = DateTime.UnixEpoch,
                     Games = [],
@@ -196,6 +196,9 @@ public class AuthorFilterRetentionTests
         public Task<List<InstallReceipt>> LoadAllForGameAsync(string gameId) => Task.FromResult(new List<InstallReceipt>());
         public Task<List<string>> UnreadablePluginIdsForGameAsync(string gameId) => Task.FromResult(new List<string>());
         public string GetReceiptDirectory(string gameId, string pluginId) => string.Empty;
+
+        public Task<List<string>> InstalledPluginIdsAsync() =>
+            Task.FromResult(new List<string>());
     }
 
     private sealed class StubVerifier : IGameVerifier

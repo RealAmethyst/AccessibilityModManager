@@ -62,15 +62,23 @@ public sealed class PluginRepoClient : IPluginRepoClient
         _replayStore = new ClaimReplayStore(Path.Combine(stateRoot, "claim-highwater"), logger);
     }
 
-    public async Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default)
+    /// <summary>
+    /// Convenience for a registry-listed plugin. A <see cref="PluginEntry"/> only ever comes from
+    /// the signed registry, so this is not a second path with its own trust decision — it builds the
+    /// one registry source that entry can possibly be.
+    /// </summary>
+    public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default)
+        => FetchPluginIndexAsync(CatalogSource.FromRegistry(plugin), ct);
+
+    public async Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default)
     {
-        UrlValidator.RequireHttps(plugin.RepoIndexUrl, $"plugin '{plugin.Id}' repo index");
+        UrlValidator.RequireHttps(source.IndexUrl, $"plugin '{source.PluginId}' repo index");
 
         // Before a byte is fetched. A plugin whose trust state is unknown or unusable has no catalog
         // this manager may read, and finding that out after downloading is finding it out late.
-        RequireUsableTrust(plugin);
+        RequireUsableTrust(source);
 
-        _logger.Information("Fetching repo index for plugin {PluginId} from {Url}", plugin.Id, plugin.RepoIndexUrl);
+        _logger.Information("Fetching repo index for plugin {PluginId} from {Url}", source.PluginId, source.IndexUrl);
 
         PluginRepoIndex index;
         try
@@ -78,7 +86,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
             byte[] bytes;
             try
             {
-                bytes = await FetchBoundedAsync(plugin, ct);
+                bytes = await FetchBoundedAsync(source, ct);
             }
             catch (Exception ex) when (PluginRegistryClient.IsNetworkFailure(ex, ct))
             {
@@ -86,15 +94,15 @@ public sealed class PluginRepoClient : IPluginRepoClient
                 // this machine accepted for THIS plugin. The cached copy is re-validated in full
                 // against the CURRENT (signed) registry entry — signature, identity binding, replay
                 // records — so the cache can't smuggle anything a live fetch would refuse.
-                return await LoadCachedIndexAsync(plugin, ex);
+                return await LoadCachedIndexAsync(source, ex);
             }
 
             // The acceptance and the snapshot that records it happen inside ONE transaction per trust
             // context. Split, two app copies can interleave: A accepts sequence 2 and stalls, B
             // accepts 3 and saves, A resumes and overwrites the snapshot with 2 — leaving durable
             // replay state at 3 and the only saved copy something it will correctly refuse offline.
-            index = await AcceptIndexAsync(plugin, bytes, fromCache: false,
-                onAccepted: () => SaveIndexCacheAsync(plugin, bytes));
+            index = await AcceptIndexAsync(source, bytes, fromCache: false,
+                onAccepted: () => SaveIndexCacheAsync(source, bytes));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -108,13 +116,13 @@ public sealed class PluginRepoClient : IPluginRepoClient
             // The bounded READ is inside this scope deliberately. It used to sit in its own try
             // above, so an oversized live body escaped past the fallback and the plugin vanished
             // instead of showing its saved verified catalog.
-            var lastVerified = await TryLastVerifiedAsync(plugin, ex);
+            var lastVerified = await TryLastVerifiedAsync(source, ex);
             if (lastVerified is not null) return lastVerified;
             throw;
         }
 
         _logger.Information("Fetched index for {PluginId}: {GameCount} games, {ReleaseCount} total releases",
-            plugin.Id, index.Games.Count,
+            source.PluginId, index.Games.Count,
             index.ReleasesByGameId.Values.Sum(r => r.Count));
 
         return new Fetched<PluginRepoIndex> { Value = index };
@@ -133,7 +141,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// user cancelling: cancellation propagates, while the deadline firing is classed as a network
     /// failure and is eligible for the saved copy.</para>
     /// </summary>
-    private async Task<byte[]> FetchBoundedAsync(PluginEntry plugin, CancellationToken ct)
+    private async Task<byte[]> FetchBoundedAsync(CatalogSource source, CancellationToken ct)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(_responseDeadline);
@@ -142,7 +150,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         // header-only revalidation hints for under-a-minute-old objects, so we make each
         // request a unique URL too — that forces the CDN to fetch origin and the
         // freshly-pushed index.json shows up immediately.
-        var bustedUrl = PluginRegistryClient.AppendCacheBuster(plugin.RepoIndexUrl);
+        var bustedUrl = PluginRegistryClient.AppendCacheBuster(source.IndexUrl);
         var request = new HttpRequestMessage(HttpMethod.Get, bustedUrl);
         request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true };
         request.Headers.Pragma.ParseAdd("no-cache");
@@ -155,7 +163,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
             request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
         response.EnsureSuccessStatusCode();
 
-        return await ReadBoundedAsync(response.Content, plugin.Id, deadline.Token);
+        return await ReadBoundedAsync(response.Content, source.PluginId, deadline.Token);
     }
 
     /// <summary>
@@ -170,14 +178,14 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// The last copy this machine accepted, re-run through the entire gate, or null when there isn't
     /// one that passes. Never advances anything: the offline path is check-only by construction.
     /// </summary>
-    private async Task<Fetched<PluginRepoIndex>?> TryLastVerifiedAsync(PluginEntry plugin, Exception liveFailure)
+    private async Task<Fetched<PluginRepoIndex>?> TryLastVerifiedAsync(CatalogSource source, Exception liveFailure)
     {
         try
         {
-            var cached = await LoadCachedIndexAsync(plugin, liveFailure);
+            var cached = await LoadCachedIndexAsync(source, liveFailure);
 
             _logger.Warning(liveFailure,
-                "Live catalog for {PluginId} refused; serving the last copy this machine accepted", plugin.Id);
+                "Live catalog for {PluginId} refused; serving the last copy this machine accepted", source.PluginId);
 
             return new Fetched<PluginRepoIndex>
             {
@@ -193,7 +201,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         {
             // No usable saved copy either. The live failure is the one worth reporting — it is what
             // actually happened — so this one is only logged.
-            _logger.Warning(ex, "No saved copy of {PluginId} could stand in for the refused live catalog", plugin.Id);
+            _logger.Warning(ex, "No saved copy of {PluginId} could stand in for the refused live catalog", source.PluginId);
             return null;
         }
     }
@@ -207,25 +215,45 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// a key that cannot be used; it refuses this plugin and leaves the rest of the catalog
     /// working.</para>
     /// </summary>
-    private static void RequireUsableTrust(PluginEntry plugin)
+    private static void RequireUsableTrust(CatalogSource source)
     {
-        var trust = plugin.IndexTrust;
+        var trust = source.Trust;
 
-        if (trust.Status == IndexTrustStatus.Unresolved)
+        // Exhaustive over (origin, trust status). A switch rather than a series of ifs so that
+        // adding an origin or a trust state later lands in the refusing default instead of
+        // slipping past the last `if` into the accepting path. A pairing nobody wrote down is not
+        // a permission.
+        switch (source.Kind, trust.Status)
         {
-            throw new InvalidOperationException(
-                $"The signing key for plugin '{plugin.Id}' was never looked up, so there is no way to " +
-                "tell whether its catalog should be signed. Refusing it.");
-        }
+            // Registry-listed and signed: claim verification and the replay store apply below.
+            case (CatalogSourceKind.Registry, IndexTrustStatus.Anchored):
+            // Registry-listed with no key named: the unsigned path, unchanged.
+            case (CatalogSourceKind.Registry, IndexTrustStatus.None):
+            // Added by the user, who was told what it can do. Unsigned by design, and never
+            // anchored — CatalogSource.FromUserSource is the only way to build one.
+            case (CatalogSourceKind.UserAdded, IndexTrustStatus.UserApprovedUnsigned):
+                return;
 
-        if (trust.Status == IndexTrustStatus.Unusable)
-        {
-            // The reason comes from the registry reader and is already written to be read aloud. It
-            // is quoted rather than re-worded, because whoever surfaces it adds the framing — the
-            // AuthorTool says it to a publisher, the manager to a user.
-            throw new InvalidOperationException(
-                $"The registry's signing key for this developer can't be used — {trust.Reason}. The " +
-                "registry needs fixing before their mods can appear.");
+            case (CatalogSourceKind.Registry, IndexTrustStatus.Unresolved):
+                throw new InvalidOperationException(
+                    $"The signing key for plugin '{source.PluginId}' was never looked up, so there is no way to " +
+                    "tell whether its catalog should be signed. Refusing it.");
+
+            case (CatalogSourceKind.Registry, IndexTrustStatus.Unusable):
+                // The reason comes from the registry reader and is already written to be read aloud. It
+                // is quoted rather than re-worded, because whoever surfaces it adds the framing — the
+                // AuthorTool says it to a publisher, the manager to a user.
+                throw new InvalidOperationException(
+                    $"The registry's signing key for this developer can't be used — {trust.Reason}. The " +
+                    "registry needs fixing before their mods can appear.");
+
+            default:
+                // A user source claiming to be anchored, a registry entry holding the user state, an
+                // unset origin, or a state added to the enum since this was written. All of these are
+                // meant to be unconstructable; if one arrives, refusing is the only safe reading.
+                throw new InvalidOperationException(
+                    $"The catalog for '{source.PluginId}' arrived as {source.Kind} with trust {trust.Status}, " +
+                    "which is not a combination this manager reads. Refusing it.");
         }
     }
 
@@ -271,22 +299,22 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// write goes here so it cannot be reordered against another app copy's acceptance.
     /// </param>
     private async Task<PluginRepoIndex> AcceptIndexAsync(
-        PluginEntry plugin, byte[] bytes, bool fromCache, Func<Task>? onAccepted = null)
+        CatalogSource source, byte[] bytes, bool fromCache, Func<Task>? onAccepted = null)
     {
         if (bytes.Length > ClaimProof.MaxIndexBytes)
         {
             throw new InvalidOperationException(
-                $"The catalog for plugin '{plugin.Id}' is larger than {ClaimProof.MaxIndexBytes} bytes. Refusing it.");
+                $"The catalog for plugin '{source.PluginId}' is larger than {ClaimProof.MaxIndexBytes} bytes. Refusing it.");
         }
 
-        if (plugin.IndexTrust.Status != IndexTrustStatus.Anchored)
+        if (source.Trust.Status != IndexTrustStatus.Anchored)
         {
-            var unsigned = ValidateIndex(plugin, DecodeUnsigned(bytes, plugin.Id));
+            var unsigned = ValidateIndex(source, DecodeUnsigned(bytes, source.PluginId));
             if (onAccepted is not null) await onAccepted();
             return unsigned;
         }
 
-        var anchor = plugin.IndexTrust.Anchor!;
+        var anchor = source.Trust.Anchor!;
 
         ClaimProofDocument? proofDocument;
         try
@@ -295,13 +323,13 @@ public sealed class PluginRepoClient : IPluginRepoClient
         }
         catch (ClaimFormatException ex)
         {
-            throw new CatalogRefusedException(plugin.Id,
+            throw new CatalogRefusedException(source.PluginId,
                 $"Its signature block couldn't be read: {ex.Message}.", ex);
         }
 
         if (proofDocument is null)
         {
-            throw new CatalogRefusedException(plugin.Id,
+            throw new CatalogRefusedException(source.PluginId,
                 "The registry says this developer signs their catalog, and the catalog served carries " +
                 "no signature at all.");
         }
@@ -313,7 +341,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         }
         catch (ClaimFormatException ex)
         {
-            throw new CatalogRefusedException(plugin.Id,
+            throw new CatalogRefusedException(source.PluginId,
                 $"Its signature didn't check out: {ex.Message}.", ex);
         }
 
@@ -321,7 +349,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         // is free to rewrite it, and anyone acting on the published catalog has to read it from the
         // claims instead of from what they were handed. Built BEFORE the records advance, so a
         // catalog that fails validation never leaves a record saying it was accepted.
-        var index = ValidateIndex(plugin, proof.CatalogJson);
+        var index = ValidateIndex(source, proof.CatalogJson);
 
         // After verification, before anything is shown. A perfectly signed proof can still be an old
         // one replayed to undo a withdrawal.
@@ -354,7 +382,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// The single acceptance gate for an index, shared by the network and cache paths: identity
     /// binding to the signed registry entry, safe-id checks, and per-release validation.
     /// </summary>
-    private PluginRepoIndex ValidateIndex(PluginEntry plugin, string json)
+    private PluginRepoIndex ValidateIndex(CatalogSource source, string json)
     {
         // THE validation lives in PluginIndexValidation, shared with the AuthorTool so the
         // author's own checks match exactly what this client enforces. Trust violations refuse
@@ -363,18 +391,18 @@ public sealed class PluginRepoClient : IPluginRepoClient
         IndexValidationReport report;
         try
         {
-            report = PluginIndexValidation.Validate(plugin.Id, json);
+            report = PluginIndexValidation.Validate(source.PluginId, json);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
             // A parser's message names CLR types, JSON paths, line numbers and byte offsets. That
             // belongs in the log, not read aloud to somebody who asked for a list of mods.
-            throw new CatalogRefusedException(plugin.Id,
+            throw new CatalogRefusedException(source.PluginId,
                 "Its catalog isn't in a form the manager can read.", ex);
         }
 
         if (report.TrustErrors.Count > 0)
-            throw new CatalogRefusedException(plugin.Id, report.TrustErrors[0]);
+            throw new CatalogRefusedException(source.PluginId, report.TrustErrors[0]);
 
         foreach (var problem in report.UnobtainableReleases)
         {
@@ -429,15 +457,26 @@ public sealed class PluginRepoClient : IPluginRepoClient
     /// device names like <c>CON</c> exist), so raw ids could collide or misbehave as file names.
     /// The id is still re-validated as a safe segment — defense in depth, not a path ingredient.
     /// </summary>
-    private string IndexCachePath(string pluginId)
+    /// <param name="kind">
+    /// Origin is part of the path, so a registry plugin and a user-added source can never resolve to
+    /// the same cache file. The claim gate should stop them sharing an id at all, but the cache must
+    /// not depend on a rule enforced a layer up: two catalogs writing one file would each refuse the
+    /// other's copy on the stored-source-URL check and both would lose their offline catalog
+    /// permanently, which reads as an unrelated caching bug. Existing files keep the registry path,
+    /// so no cache is orphaned by this.
+    /// </param>
+    private string IndexCachePath(string pluginId, CatalogSourceKind kind)
     {
         PathSafety.EnsureSafeId(pluginId, "plugin id");
         var nameHash = Convert.ToHexStringLower(
             SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(pluginId)))[..32];
-        return Path.Combine(_cacheDirectory, nameHash + ".json");
+
+        return kind == CatalogSourceKind.UserAdded
+            ? Path.Combine(_cacheDirectory, "user", nameHash + ".json")
+            : Path.Combine(_cacheDirectory, nameHash + ".json");
     }
 
-    private async Task SaveIndexCacheAsync(PluginEntry plugin, byte[] indexBytes)
+    private async Task SaveIndexCacheAsync(CatalogSource source, byte[] indexBytes)
     {
         try
         {
@@ -445,25 +484,25 @@ public sealed class PluginRepoClient : IPluginRepoClient
             {
                 Version = CacheEnvelopeVersion,
                 FetchedAtUtc = DateTimeOffset.UtcNow,
-                SourceUrl = plugin.RepoIndexUrl.AbsoluteUri,
+                SourceUrl = source.IndexUrl.AbsoluteUri,
                 IndexBase64 = Convert.ToBase64String(indexBytes)
             };
             var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, JsonOptions);
-            await AtomicJson.WriteAtomicAsync(IndexCachePath(plugin.Id), bytes);
+            await AtomicJson.WriteAtomicAsync(IndexCachePath(source.PluginId, source.Kind), bytes);
         }
         catch (Exception ex)
         {
             // Best-effort — a cache write problem must never fail a good fetch.
-            _logger.Warning(ex, "Couldn't save the offline cache for plugin index {PluginId}", plugin.Id);
+            _logger.Warning(ex, "Couldn't save the offline cache for plugin index {PluginId}", source.PluginId);
         }
     }
 
-    private async Task<Fetched<PluginRepoIndex>> LoadCachedIndexAsync(PluginEntry plugin, Exception networkError)
+    private async Task<Fetched<PluginRepoIndex>> LoadCachedIndexAsync(CatalogSource source, Exception networkError)
     {
         IndexCacheEnvelope? envelope = null;
         try
         {
-            var path = IndexCachePath(plugin.Id);
+            var path = IndexCachePath(source.PluginId, source.Kind);
             if (File.Exists(path))
             {
                 envelope = JsonSerializer.Deserialize<IndexCacheEnvelope>(
@@ -472,7 +511,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Offline cache for plugin index {PluginId} is unreadable", plugin.Id);
+            _logger.Warning(ex, "Offline cache for plugin index {PluginId} is unreadable", source.PluginId);
         }
 
         // A copy written before this manager verified anything carries the plaintext catalog and no
@@ -483,14 +522,14 @@ public sealed class PluginRepoClient : IPluginRepoClient
             string.IsNullOrEmpty(legacy ? envelope.IndexJson : envelope.IndexBase64))
         {
             throw new InvalidOperationException(
-                $"Couldn't reach the index for plugin '{plugin.Id}' ({networkError.Message}) and no offline " +
+                $"Couldn't reach the index for plugin '{source.PluginId}' ({networkError.Message}) and no offline " +
                 "copy is saved yet.", networkError);
         }
 
-        if (legacy && plugin.IndexTrust.Status == IndexTrustStatus.Anchored)
+        if (legacy && source.Trust.Status == IndexTrustStatus.Anchored)
         {
             throw new InvalidOperationException(
-                $"Couldn't reach the index for plugin '{plugin.Id}' ({networkError.Message}), and the saved " +
+                $"Couldn't reach the index for plugin '{source.PluginId}' ({networkError.Message}), and the saved " +
                 "offline copy was made before this version checked signatures, so it carries none to " +
                 "check. Connect to the internet and refresh.", networkError);
         }
@@ -500,7 +539,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         {
             // Exact textual identity: URI paths can be case-sensitive, so a re-point that only
             // changes case must still invalidate the cache.
-            if (!string.Equals(envelope.SourceUrl, plugin.RepoIndexUrl.AbsoluteUri, StringComparison.Ordinal))
+            if (!string.Equals(envelope.SourceUrl, source.IndexUrl.AbsoluteUri, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     "the saved copy came from a different index address than the signed registry now points at");
@@ -510,7 +549,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
             {
                 // Unanchored, by the check above. Nothing was ever verified about this catalog and
                 // nothing is being skipped — the same path it has always taken.
-                index = ValidateIndex(plugin, envelope.IndexJson);
+                index = ValidateIndex(source, envelope.IndexJson);
             }
             else
             {
@@ -531,19 +570,19 @@ public sealed class PluginRepoClient : IPluginRepoClient
 
                 // checkOnly: a cached copy may only REPLAY an acceptance this machine provably made,
                 // so every claim in it must already be recorded, and none of them advance anything.
-                index = await AcceptIndexAsync(plugin, cachedBytes, fromCache: true);
+                index = await AcceptIndexAsync(source, cachedBytes, fromCache: true);
             }
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Offline cache for plugin index {PluginId} failed validation; refusing it", plugin.Id);
+            _logger.Warning(ex, "Offline cache for plugin index {PluginId} failed validation; refusing it", source.PluginId);
             throw new InvalidOperationException(
-                $"Couldn't reach the index for plugin '{plugin.Id}' ({networkError.Message}), and the saved " +
+                $"Couldn't reach the index for plugin '{source.PluginId}' ({networkError.Message}), and the saved " +
                 $"offline copy was rejected ({ex.Message}).", networkError);
         }
 
         _logger.Information("Offline: serving cached index for {PluginId} fetched {At}",
-            plugin.Id, envelope.FetchedAtUtc);
+            source.PluginId, envelope.FetchedAtUtc);
 
         return new Fetched<PluginRepoIndex>
         {
