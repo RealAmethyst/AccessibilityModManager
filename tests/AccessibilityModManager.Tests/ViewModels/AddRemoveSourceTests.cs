@@ -166,8 +166,11 @@ public sealed class AddRemoveSourceTests
     }
 
     [Fact]
-    public async Task Declining_the_removal_keeps_the_source()
+    public async Task Declining_the_removal_keeps_the_source_AND_says_so()
     {
+        // The silence was the actual bug Amethyst hit. Declining returned without a word, so a
+        // removal that never ran was indistinguishable from one that had — she went on to try
+        // adding the source back and was told the id was already in use.
         var config = new AppConfig();
         config.UserPluginSources.Add(TestUserSource.Accepted("buu420", "Buu"));
 
@@ -177,6 +180,36 @@ public sealed class AddRemoveSourceTests
         await vm.RemoveSourceCommand.ExecuteAsync(Assert.Single(vm.UserSources));
 
         Assert.Single(config.UserPluginSources);
+        Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement));
+        Assert.Contains("kept", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Removing_with_nothing_selected_says_so_rather_than_doing_nothing()
+    {
+        var vm = Build(new AppConfig(), confirmRisk: _ => true);
+
+        await vm.RemoveSourceCommand.ExecuteAsync(null);
+
+        Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement));
+    }
+
+    [Fact]
+    public async Task Every_removal_outcome_is_announced()
+    {
+        // Belt and braces on the rule that mattered: whichever way it goes, something is said.
+        foreach (var accepted in new[] { true, false })
+        {
+            var config = new AppConfig();
+            config.UserPluginSources.Add(TestUserSource.Accepted("buu420", "Buu"));
+            var vm = Build(config, confirmRisk: _ => true, confirmRemove: _ => accepted);
+            await vm.LoadPluginsCommand.ExecuteAsync(null);
+
+            await vm.RemoveSourceCommand.ExecuteAsync(Assert.Single(vm.UserSources));
+
+            Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement),
+                $"nothing was announced when the confirmation returned {accepted}");
+        }
     }
 
     [Fact]

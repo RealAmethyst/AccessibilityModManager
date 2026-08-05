@@ -142,8 +142,11 @@ public partial class App : Application
                     "Remove source",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Question,
-                    // The safe answer is the default, so a stray Enter keeps the source.
-                    MessageBoxResult.No) == MessageBoxResult.Yes);
+                    // Yes is the default, unlike the ADD notice where Cancel is. Getting here takes
+                    // a deliberate press of Remove, nothing on disk is touched — installed mods stay
+                    // and stay uninstallable — and the source can be added back. Defaulting to No
+                    // meant Enter silently undid the action the user had just chosen.
+                    MessageBoxResult.Yes) == MessageBoxResult.Yes);
 
             var gamesListVm = new GamesListViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),

@@ -177,8 +177,27 @@ public partial class PluginsViewModel : ObservableObject
     [RelayCommand]
     private async Task RemoveSourceAsync(UserSourceItemViewModel? source)
     {
-        if (source is null || _confirmRemove is null) return;
-        if (!_confirmRemove(source.DisplayName)) return;
+        // Every exit from here says something. Silence after pressing a button is the worst outcome
+        // on a screen reader: it is indistinguishable from success, and it is exactly what happened —
+        // declining the confirmation returned without a word, so a removal that never ran looked
+        // like one that had.
+        if (source is null)
+        {
+            Report("Select the source you want to remove first.");
+            return;
+        }
+
+        if (_confirmRemove is null)
+        {
+            Report("Couldn't remove that source.");
+            return;
+        }
+
+        if (!_confirmRemove(source.DisplayName))
+        {
+            Report($"{source.DisplayName} was kept. Nothing was removed.");
+            return;
+        }
 
         try
         {
