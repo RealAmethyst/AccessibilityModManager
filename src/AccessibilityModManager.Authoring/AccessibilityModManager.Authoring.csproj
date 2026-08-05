@@ -17,4 +17,8 @@
     <AssemblyName>AccessibilityModManager.Authoring</AssemblyName>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(RegistryAdmin)' == 'true'">
+    <DefineConstants>$(DefineConstants);REGISTRY_ADMIN</DefineConstants>
+  </PropertyGroup>
+
 </Project>

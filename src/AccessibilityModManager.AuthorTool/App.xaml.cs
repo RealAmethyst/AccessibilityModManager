@@ -61,6 +61,12 @@ public partial class App : Application
         services.AddSingleton<IndexPublishCoordinator>();
         services.AddSingleton<GitHubIndexPublisher>();
         services.AddSingleton<UnsignedPublishGate>();
+        services.AddSingleton<SigningCatalogSource>();
+        services.AddSingleton<ISigningCatalogSource>(sp => sp.GetRequiredService<SigningCatalogSource>());
+        services.AddSingleton<SigningWorkflow>();
+        services.AddSingleton<ISigningWorkflow>(sp => sp.GetRequiredService<SigningWorkflow>());
+        services.AddSingleton<RegistryAdminWorkflow>();
+        services.AddSingleton<IRegistryAdminWorkflow>(sp => sp.GetRequiredService<RegistryAdminWorkflow>());
         services.AddSingleton<IndexWorkflow>();
         services.AddSingleton<IIndexWorkflow>(sp => sp.GetRequiredService<IndexWorkflow>());
 

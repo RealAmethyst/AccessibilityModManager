@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\AccessibilityModManager.Authoring\AccessibilityModManager.Authoring.csproj" />
+    <ProjectReference Include="..\AccessibilityModManager.Authoring\AccessibilityModManager.Authoring.csproj" AdditionalProperties="RegistryAdmin=$(RegistryAdmin)" />
     <ProjectReference Include="..\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
     <ProjectReference Include="..\AccessibilityModManager.Infrastructure\AccessibilityModManager.Infrastructure.csproj" />
   </ItemGroup>

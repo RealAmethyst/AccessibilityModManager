@@ -44,6 +44,8 @@ public static class Program
         IndexCommands.AddTo(root, services);
         PatreonCommands.AddTo(root, services);
         ServerCommands.AddTo(root, services);
+        SigningCommands.AddTo(root, services);
+        RegistryCommands.AddTo(root, services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);

@@ -20,6 +20,9 @@ public sealed record CliServiceOverrides(
     IPatreonWorkflow? PatreonWorkflow = null,
     IServerAuthorTransport? ServerAuthorTransport = null,
     IServerWorkflow? ServerWorkflow = null,
+    ISigningCatalogSource? SigningCatalogSource = null,
+    ISigningWorkflow? SigningWorkflow = null,
+    IRegistryAdminWorkflow? RegistryAdminWorkflow = null,
     HttpClient? HttpClient = null);
 
 public static class CliServices
@@ -84,6 +87,38 @@ public static class CliServices
         services.AddSingleton<IndexPublishCoordinator>();
         services.AddSingleton<GitHubIndexPublisher>();
         services.AddSingleton<UnsignedPublishGate>();
+
+        if (overrides.SigningCatalogSource is not null)
+        {
+            services.AddSingleton(overrides.SigningCatalogSource);
+        }
+        else
+        {
+            services.AddSingleton<SigningCatalogSource>();
+            services.AddSingleton<ISigningCatalogSource>(
+                sp => sp.GetRequiredService<SigningCatalogSource>());
+        }
+
+        if (overrides.SigningWorkflow is not null)
+        {
+            services.AddSingleton(overrides.SigningWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<SigningWorkflow>();
+            services.AddSingleton<ISigningWorkflow>(sp => sp.GetRequiredService<SigningWorkflow>());
+        }
+
+        if (overrides.RegistryAdminWorkflow is not null)
+        {
+            services.AddSingleton(overrides.RegistryAdminWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<RegistryAdminWorkflow>();
+            services.AddSingleton<IRegistryAdminWorkflow>(
+                sp => sp.GetRequiredService<RegistryAdminWorkflow>());
+        }
 
         services.AddSingleton<AuthorProjectContext>();
         services.AddSingleton<JsonPayloadService>();
