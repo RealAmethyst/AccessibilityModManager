@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/AccessibilityModManager.App/AccessibilityModManager.App.csproj" />
     <Project Path="src/AccessibilityModManager.Authoring/AccessibilityModManager.Authoring.csproj" />
+    <Project Path="src/AccessibilityModManager.AuthorCli/AccessibilityModManager.AuthorCli.csproj" />
     <Project Path="src/AccessibilityModManager.AuthorTool/AccessibilityModManager.AuthorTool.csproj" />
     <Project Path="src/AccessibilityModManager.Core/AccessibilityModManager.Core.csproj" />
     <Project Path="src/AccessibilityModManager.Infrastructure/AccessibilityModManager.Infrastructure.csproj" />

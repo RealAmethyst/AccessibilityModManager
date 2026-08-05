@@ -1,0 +1,107 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using AccessibilityModManager.Authoring.Workflows;
+
+namespace AccessibilityModManager.AuthorCli.Console;
+
+public sealed class OutcomeWriter
+{
+    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+
+    private readonly ICliConsole _console;
+
+    public OutcomeWriter(ICliConsole console)
+    {
+        _console = console ?? throw new ArgumentNullException(nameof(console));
+    }
+
+    public void Write<T>(WorkflowResult<T> result, bool json)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (json)
+        {
+            WriteJson(result);
+            return;
+        }
+
+        WriteHuman(result);
+    }
+
+    private void WriteHuman<T>(WorkflowResult<T> result)
+    {
+        var writer = result.ErrorKind == WorkflowErrorKind.None
+            ? _console.Out
+            : _console.Error;
+
+        if (result.Messages.Count > 0)
+        {
+            foreach (var message in result.Messages)
+            {
+                writer.WriteLine(message);
+            }
+
+            writer.Flush();
+            return;
+        }
+
+        if (result.Value is string text && text.Length > 0)
+        {
+            writer.WriteLine(text);
+            writer.Flush();
+            return;
+        }
+
+        writer.WriteLine(result.Status);
+        writer.Flush();
+    }
+
+    private void WriteJson<T>(WorkflowResult<T> result)
+    {
+        var writer = result.ErrorKind == WorkflowErrorKind.None
+            ? _console.Out
+            : _console.Error;
+
+        var payload = new JsonOutcome<T>
+        {
+            Status = result.Status,
+            Value = result.Value,
+            Messages = result.Messages,
+            ErrorKind = result.ErrorKind,
+            CompletedPhases = result.CompletedPhases is { Count: > 0 }
+                ? result.CompletedPhases
+                : null
+        };
+
+        writer.WriteLine(JsonSerializer.Serialize(payload, JsonOptions));
+        writer.Flush();
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        return options;
+    }
+
+    private sealed class JsonOutcome<T>
+    {
+        public required string Status { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public T? Value { get; init; }
+
+        public required IReadOnlyList<string> Messages { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public WorkflowErrorKind ErrorKind { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public IReadOnlyList<string>? CompletedPhases { get; init; }
+    }
+}

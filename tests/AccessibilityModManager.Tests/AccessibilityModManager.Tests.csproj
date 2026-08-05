@@ -16,6 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\AccessibilityModManager.AuthorCli\AccessibilityModManager.AuthorCli.csproj" />
     <ProjectReference Include="..\..\src\AccessibilityModManager.Authoring\AccessibilityModManager.Authoring.csproj" />
     <ProjectReference Include="..\..\src\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
     <ProjectReference Include="..\..\src\AccessibilityModManager.Infrastructure\AccessibilityModManager.Infrastructure.csproj" />
