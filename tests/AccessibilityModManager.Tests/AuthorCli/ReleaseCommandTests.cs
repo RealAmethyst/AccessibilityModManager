@@ -16,6 +16,7 @@ public sealed class ReleaseCommandTests : IDisposable
     private readonly IndexFileService _indexFiles = new(TestLogger.Create());
     private readonly ReleaseWorkflowTests.FakeGitHubService _github = new();
     private readonly ReleaseWorkflowTests.FakePublishedAssetProbe _assets = new();
+    private readonly FakeCompleteReleasePublishWorkflow _complete = new();
 
     public ReleaseCommandTests()
     {
@@ -94,10 +95,11 @@ public sealed class ReleaseCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task Release_publish_is_registered_but_reports_the_missing_index_phase()
+    public async Task Release_publish_invokes_the_complete_transaction()
     {
         var run = await InvokeAsync(
             ProjectArgs(
+                "--yes",
                 "release", "publish",
                 "--game", CatalogWorkflowTests.CatalogFixture.PrimaryGameId,
                 "--version", "1.0.0",
@@ -105,8 +107,8 @@ public sealed class ReleaseCommandTests : IDisposable
                 "--repo", "owner/repo",
                 "--zip", "missing.zip"));
 
-        Assert.Equal((int)CliExitCode.Conflict, run.ExitCode);
-        Assert.Contains("index publication", run.Stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal((int)CliExitCode.Success, run.ExitCode);
+        Assert.Equal(1, _complete.PublishCalls);
         Assert.Equal(0, _github.CreateCalls);
     }
 
@@ -168,7 +170,8 @@ public sealed class ReleaseCommandTests : IDisposable
             AuthorConfigDirectory: Path.Combine(_root, "config"),
             LogDirectory: Path.Combine(_root, "logs"),
             GitHubService: _github,
-            PublishedAssetProbe: _assets));
+            PublishedAssetProbe: _assets,
+            CompleteReleasePublishWorkflow: _complete));
 
         var exitCode = await Program.RunAsync(args, services);
         return new CliRunResult(exitCode, output.ToString(), error.ToString());
@@ -184,4 +187,41 @@ public sealed class ReleaseCommandTests : IDisposable
     }
 
     private sealed record CliRunResult(int ExitCode, string Stdout, string Stderr);
+
+    private sealed class FakeCompleteReleasePublishWorkflow : ICompleteReleasePublishWorkflow
+    {
+        public int PublishCalls { get; private set; }
+
+        public Task<WorkflowResult<CompleteReleasePublishPreview>> PreviewAsync(
+            CompleteReleasePublishRequest request,
+            CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public Task<WorkflowResult<CompleteReleasePublishResult>> PublishAsync(
+            CompleteReleasePublishRequest request,
+            bool confirmed,
+            CancellationToken ct)
+        {
+            PublishCalls++;
+            var release = new ModRelease
+            {
+                GameId = request.Release.GameId,
+                PluginId = request.Release.PluginId,
+                Version = request.Release.Version,
+                Channel = request.Release.Channel,
+                PackageUrl = new Uri("https://github.com/owner/repo/releases/download/v1.0.0/release.zip"),
+                Sha256 = new string('a', 64)
+            };
+            var phases = new[]
+            {
+                "projectLocked", "catalogReconciled", "packageValidated", "assetUploaded",
+                "releaseRecorded", "indexValidated", "indexSaved", "indexPublished", "liveVerified"
+            };
+            return Task.FromResult(new WorkflowResult<CompleteReleasePublishResult>(
+                "completeReleasePublished",
+                new CompleteReleasePublishResult(release, new string('b', 64), "test", phases),
+                new[] { "Published." },
+                completedPhases: phases));
+        }
+    }
 }

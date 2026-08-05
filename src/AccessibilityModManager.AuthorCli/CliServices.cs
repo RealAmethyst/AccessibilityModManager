@@ -12,7 +12,11 @@ public sealed record CliServiceOverrides(
     string? AuthorConfigDirectory = null,
     string? LogDirectory = null,
     IGitHubService? GitHubService = null,
-    IPublishedAssetProbe? PublishedAssetProbe = null);
+    IPublishedAssetProbe? PublishedAssetProbe = null,
+    IReleaseWorkflow? ReleaseWorkflow = null,
+    IIndexWorkflow? IndexWorkflow = null,
+    ICompleteReleasePublishWorkflow? CompleteReleasePublishWorkflow = null,
+    HttpClient? HttpClient = null);
 
 public static class CliServices
 {
@@ -39,6 +43,7 @@ public static class CliServices
         }
 
         services.AddSingleton<OutcomeWriter>();
+        services.AddSingleton(overrides.HttpClient ?? new HttpClient());
         services.AddSingleton<AuthorConfigService>(sp =>
             new AuthorConfigService(
                 sp.GetRequiredService<ILogger>(),
@@ -65,12 +70,50 @@ public static class CliServices
         services.AddSingleton<IndexFileService>();
         services.AddSingleton<ManifestBuilderService>();
         services.AddSingleton<Sha256HashService>();
+        services.AddSingleton<RegistryMembershipChecker>();
+        services.AddSingleton<ServerUploadService>();
+        services.AddSingleton<PublisherHeadStore>();
+        services.AddSingleton<ClaimSigningKeyStore>();
+        services.AddSingleton<IndexProofService>();
+        services.AddSingleton<ProjectReconciler>();
+        services.AddSingleton<IndexPublishCoordinator>();
+        services.AddSingleton<GitHubIndexPublisher>();
+        services.AddSingleton<UnsignedPublishGate>();
 
         services.AddSingleton<AuthorProjectContext>();
         services.AddSingleton<JsonPayloadService>();
         services.AddSingleton<CatalogWorkflow>();
         services.AddSingleton<PackageWorkflow>();
-        services.AddSingleton<ReleaseWorkflow>();
+        if (overrides.ReleaseWorkflow is not null)
+        {
+            services.AddSingleton(overrides.ReleaseWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<ReleaseWorkflow>();
+            services.AddSingleton<IReleaseWorkflow>(sp => sp.GetRequiredService<ReleaseWorkflow>());
+        }
+
+        if (overrides.IndexWorkflow is not null)
+        {
+            services.AddSingleton(overrides.IndexWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<IndexWorkflow>();
+            services.AddSingleton<IIndexWorkflow>(sp => sp.GetRequiredService<IndexWorkflow>());
+        }
+
+        if (overrides.CompleteReleasePublishWorkflow is not null)
+        {
+            services.AddSingleton(overrides.CompleteReleasePublishWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<CompleteReleasePublishWorkflow>();
+            services.AddSingleton<ICompleteReleasePublishWorkflow>(
+                sp => sp.GetRequiredService<CompleteReleasePublishWorkflow>());
+        }
 
         return services.BuildServiceProvider();
     }

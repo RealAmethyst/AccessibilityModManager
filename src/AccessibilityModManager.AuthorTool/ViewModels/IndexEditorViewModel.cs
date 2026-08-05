@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
@@ -47,6 +48,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly ProjectReconciler _reconciler;
     private readonly IndexPublishCoordinator _publishCoordinator;
     private readonly Action<string, RegistryTrustState> _showClaimSigningDialog;
+    private readonly IIndexWorkflow _indexWorkflow;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -193,6 +195,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         IndexPublishCoordinator publishCoordinator,
         GitHubIndexPublisher gitHubPublisher,
         UnsignedPublishGate unsignedGate,
+        IIndexWorkflow indexWorkflow,
         Action<string, RegistryTrustState> showClaimSigningDialog)
     {
         _gitHubPublisher = gitHubPublisher;
@@ -217,6 +220,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         _registryChecker = registryChecker;
         _reconciler = reconciler;
         _publishCoordinator = publishCoordinator;
+        _indexWorkflow = indexWorkflow;
         _showClaimSigningDialog = showClaimSigningDialog;
 
         _patreon.StateChanged += OnPatreonStateChanged;
@@ -1646,7 +1650,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// Writes <c>index.json</c> to disk, including all in-progress game edits. Returns false on
     /// failure (caller surfaces nothing extra; the dialog already showed an error).
     /// </summary>
-    private bool TrySaveIndexToDisk()
+    private async Task<bool> TrySaveIndexToDiskAsync()
     {
         try
         {
@@ -1658,9 +1662,21 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 GeneratedAt = DateTime.UtcNow,
                 Games = _index.Games,
                 ReleasesByGameId = _index.ReleasesByGameId,
-                Author = _index.Author
+                Author = _index.Author,
+                DependencyPresets = _index.DependencyPresets
             };
-            _indexFileService.Save(_projectPath, updated);
+
+            var saved = await _indexWorkflow.SaveAsync(
+                _projectPath,
+                updated,
+                dryRun: false,
+                CancellationToken.None);
+            if (saved.ErrorKind != WorkflowErrorKind.None)
+            {
+                _showInfoDialog("Save failed", string.Join(Environment.NewLine, saved.Messages));
+                return false;
+            }
+
             _index = updated;
             HasUnsavedChanges = false;
             return true;
@@ -1860,7 +1876,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private async Task PublishAfterReleaseChangeAsync(
         string commitMessage, PendingGateChange? gateChange = null)
     {
-        if (!TrySaveIndexToDisk())
+        if (!await TrySaveIndexToDiskAsync())
             return;
 
         var catalogMatches = await PublishToDestinationAsync(commitMessage, confirmFirst: true);

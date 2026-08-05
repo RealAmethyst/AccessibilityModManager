@@ -20,7 +20,8 @@ public static class ReleaseCommands
         var indexFiles = services.GetRequiredService<IndexFileService>();
         var payloads = services.GetRequiredService<JsonPayloadService>();
         var catalog = services.GetRequiredService<CatalogWorkflow>();
-        var workflow = services.GetRequiredService<ReleaseWorkflow>();
+        var workflow = services.GetRequiredService<IReleaseWorkflow>();
+        var completeWorkflow = services.GetRequiredService<ICompleteReleasePublishWorkflow>();
         var config = services.GetRequiredService<AuthorConfigService>();
 
         var release = new Command("release", "Read, edit, upload, or publish mod releases.");
@@ -175,10 +176,48 @@ public static class ReleaseCommands
         var publish = CreateUploadCommand(
             "publish",
             "Run the complete upload, catalog-save, and index-publication transaction.");
-        publish.SetAction((parseResult, _) =>
+        var indexMessage = new Option<string?>("--index-message")
         {
-            throw CatalogCommandSupport.Conflict(
-                "Complete release publish is waiting for the index publication phase. Use release upload for an upload-only operation until that phase is installed.");
+            Description = "Git commit message or server change summary for index publication."
+        };
+        publish.Options.Add(indexMessage);
+        publish.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var request = await BuildPublishRequestAsync(parseResult, projects, config, cancellationToken);
+            var destination = config.GetPublishDestination(request.ProjectPath, request.PluginId);
+            var completeRequest = new CompleteReleasePublishRequest(
+                request,
+                destination,
+                parseResult.GetValue(indexMessage) ?? $"Publish {request.GameId} {request.Version}",
+                CatalogCommandSupport.GetDryRun(parseResult));
+
+            if (completeRequest.DryRun)
+            {
+                var preview = await completeWorkflow.PreviewAsync(completeRequest, cancellationToken);
+                ThrowIfFailed(preview);
+                return CatalogCommandSupport.Complete(writer, parseResult, preview);
+            }
+
+            if (!CatalogCommandSupport.GetYes(parseResult))
+            {
+                var preview = await completeWorkflow.PreviewAsync(completeRequest, cancellationToken);
+                ThrowIfFailed(preview);
+                throw new WorkflowException(
+                    WorkflowErrorKind.Conflict,
+                    "confirmationRequired",
+                    new[]
+                    {
+                        $"Complete publication requires --yes after reviewing package destination {preview.Value!.Release.Repository} {preview.Value.Release.Tag} and catalog destination {preview.Value.Index.DestinationDescription}."
+                    });
+            }
+
+            var result = await completeWorkflow.PublishAsync(
+                completeRequest,
+                confirmed: true,
+                cancellationToken);
+            ThrowIfFailed(result);
+            config.SetGameSourceRepo(request.ProjectPath, request.GameId, request.SourceRepo);
+            return CatalogCommandSupport.Complete(writer, parseResult, result);
         });
 
         release.Subcommands.Add(list);

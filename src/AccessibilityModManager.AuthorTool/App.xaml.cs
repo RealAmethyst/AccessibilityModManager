@@ -61,6 +61,8 @@ public partial class App : Application
         services.AddSingleton<IndexPublishCoordinator>();
         services.AddSingleton<GitHubIndexPublisher>();
         services.AddSingleton<UnsignedPublishGate>();
+        services.AddSingleton<IndexWorkflow>();
+        services.AddSingleton<IIndexWorkflow>(sp => sp.GetRequiredService<IndexWorkflow>());
 
         services.AddTransient<ProjectPickerViewModel>();
         services.AddTransient<IndexEditorViewModel>();
@@ -158,6 +160,7 @@ public partial class App : Application
             sp.GetRequiredService<IndexPublishCoordinator>(),
             sp.GetRequiredService<GitHubIndexPublisher>(),
             sp.GetRequiredService<UnsignedPublishGate>(),
+            sp.GetRequiredService<IIndexWorkflow>(),
             (pluginId, trust) => ShowClaimSigningDialog(sp, pluginId, trust));
     }
 

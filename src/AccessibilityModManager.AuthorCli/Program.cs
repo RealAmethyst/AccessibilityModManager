@@ -41,6 +41,7 @@ public static class Program
         PackageCommands.AddTo(root, services);
         GitHubCommands.AddTo(root, services);
         ReleaseCommands.AddTo(root, services);
+        IndexCommands.AddTo(root, services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);

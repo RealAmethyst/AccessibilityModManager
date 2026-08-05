@@ -41,6 +41,18 @@ public sealed record PackageStageRequest(
     string LocalZipPath,
     string? AssetFileName);
 
+public interface IReleaseWorkflow
+{
+    Task<WorkflowResult<PreparedRelease>> StagePackageAsync(PackageStageRequest request, CancellationToken ct);
+    Task<WorkflowResult<ReleasePublishPreview>> PreviewAsync(ReleasePublishRequest request, CancellationToken ct);
+    Task<WorkflowResult<PreparedRelease>> PrepareAsync(ReleasePublishRequest request, CancellationToken ct);
+    Task<WorkflowResult<ReleasePublishResult>> PublishAsync(
+        PreparedRelease prepared,
+        ReleasePublishRequest request,
+        bool confirmed,
+        CancellationToken ct);
+}
+
 public sealed class PreparedRelease : IAsyncDisposable
 {
     private readonly string _tempDirectory;
@@ -105,7 +117,7 @@ public sealed class PreparedRelease : IAsyncDisposable
     }
 }
 
-public sealed class ReleaseWorkflow
+public sealed class ReleaseWorkflow : IReleaseWorkflow
 {
     private readonly IGitHubService _gitHub;
     private readonly IPublishedAssetProbe _assets;
