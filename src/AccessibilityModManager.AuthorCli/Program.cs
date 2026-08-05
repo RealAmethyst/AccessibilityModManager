@@ -42,6 +42,8 @@ public static class Program
         GitHubCommands.AddTo(root, services);
         ReleaseCommands.AddTo(root, services);
         IndexCommands.AddTo(root, services);
+        PatreonCommands.AddTo(root, services);
+        ServerCommands.AddTo(root, services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);

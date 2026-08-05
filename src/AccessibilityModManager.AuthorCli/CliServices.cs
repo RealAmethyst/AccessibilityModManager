@@ -16,6 +16,10 @@ public sealed record CliServiceOverrides(
     IReleaseWorkflow? ReleaseWorkflow = null,
     IIndexWorkflow? IndexWorkflow = null,
     ICompleteReleasePublishWorkflow? CompleteReleasePublishWorkflow = null,
+    IPatreonAuthorSession? PatreonAuthorSession = null,
+    IPatreonWorkflow? PatreonWorkflow = null,
+    IServerAuthorTransport? ServerAuthorTransport = null,
+    IServerWorkflow? ServerWorkflow = null,
     HttpClient? HttpClient = null);
 
 public static class CliServices
@@ -72,6 +76,7 @@ public static class CliServices
         services.AddSingleton<Sha256HashService>();
         services.AddSingleton<RegistryMembershipChecker>();
         services.AddSingleton<ServerUploadService>();
+        services.AddSingleton<PatreonAuthorService>();
         services.AddSingleton<PublisherHeadStore>();
         services.AddSingleton<ClaimSigningKeyStore>();
         services.AddSingleton<IndexProofService>();
@@ -113,6 +118,48 @@ public static class CliServices
             services.AddSingleton<CompleteReleasePublishWorkflow>();
             services.AddSingleton<ICompleteReleasePublishWorkflow>(
                 sp => sp.GetRequiredService<CompleteReleasePublishWorkflow>());
+        }
+
+        if (overrides.PatreonAuthorSession is not null)
+        {
+            services.AddSingleton(overrides.PatreonAuthorSession);
+        }
+        else
+        {
+            services.AddSingleton<PatreonAuthorSession>();
+            services.AddSingleton<IPatreonAuthorSession>(
+                sp => sp.GetRequiredService<PatreonAuthorSession>());
+        }
+
+        if (overrides.PatreonWorkflow is not null)
+        {
+            services.AddSingleton(overrides.PatreonWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<PatreonWorkflow>();
+            services.AddSingleton<IPatreonWorkflow>(sp => sp.GetRequiredService<PatreonWorkflow>());
+        }
+
+        if (overrides.ServerAuthorTransport is not null)
+        {
+            services.AddSingleton(overrides.ServerAuthorTransport);
+        }
+        else
+        {
+            services.AddSingleton<ServerAuthorTransport>();
+            services.AddSingleton<IServerAuthorTransport>(
+                sp => sp.GetRequiredService<ServerAuthorTransport>());
+        }
+
+        if (overrides.ServerWorkflow is not null)
+        {
+            services.AddSingleton(overrides.ServerWorkflow);
+        }
+        else
+        {
+            services.AddSingleton<ServerWorkflow>();
+            services.AddSingleton<IServerWorkflow>(sp => sp.GetRequiredService<ServerWorkflow>());
         }
 
         return services.BuildServiceProvider();

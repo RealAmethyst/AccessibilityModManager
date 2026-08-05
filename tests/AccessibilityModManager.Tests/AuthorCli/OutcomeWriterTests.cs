@@ -74,6 +74,21 @@ public sealed class OutcomeWriterTests
             json.RootElement.GetProperty("messages")[0].GetString());
     }
 
+    [Fact]
+    public void Json_output_preserves_false_value_type_results()
+    {
+        var console = new RecordingConsole();
+        var writer = new OutcomeWriter(console);
+        var result = new WorkflowResult<bool>("unchanged", false, Array.Empty<string>());
+
+        writer.Write(result, json: true);
+
+        Assert.Equal(
+            "{\"status\":\"unchanged\",\"value\":false,\"messages\":[]}" + Environment.NewLine,
+            console.Stdout);
+        Assert.Equal(string.Empty, console.Stderr);
+    }
+
     private sealed class RecordingConsole : ICliConsole
     {
         private readonly StringReader _input = new(string.Empty);

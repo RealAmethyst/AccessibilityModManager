@@ -113,6 +113,49 @@ public sealed class ReleaseCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Release_publish_accepts_server_and_Patreon_post_destinations_without_a_GitHub_repo()
+    {
+        var gatePath = WriteJson(new PatreonGate
+        {
+            CampaignId = "campaign-1",
+            TierIds = new List<string> { "tier-1" },
+            PostId = "12345"
+        });
+
+        var server = await InvokeAsync(
+            ProjectArgs(
+                "--yes",
+                "release", "publish",
+                "--game", CatalogWorkflowTests.CatalogFixture.PrimaryGameId,
+                "--version", "1.0.0",
+                "--channel", "stable",
+                "--zip", "missing.zip",
+                "--asset-destination", "server",
+                "--patreon-gate", gatePath));
+
+        Assert.Equal((int)CliExitCode.Success, server.ExitCode);
+        Assert.Equal(ReleaseAssetDestination.Server, _complete.LastRequest!.AssetDestination);
+        Assert.Equal("campaign-1", _complete.LastRequest.Release.Patreon!.CampaignId);
+        Assert.Equal(string.Empty, _complete.LastRequest.Release.SourceRepo);
+
+        var patreon = await InvokeAsync(
+            ProjectArgs(
+                "--yes",
+                "release", "publish",
+                "--game", CatalogWorkflowTests.CatalogFixture.PrimaryGameId,
+                "--version", "1.0.0",
+                "--channel", "stable",
+                "--zip", "missing.zip",
+                "--asset-destination", "patreon-post",
+                "--patreon-gate", gatePath,
+                "--patreon-attachment", "selection-123"));
+
+        Assert.Equal((int)CliExitCode.Success, patreon.ExitCode);
+        Assert.Equal(ReleaseAssetDestination.PatreonPost, _complete.LastRequest!.AssetDestination);
+        Assert.Equal("selection-123", _complete.LastRequest.PatreonAttachmentSelectionId);
+    }
+
+    [Fact]
     public async Task Github_status_repos_and_releases_are_available_without_touching_real_GitHub()
     {
         _github.Releases.Add(new GitHubRelease("v1.0.0", "Release", false, false));
@@ -191,6 +234,7 @@ public sealed class ReleaseCommandTests : IDisposable
     private sealed class FakeCompleteReleasePublishWorkflow : ICompleteReleasePublishWorkflow
     {
         public int PublishCalls { get; private set; }
+        public CompleteReleasePublishRequest? LastRequest { get; private set; }
 
         public Task<WorkflowResult<CompleteReleasePublishPreview>> PreviewAsync(
             CompleteReleasePublishRequest request,
@@ -203,6 +247,7 @@ public sealed class ReleaseCommandTests : IDisposable
             CancellationToken ct)
         {
             PublishCalls++;
+            LastRequest = request;
             var release = new ModRelease
             {
                 GameId = request.Release.GameId,

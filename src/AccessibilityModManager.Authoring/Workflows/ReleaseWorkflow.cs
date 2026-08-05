@@ -26,7 +26,11 @@ public sealed record ReleasePublishPreview(
     string AssetFileName,
     string Sha256,
     bool CreatesRelease,
-    bool ReplacesAsset);
+    bool ReplacesAsset)
+{
+    public ReleaseAssetDestination Destination { get; init; } = ReleaseAssetDestination.GitHub;
+    public string DestinationDescription { get; init; } = $"GitHub repository {Repository}, tag {Tag}";
+}
 
 public sealed record ReleasePublishResult(
     ModRelease Release,
@@ -65,6 +69,7 @@ public sealed class PreparedRelease : IAsyncDisposable
         string sha256,
         ReleasePublishPreview preview,
         ReleasePublishRequest? request,
+        PackageStageRequest packageRequest,
         bool assetAlreadyMatches)
     {
         _tempDirectory = tempDirectory;
@@ -73,6 +78,7 @@ public sealed class PreparedRelease : IAsyncDisposable
         Sha256 = sha256;
         Preview = preview;
         Request = request;
+        PackageRequest = packageRequest;
         AssetAlreadyMatches = assetAlreadyMatches;
     }
 
@@ -82,6 +88,7 @@ public sealed class PreparedRelease : IAsyncDisposable
     public FileStream Stream { get; }
 
     internal ReleasePublishRequest? Request { get; }
+    internal PackageStageRequest PackageRequest { get; }
     internal bool AssetAlreadyMatches { get; }
 
     public ValueTask DisposeAsync()
@@ -185,6 +192,12 @@ public sealed class ReleaseWorkflow : IReleaseWorkflow
                     staged.Sha256,
                     staged.Preview,
                     request: null,
+                    new PackageStageRequest(
+                        localRequest.PluginId,
+                        localRequest.GameId,
+                        localRequest.Version,
+                        localRequest.LocalZipPath,
+                        staged.Preview.AssetFileName),
                     assetAlreadyMatches: false);
                 staged.Detach();
                 return new WorkflowResult<PreparedRelease>(
@@ -445,6 +458,12 @@ public sealed class ReleaseWorkflow : IReleaseWorkflow
                     prepared.Sha256,
                     preview,
                     normalized,
+                    new PackageStageRequest(
+                        normalized.PluginId,
+                        normalized.GameId,
+                        normalized.Version,
+                        normalized.LocalZipPath,
+                        preview.AssetFileName),
                     assetAlreadyMatches);
                 prepared.Detach();
 

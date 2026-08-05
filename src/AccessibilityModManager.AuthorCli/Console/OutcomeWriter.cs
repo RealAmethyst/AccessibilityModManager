@@ -62,7 +62,7 @@ public sealed class OutcomeWriter
             ? _console.Out
             : _console.Error;
 
-        var payload = new JsonOutcome<T>
+        var payload = new JsonOutcome
         {
             Status = result.Status,
             Value = result.Value,
@@ -89,12 +89,12 @@ public sealed class OutcomeWriter
         return options;
     }
 
-    private sealed class JsonOutcome<T>
+    private sealed class JsonOutcome
     {
         public required string Status { get; init; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public T? Value { get; init; }
+        public object? Value { get; init; }
 
         public required IReadOnlyList<string> Messages { get; init; }
 
