@@ -210,6 +210,91 @@ public sealed class CatalogWorkflow
         return clone;
     }
 
+    public PluginRepoIndex AddRelease(PluginRepoIndex index, string gameId, ModRelease release)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        ArgumentException.ThrowIfNullOrWhiteSpace(gameId);
+        ArgumentNullException.ThrowIfNull(release);
+
+        var clone = DeepClone(index);
+        var game = GetGame(clone.Games, gameId);
+        ValidateRelease(clone, game, release);
+        var releases = GetOrCreateReleaseBucket(clone, game.GameId);
+        var existing = FindUniqueReleaseIndex(
+            releases,
+            release.Version,
+            release.Channel,
+            game.GameId,
+            throwWhenMissing: false);
+        if (existing >= 0)
+            releases[existing] = DeepClone(release);
+        else
+            releases.Add(DeepClone(release));
+        return clone;
+    }
+
+    public PluginRepoIndex EditRelease(
+        PluginRepoIndex index,
+        string gameId,
+        string currentVersion,
+        string currentChannel,
+        ModRelease replacement)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        ArgumentException.ThrowIfNullOrWhiteSpace(gameId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentVersion);
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentChannel);
+        ArgumentNullException.ThrowIfNull(replacement);
+
+        var clone = DeepClone(index);
+        var game = GetGame(clone.Games, gameId);
+        ValidateRelease(clone, game, replacement);
+        var releases = GetOrCreateReleaseBucket(clone, game.GameId);
+        var currentIndex = FindUniqueReleaseIndex(
+            releases,
+            currentVersion,
+            currentChannel,
+            game.GameId,
+            throwWhenMissing: true);
+        releases.RemoveAt(currentIndex);
+
+        var collision = FindUniqueReleaseIndex(
+            releases,
+            replacement.Version,
+            replacement.Channel,
+            game.GameId,
+            throwWhenMissing: false);
+        if (collision >= 0)
+            releases[collision] = DeepClone(replacement);
+        else
+            releases.Add(DeepClone(replacement));
+        return clone;
+    }
+
+    public PluginRepoIndex RemoveRelease(
+        PluginRepoIndex index,
+        string gameId,
+        string version,
+        string channel)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        ArgumentException.ThrowIfNullOrWhiteSpace(gameId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+        ArgumentException.ThrowIfNullOrWhiteSpace(channel);
+
+        var clone = DeepClone(index);
+        var game = GetGame(clone.Games, gameId);
+        var releases = GetOrCreateReleaseBucket(clone, game.GameId);
+        var releaseIndex = FindUniqueReleaseIndex(
+            releases,
+            version,
+            channel,
+            game.GameId,
+            throwWhenMissing: true);
+        releases.RemoveAt(releaseIndex);
+        return clone;
+    }
+
     private static GameDefinition GetGame(List<GameDefinition> games, string gameId) =>
         games[FindUniqueGameIndex(games, gameId)];
 
@@ -264,6 +349,42 @@ public sealed class CatalogWorkflow
                 $"Game '{gameId}' already contains multiple dependencies with id '{dependencyId}' that differ only by capitalisation. Refusing to guess which dependency to change."),
             _ => matches[0].index
         };
+    }
+
+    private static int FindUniqueReleaseIndex(
+        List<ModRelease> releases,
+        string version,
+        string channel,
+        string gameId,
+        bool throwWhenMissing)
+    {
+        var matches = releases
+            .Select((release, index) => new { release, index })
+            .Where(candidate =>
+                string.Equals(candidate.release.Version, version, StringComparison.Ordinal) &&
+                string.Equals(candidate.release.Channel, channel, StringComparison.Ordinal))
+            .ToList();
+
+        return matches.Count switch
+        {
+            0 when throwWhenMissing => throw new InvalidOperationException(
+                $"Release version '{version}' on channel '{channel}' was not found for game '{gameId}'."),
+            0 => -1,
+            > 1 => throw new InvalidOperationException(
+                $"Game '{gameId}' contains multiple releases with version '{version}' and channel '{channel}'. Refusing to guess which release to change."),
+            _ => matches[0].index
+        };
+    }
+
+    private static List<ModRelease> GetOrCreateReleaseBucket(PluginRepoIndex index, string gameId)
+    {
+        var key = FindUniqueReleaseBucketKey(index.ReleasesByGameId, gameId);
+        if (key is not null)
+            return index.ReleasesByGameId[key];
+
+        var releases = new List<ModRelease>();
+        index.ReleasesByGameId[gameId] = releases;
+        return releases;
     }
 
     private static void EnsureNoGameCollision(
@@ -344,6 +465,31 @@ public sealed class CatalogWorkflow
         EnsureRequiredText(script.What, "Lifecycle script what");
         EnsureRequiredText(script.Why, "Lifecycle script why");
         EnsureRequiredText(script.Modifies, "Lifecycle script modifies");
+    }
+
+    private static void ValidateRelease(
+        PluginRepoIndex index,
+        GameDefinition game,
+        ModRelease release)
+    {
+        EnsureRequiredText(release.Version, "Release version");
+        EnsureRequiredText(release.Channel, "Release channel");
+        EnsureRequiredText(release.Sha256, "Release SHA256");
+
+        if (!string.Equals(release.PluginId, index.PluginId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Release pluginId '{release.PluginId}' doesn't match project pluginId '{index.PluginId}'.");
+        }
+
+        if (!string.Equals(release.GameId, game.GameId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Release gameId '{release.GameId}' doesn't match game '{game.GameId}'.");
+        }
+
+        if (release.Sha256.Length != 64 || release.Sha256.Any(character => !Uri.IsHexDigit(character)))
+            throw new InvalidOperationException("Release SHA256 must contain exactly 64 hexadecimal characters.");
     }
 
     private static void EnsureRequiredText(string? value, string description)
@@ -445,4 +591,3 @@ public sealed class CatalogWorkflow
         where T : class =>
         value is null ? null : DeepClone(value);
 }
-

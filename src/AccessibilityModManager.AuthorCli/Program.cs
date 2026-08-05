@@ -39,6 +39,8 @@ public static class Program
         DependencyCommands.AddTo(root, services);
         ScriptCommands.AddTo(root, services);
         PackageCommands.AddTo(root, services);
+        GitHubCommands.AddTo(root, services);
+        ReleaseCommands.AddTo(root, services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);

@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Windows;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.AuthorTool.ViewModels;
 using AccessibilityModManager.AuthorTool.Views;
@@ -41,6 +42,9 @@ public partial class App : Application
         services.AddSingleton<Sha256HashService>();
         services.AddSingleton<GitService>();
         services.AddSingleton<GitHubService>();
+        services.AddSingleton<IGitHubService>(sp => sp.GetRequiredService<GitHubService>());
+        services.AddSingleton<IPublishedAssetProbe, PublishedAssetProbe>();
+        services.AddSingleton<ReleaseWorkflow>();
         services.AddSingleton<ManifestBuilderService>();
         services.AddSingleton<RegistryMembershipChecker>();
         services.AddSingleton<PatreonAuthorService>();
@@ -225,7 +229,8 @@ public partial class App : Application
             ConfirmDialog,
             BrowseForFile,
             showBuildPackage,
-            existingRelease);
+            existingRelease,
+            sp.GetRequiredService<ReleaseWorkflow>());
 
         var dialog = new ReleaseDialog(vm)
         {

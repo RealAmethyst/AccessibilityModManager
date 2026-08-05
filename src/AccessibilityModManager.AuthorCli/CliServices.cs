@@ -10,7 +10,9 @@ public sealed record CliServiceOverrides(
     ICliConsole? Console = null,
     ILogger? Logger = null,
     string? AuthorConfigDirectory = null,
-    string? LogDirectory = null);
+    string? LogDirectory = null,
+    IGitHubService? GitHubService = null,
+    IPublishedAssetProbe? PublishedAssetProbe = null);
 
 public static class CliServices
 {
@@ -42,7 +44,24 @@ public static class CliServices
                 sp.GetRequiredService<ILogger>(),
                 overrides.AuthorConfigDirectory));
         services.AddSingleton<GitService>();
-        services.AddSingleton<GitHubService>();
+        if (overrides.GitHubService is not null)
+        {
+            services.AddSingleton(overrides.GitHubService);
+        }
+        else
+        {
+            services.AddSingleton<GitHubService>();
+            services.AddSingleton<IGitHubService>(sp => sp.GetRequiredService<GitHubService>());
+        }
+
+        if (overrides.PublishedAssetProbe is not null)
+        {
+            services.AddSingleton(overrides.PublishedAssetProbe);
+        }
+        else
+        {
+            services.AddSingleton<IPublishedAssetProbe, PublishedAssetProbe>();
+        }
         services.AddSingleton<IndexFileService>();
         services.AddSingleton<ManifestBuilderService>();
         services.AddSingleton<Sha256HashService>();
@@ -51,6 +70,7 @@ public static class CliServices
         services.AddSingleton<JsonPayloadService>();
         services.AddSingleton<CatalogWorkflow>();
         services.AddSingleton<PackageWorkflow>();
+        services.AddSingleton<ReleaseWorkflow>();
 
         return services.BuildServiceProvider();
     }

@@ -20,7 +20,7 @@ public static class ProjectCommands
         var indexFiles = services.GetRequiredService<IndexFileService>();
         var catalogWorkflow = services.GetRequiredService<CatalogWorkflow>();
         var gitService = services.GetRequiredService<GitService>();
-        var gitHubService = services.GetRequiredService<GitHubService>();
+        var gitHubService = services.GetRequiredService<IGitHubService>();
 
         var project = new Command("project", "Manage local author projects.");
 

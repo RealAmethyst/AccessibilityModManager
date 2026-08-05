@@ -6,12 +6,39 @@ namespace AccessibilityModManager.AuthorTool.Services;
 public sealed record GitHubRepo(string NameWithOwner, string Description, string Url);
 public sealed record GitHubRelease(string TagName, string Name, bool IsDraft, bool IsPrerelease);
 
+public interface IGitHubService
+{
+    Task<bool> IsAvailableAsync(CancellationToken ct = default);
+    Task<bool> IsAuthenticatedAsync(CancellationToken ct = default);
+    Task<List<GitHubRepo>> ListReposAsync(int limit = 100, CancellationToken ct = default);
+    Task<bool?> IsRepoPrivateAsync(string nameWithOwner, CancellationToken ct = default);
+    Task<List<GitHubRelease>> ListReleasesAsync(string repo, int limit = 30, CancellationToken ct = default);
+    Task<ProcessResult> CreateReleaseAsync(
+        string repo,
+        string tagName,
+        string title,
+        string? notes,
+        IEnumerable<string> assetPaths,
+        CancellationToken ct = default);
+    Task<ProcessResult> EditReleaseNotesAsync(
+        string repo,
+        string tagName,
+        string notes,
+        CancellationToken ct = default);
+    Task<ProcessResult> UploadReleaseAssetAsync(
+        string repo,
+        string tagName,
+        string assetPath,
+        bool clobber,
+        CancellationToken ct = default);
+}
+
 /// <summary>
 /// Wraps the <c>gh</c> CLI. Authentication is delegated entirely to <c>gh auth login</c> —
 /// we do not handle tokens ourselves. If <c>gh</c> is missing or not authed, the relevant
 /// methods surface a clear error.
 /// </summary>
-public sealed class GitHubService
+public sealed class GitHubService : IGitHubService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
