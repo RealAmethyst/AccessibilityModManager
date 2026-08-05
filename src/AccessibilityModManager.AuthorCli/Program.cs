@@ -1,5 +1,4 @@
 using System.CommandLine;
-using System.CommandLine.Parsing;
 using AccessibilityModManager.AuthorCli.Commands;
 using AccessibilityModManager.AuthorCli.Console;
 using AccessibilityModManager.Authoring.Workflows;
@@ -11,16 +10,34 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        ArgumentNullException.ThrowIfNull(args);
+
+        using var services = CliServices.Create();
+        return await RunAsync(args, services);
+    }
+
+    public static async Task<int> RunAsync(string[] args, IServiceProvider services)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(services);
+
+        var console = services.GetRequiredService<ICliConsole>();
+
         if (IsExactVersionRequest(args))
         {
-            System.Console.Out.WriteLine(RootCommands.Version);
+            await console.Out.WriteLineAsync(RootCommands.Version);
+            await console.Out.FlushAsync();
             return (int)CliExitCode.Success;
         }
 
-        using var services = CliServices.Create();
-        var console = services.GetRequiredService<ICliConsole>();
         var outcomeWriter = services.GetRequiredService<OutcomeWriter>();
         var root = RootCommands.Create();
+
+        ProjectCommands.AddTo(root, services);
+        AuthorCommands.AddTo(root, services);
+        GameCommands.AddTo(root, services);
+        DependencyCommands.AddTo(root, services);
+        ScriptCommands.AddTo(root, services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);
