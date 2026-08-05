@@ -50,6 +50,95 @@ What the tool gives you:
 - **Upload releases to your mod's own GitHub repo** — the tool uses `gh` to create a GitHub release on your mod's repo and attach the wrapped ZIP as an asset, then writes the resulting public URL + SHA256 back into your plugin index. This is intentional: your mod stays on its own repo (where your users already look for it), and your plugin index simply points at those release assets. The plugin index repo itself is *not* released — it's just a regular `git commit` + `git push` of the updated `index.json`. One click does the asset upload, the index commit, and the index push together, so the SHA256 in your plugin index always matches the asset that's live on GitHub.
 - **Lifecycle script editor** — fill in the executable path, the what / why / modifies descriptions, and whether the script needs admin. The tool validates that each declared script is actually bundled in your source folder before producing the ZIP.
 
+## Author CLI (local tooling)
+
+This branch also contains `amm-author`, a command-line counterpart to the WPF AuthorTool. It uses the same authoring services and validation rules, but it does not launch the graphical app. The CLI is local tooling in this branch, not an official binary published by the upstream project.
+
+Build self-contained Windows x64 executables with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build-author-cli.ps1 -SelfContained
+powershell -ExecutionPolicy Bypass -File installer\build-author-cli.ps1 -SelfContained -Admin
+```
+
+The standard executable is written to `dist-author-cli\amm-author.exe`. The registry-admin build is written separately to `dist-author-cli-admin\amm-author-admin.exe`. Each folder also receives a `.sha256` file. The build script does not create a GitHub release or upload anything.
+
+Copy the executables and hash files to a folder on your user `PATH`, then run `amm-author --help` or `amm-author-admin --help`. A self-contained build does not require the .NET Desktop Runtime on the destination machine.
+
+### Projects and output
+
+Commands that need an author project resolve it in this order:
+
+1. The folder supplied with `--project`.
+2. The current directory, if it contains an `index.json` project.
+3. The last project opened by the AuthorTool or `project open`.
+
+The global options can appear before or after a subcommand:
+
+- `--json` writes machine-readable JSON.
+- `--quiet` suppresses ordinary human status lines, but not warnings or errors.
+- `--dry-run` validates and previews without making durable changes.
+- `--yes` confirms an operation after validation; it does not bypass trust or safety checks.
+- `--verbose` includes exception details when a command fails.
+
+Human output is plain text with no ANSI control sequences, so it remains predictable in screen readers and redirected logs. JSON mode keeps standard output parseable for scripts.
+
+Passphrases are never accepted as ordinary command-line values. Interactive prompts conceal them. For automation, redirect standard input and use the command's explicit `--passphrase-stdin` or `--passphrases-stdin` option. Do not put a secret in a JSON input file, shell history, or process argument.
+
+The process exit codes are `0` for success, `2` for command usage, `3` for validation failure, `4` for authentication or an unavailable privileged operation, `5` for a conflict or missing confirmation, and `130` for cancellation.
+
+### Command groups
+
+- `project` creates, opens, clones, pulls, and inspects author projects.
+- `author` reads or changes the author block in `index.json`.
+- `game` reads or changes game entries.
+- `dependency` reads or changes a game's dependencies.
+- `script` reads or changes default lifecycle scripts.
+- `package` builds, validates, and hashes wrapped mod packages.
+- `release` reads, edits, uploads, and completes release publication.
+- `index` inspects, reconciles, saves, publishes, and manages index locks.
+- `github` checks GitHub CLI authentication and lists repositories or releases.
+- `patreon` manages the local Patreon session and reads creator posts or tiers.
+- `server` configures and operates the SFTP publishing destination.
+- `signing` manages catalog signing keys, claims, and publisher-head recovery.
+- `registry` maintains the signed global registry. Every registry operation requires `amm-author-admin`.
+
+Use `--help` at any level for the exact arguments and a concrete example, such as `amm-author release publish --help`.
+
+### Examples
+
+Inspect a project as JSON:
+
+```powershell
+amm-author project status --project "C:\Mods\Sample" --json --quiet
+```
+
+Build a wrapped package:
+
+```powershell
+amm-author package build --source "C:\Mods\Sample\Files" --game sample-game --version 1.0.0 --output "C:\Packages\sample.zip" --project "C:\Mods\Sample"
+```
+
+Validate that package without changing the project:
+
+```powershell
+amm-author package validate --file "C:\Packages\sample.zip" --json
+```
+
+Preview an index publication without committing or pushing:
+
+```powershell
+amm-author index publish --project "C:\Mods\Sample" --dry-run
+```
+
+Publish a release after reviewing its destination:
+
+```powershell
+amm-author release publish --game sample-game --version 1.0.0 --channel stable --repo owner/sample-mod --zip "C:\Packages\sample.zip" --project "C:\Mods\Sample" --yes
+```
+
+The repository is source-available under [LICENSE](LICENSE). Building these programs for local use does not grant redistribution rights beyond that license.
+
 ## Releasing a new version
 
 1. Open the AuthorTool, open your plugin project (the folder with `index.json`).
@@ -67,6 +156,7 @@ dotnet build AccessibilityModManager.slnx
 dotnet test AccessibilityModManager.slnx
 powershell -ExecutionPolicy Bypass -File installer\build.ps1            # manager + Inno installer
 powershell -ExecutionPolicy Bypass -File installer\build-author-tool.ps1 # AuthorTool single-file exe
+powershell -ExecutionPolicy Bypass -File installer\build-author-cli.ps1 -SelfContained # local Author CLI
 ```
 
 Targets `net10.0-windows`. Requires .NET 10 SDK and (for the installer) [Inno Setup 6](https://jrsoftware.org/isdl.php).
