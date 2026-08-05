@@ -13,6 +13,8 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <ListView Grid.Row="0"
@@ -94,7 +96,94 @@
             </ListView.ItemTemplate>
         </ListView>
 
-        <TextBlock Grid.Row="1"
+        <!-- Sources the user added. Kept separate from the developers list above, because "who
+             wrote this" and "where did it come from" are different questions and merging them
+             would hide the second one. -->
+        <StackPanel Grid.Row="1"
+                    Margin="0,12,0,0"
+                    Visibility="{Binding HasUserSources, Converter={StaticResource BoolToVisConverter}}">
+            <TextBlock Text="Sources you added"
+                       FontWeight="SemiBold"
+                       AutomationProperties.HeadingLevel="Level2"
+                       Margin="0,0,0,4"/>
+            <ListView x:Name="UserSourcesList"
+                      ItemsSource="{Binding UserSources}"
+                      MaxHeight="140"
+                      AutomationProperties.Name="Sources you added"
+                      HorizontalContentAlignment="Stretch"
+                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListView.InputBindings>
+                    <KeyBinding Key="Delete"
+                                Command="{Binding RemoveSourceCommand}"
+                                CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListView}}"/>
+                </ListView.InputBindings>
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="AutomationProperties.Name" Value="{Binding AnnouncementText}"/>
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:UserSourceItemViewModel}">
+                        <Grid Margin="4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding Address}"
+                                           Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    Content="Remove"
+                                    Command="{Binding DataContext.RemoveSourceCommand, RelativeSource={RelativeSource AncestorType=ListView}}"
+                                    CommandParameter="{Binding}"
+                                    AutomationProperties.Name="{Binding DisplayName, StringFormat='Remove {0}'}"
+                                    MinWidth="90"/>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </StackPanel>
+
+        <!-- Adding a source: a labelled field and a button, right beside the list they change.
+             A popup for one line of text would cost a screen-reader user a window to enter and
+             leave for no benefit. -->
+        <Grid Grid.Row="2" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Label Grid.Column="0"
+                   Content="_Add a source"
+                   Target="{Binding ElementName=NewSourceAddressBox}"
+                   VerticalAlignment="Center"/>
+
+            <TextBox Grid.Column="1"
+                     x:Name="NewSourceAddressBox"
+                     Text="{Binding NewSourceAddress, UpdateSourceTrigger=PropertyChanged}"
+                     IsEnabled="{Binding IsLoading, Converter={StaticResource InvertBoolConverter}}"
+                     AutomationProperties.Name="Add a source"
+                     AutomationProperties.HelpText="Full https address of the author's index.json file"
+                     VerticalAlignment="Center"
+                     Margin="8,0,8,0">
+                <TextBox.InputBindings>
+                    <KeyBinding Key="Enter" Command="{Binding AddSourceCommand}"/>
+                </TextBox.InputBindings>
+            </TextBox>
+
+            <Button Grid.Column="2"
+                    Content="Add source"
+                    Command="{Binding AddSourceCommand}"
+                    IsEnabled="{Binding IsLoading, Converter={StaticResource InvertBoolConverter}}"
+                    AutomationProperties.Name="Add source"
+                    MinWidth="110"/>
+        </Grid>
+
+        <TextBlock Grid.Row="3"
                    Text="{Binding StatusMessage}"
                    controls:LiveRegion.Announcement="{Binding StatusAnnouncement}"
                    TextWrapping="Wrap"

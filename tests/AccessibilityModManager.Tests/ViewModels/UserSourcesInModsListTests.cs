@@ -109,6 +109,54 @@ public sealed class UserSourcesInModsListTests
     }
 
     [Fact]
+    public async Task A_developer_who_leaves_the_registry_with_mods_installed_is_carried_over()
+    {
+        // The real scenario: buu420 is dropped from the registry, and anyone with his mods
+        // installed keeps him as a source instead of silently losing him.
+        var config = new AppConfig();
+        config.KnownPluginAddresses["buu420"] = "https://example.invalid/buu420/index.json";
+
+        var vm = Build(c =>
+        {
+            c.KnownPluginAddresses["buu420"] = "https://example.invalid/buu420/index.json";
+        }, installed: ["amethyst", "buu420"]);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+
+        Assert.Contains("kept as a source", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
+
+        // And his catalog loads on this same refresh, not the next one.
+        Assert.Contains(vm.Mods, m => m.PluginId == "buu420");
+    }
+
+    [Fact]
+    public async Task A_developer_who_leaves_with_NOTHING_installed_is_not_carried_over()
+    {
+        var vm = Build(c =>
+        {
+            c.KnownPluginAddresses["buu420"] = "https://example.invalid/buu420/index.json";
+        }, installed: ["amethyst"]);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+
+        Assert.DoesNotContain("kept as a source", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(vm.Mods, m => m.PluginId == "buu420");
+    }
+
+    [Fact]
+    public async Task The_registrys_addresses_are_written_down_while_it_still_names_them()
+    {
+        // The record the migration depends on. Without it, clearing the index cache would strand a
+        // developer whose mods are installed.
+        AppConfig? saved = null;
+        var vm = Build(c => saved = c);
+
+        await vm.RefreshGamesCommand.ExecuteAsync(null);
+
+        Assert.True(saved!.KnownPluginAddresses.ContainsKey("amethyst"));
+    }
+
+    [Fact]
     public async Task With_no_sources_configured_nothing_changes()
     {
         // The upgrade case: an existing user opens the app and sees exactly what they saw before.
@@ -138,6 +186,9 @@ public sealed class UserSourcesInModsListTests
             return Task.FromResult(new Fetched<PluginRepoIndex> { Value = Index(source.PluginId, name) });
         }
 
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
+
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -165,7 +216,7 @@ public sealed class UserSourcesInModsListTests
         };
     }
 
-    private static GamesListViewModel Build(Action<AppConfig> configure)
+    private static GamesListViewModel Build(Action<AppConfig> configure, params string[] installed)
     {
         var config = new AppConfig();
         configure(config);
@@ -174,7 +225,7 @@ public sealed class UserSourcesInModsListTests
             new StubRegistryClient(),
             new PerSourceRepoClient(),
             new StubConfigService(config),
-            new StubReceiptStore(),
+            new StubReceiptStore(installed),
             new StubVerifier(),
             new GameAggregator(new StubSteamDetector(), new StubRegistryDetector(), new StubVerifier(), TestLogger.Create()),
             MakePatreonService(),
@@ -213,11 +264,18 @@ public sealed class UserSourcesInModsListTests
     {
         public Task<AppConfig> LoadAsync() => Task.FromResult(config);
         public Task SaveAsync(AppConfig c) => Task.CompletedTask;
+        public async Task<AppConfig> UpdateAsync(Action<AppConfig> change)
+        {
+            var config = await LoadAsync();
+            change(config);
+            await SaveAsync(config);
+            return config;
+        }
         public string? LastLoadProblem => null;
         public void AcknowledgeLoadProblem() { }
     }
 
-    private sealed class StubReceiptStore : IReceiptStore
+    private sealed class StubReceiptStore(params string[] installed) : IReceiptStore
     {
         public Task<InstallReceipt?> LoadAsync(string gameId, string pluginId) => Task.FromResult<InstallReceipt?>(null);
         public Task SaveAsync(InstallReceipt receipt) => Task.CompletedTask;
@@ -225,7 +283,7 @@ public sealed class UserSourcesInModsListTests
         public Task<List<InstallReceipt>> LoadAllForGameAsync(string gameId) => Task.FromResult(new List<InstallReceipt>());
         public string GetReceiptDirectory(string gameId, string pluginId) => "";
         public Task<List<string>> UnreadablePluginIdsForGameAsync(string gameId) => Task.FromResult(new List<string>());
-        public Task<List<string>> InstalledPluginIdsAsync() => Task.FromResult(new List<string>());
+        public Task<List<string>> InstalledPluginIdsAsync() => Task.FromResult(installed.ToList());
     }
 
     private sealed class StubVerifier : IGameVerifier

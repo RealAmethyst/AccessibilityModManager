@@ -134,6 +134,9 @@ public sealed class OwnedInstallScopingTests
             });
         }
 
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
+
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -194,6 +197,13 @@ public sealed class OwnedInstallScopingTests
     {
         public Task<AppConfig> LoadAsync() => Task.FromResult(config);
         public Task SaveAsync(AppConfig c) => Task.CompletedTask;
+        public async Task<AppConfig> UpdateAsync(Action<AppConfig> change)
+        {
+            var config = await LoadAsync();
+            change(config);
+            await SaveAsync(config);
+            return config;
+        }
         public string? LastLoadProblem => null;
         public void AcknowledgeLoadProblem() { }
     }

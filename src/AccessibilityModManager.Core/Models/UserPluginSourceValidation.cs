@@ -81,7 +81,10 @@ public static class UserPluginSourceValidation
             // user's own account, so anything able to forge a source can forge this too. What it
             // catches is a record edited in place, or one appended without the full shape — which
             // is what actually happens.
-            if (source.NoticeAcceptedUtc is null)
+            // Two ways a source can stand: the user accepted the notice, or it was carried over
+            // from the signed registry because their mods were already installed. Both are recorded
+            // as facts about what happened; neither is inferred here.
+            if (source.NoticeAcceptedUtc is null && source.MigratedFromRegistryUtc is null)
             {
                 rejected.Add(new RejectedUserSource(describe, "you haven't confirmed it yet"));
                 continue;
@@ -91,7 +94,7 @@ public static class UserPluginSourceValidation
             if (!string.Equals(source.AcceptedFor, expected, StringComparison.Ordinal))
             {
                 rejected.Add(new RejectedUserSource(describe,
-                    "its developer id or address changed after you confirmed it, so it needs confirming again"));
+                    "its developer id or address changed since it was set up, so it needs confirming again"));
                 continue;
             }
 

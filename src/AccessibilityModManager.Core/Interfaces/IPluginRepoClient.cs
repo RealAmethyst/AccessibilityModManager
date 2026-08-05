@@ -17,6 +17,17 @@ public interface IPluginRepoClient
     Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default);
 
     /// <summary>
+    /// Fetches a catalog WITHOUT touching the saved copies: no cached fallback is read, and nothing
+    /// is written. For looking at a source the user is only considering.
+    ///
+    /// <para>Both halves matter. Reading a cache would let a preview succeed from an old copy while
+    /// the address is currently unreachable, so the notice would describe a catalog the manager
+    /// cannot actually fetch. Writing one would leave a trace of a source the user then declined —
+    /// and because a candidate has no id of its own yet, every preview would share one cache entry.</para>
+    /// </summary>
+    Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default);
+
+    /// <summary>
     /// Convenience for a registry-listed plugin, which is always a registry source. Exists so the
     /// common call site stays short; it is not a second path — it builds the same
     /// <see cref="CatalogSource"/> the other overload takes.

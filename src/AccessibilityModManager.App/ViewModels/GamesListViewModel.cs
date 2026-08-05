@@ -201,6 +201,41 @@ public partial class GamesListViewModel : ObservableObject
             // The registry and the user's own sources become one ordered list here, and this is the
             // only place that happens. The resolver seeds the registry's identities first, so a
             // source can never publish under a plugin id the signed catalog already uses.
+            // Carry over any developer who has left the registry while their mods are still
+            // installed, BEFORE the sources are resolved, so their catalog loads on this same
+            // refresh rather than the next one.
+            //
+            // Reached only with an ACCEPTED registry: the fetch above throws otherwise, and this
+            // must never run against a registry that failed to load — every plugin would look
+            // absent at once and an outage would become a pile of user sources.
+            var installedPluginIds = await _receiptStore.InstalledPluginIdsAsync();
+            var carried = RegistryDepartureMigration.FindDepartures(
+                registry.Plugins, config.UserPluginSources, installedPluginIds,
+                config.KnownPluginAddresses, DateTimeOffset.UtcNow);
+
+            if (carried.Count > 0)
+            {
+                config = await _configService.UpdateAsync(c =>
+                {
+                    // Re-checked inside the lock against the freshly read settings: another window
+                    // may have carried the same developer over, or the user may have added them
+                    // back by hand, while this refresh was running.
+                    var stillMissing = RegistryDepartureMigration.FindDepartures(
+                        registry.Plugins, c.UserPluginSources, installedPluginIds,
+                        c.KnownPluginAddresses, DateTimeOffset.UtcNow);
+
+                    foreach (var departure in stillMissing)
+                        c.UserPluginSources.Add(departure.Source);
+                });
+
+                foreach (var departure in carried)
+                {
+                    unavailable.Add(
+                        $"{departure.Describe} is no longer in the built-in catalog, but you have their mods " +
+                        "installed — so they have been kept as a source you can manage on the Developers tab.");
+                }
+            }
+
             var accepted = UserPluginSourceValidation.Accept(config.UserPluginSources);
             foreach (var dropped in accepted.Rejected)
                 unavailable.Add($"The source {dropped.Describe} wasn't loaded because {dropped.Reason}.");
@@ -208,6 +243,23 @@ public partial class GamesListViewModel : ObservableObject
             var resolution = CatalogSourceResolver.Resolve(registry.Plugins, accepted.Accepted);
             foreach (var refusal in resolution.Refused)
                 unavailable.Add($"{refusal.Describe} isn't being shown because {refusal.Reason}.");
+
+            // Written down while the signed registry still names it. This is the only durable
+            // record of where a developer's catalog lives once they leave the registry — the index
+            // cache holds it too, but clearing a cache is a routine recovery step and must not be
+            // able to strand a developer whose mods are installed.
+            var addresses = registry.Plugins
+                .Where(p => !string.IsNullOrWhiteSpace(p.Id))
+                .ToDictionary(p => p.Id, p => p.RepoIndexUrl.AbsoluteUri, StringComparer.OrdinalIgnoreCase);
+
+            if (addresses.Any(a => !config.KnownPluginAddresses.TryGetValue(a.Key, out var known) ||
+                                   !string.Equals(known, a.Value, StringComparison.Ordinal)))
+            {
+                await _configService.UpdateAsync(c =>
+                {
+                    foreach (var (id, url) in addresses) c.KnownPluginAddresses[id] = url;
+                });
+            }
 
             _lastUserSourceIds = resolution.Sources
                 .Where(s => s.IsUserAdded)
@@ -274,10 +326,11 @@ public partial class GamesListViewModel : ObservableObject
             {
                 try
                 {
-                    var latest = await _configService.LoadAsync();
-                    foreach (var (gameId, path) in detection.HealedOverrides)
-                        latest.KnownGameOverrides[gameId] = path;
-                    await _configService.SaveAsync(latest);
+                    await _configService.UpdateAsync(latest =>
+                    {
+                        foreach (var (gameId, path) in detection.HealedOverrides)
+                            latest.KnownGameOverrides[gameId] = path;
+                    });
                     _logger.Information("Persisted {Count} healed game override(s)", detection.HealedOverrides.Count);
                 }
                 catch (Exception ex)
@@ -615,9 +668,7 @@ public partial class GamesListViewModel : ObservableObject
 
         try
         {
-            var config = await _configService.LoadAsync();
-            config.KnownGameOverrides[mod.GameId] = pickedPath;
-            await _configService.SaveAsync(config);
+            await _configService.UpdateAsync(config => config.KnownGameOverrides[mod.GameId] = pickedPath);
             _logger.Information("Saved manual override for {GameId}: {Path}", mod.GameId, pickedPath);
 
             // The user just picked this folder; confirming it took is the answer to their action.
@@ -785,16 +836,17 @@ public partial class GamesListViewModel : ObservableObject
     {
         try
         {
-            var config = await _configService.LoadAsync();
-            config.SelectedTagFilters = TagFilters.Where(f => f.IsSelected).Select(f => f.Id).ToList();
-            config.SelectedLanguageFilters = LanguageFilters.Where(f => f.IsSelected).Select(f => f.Code).ToList();
-            config.SelectedAuthorFilters = AuthorFilters
-                .Where(f => f.IsSelected)
-                .Select(f => f.PluginId)
-                .Concat(_hiddenSelectedAuthors)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            await _configService.SaveAsync(config);
+            await _configService.UpdateAsync(config =>
+            {
+                config.SelectedTagFilters = TagFilters.Where(f => f.IsSelected).Select(f => f.Id).ToList();
+                config.SelectedLanguageFilters = LanguageFilters.Where(f => f.IsSelected).Select(f => f.Code).ToList();
+                config.SelectedAuthorFilters = AuthorFilters
+                    .Where(f => f.IsSelected)
+                    .Select(f => f.PluginId)
+                    .Concat(_hiddenSelectedAuthors)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            });
         }
         catch (Exception ex)
         {

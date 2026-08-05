@@ -151,9 +151,7 @@ public partial class SettingsViewModel : ObservableObject
         ClearStatusBeforeNewResult();
         try
         {
-            var config = await _configService.LoadAsync();
-            config.DefaultChannel = DefaultChannel;
-            await _configService.SaveAsync(config);
+            await _configService.UpdateAsync(config => config.DefaultChannel = DefaultChannel);
             StatusMessage = "Settings saved.";
         }
         catch (Exception ex)

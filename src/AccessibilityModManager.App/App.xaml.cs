@@ -119,9 +119,31 @@ public partial class App : Application
             var pluginsVm = new PluginsViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),
                 sp.GetRequiredService<IConfigService>(),
+                sp.GetRequiredService<IReceiptStore>(),
+                new UserSourceAdder(
+                    sp.GetRequiredService<IPluginRepoClient>(),
+                    sp.GetRequiredService<ILogger>()),
                 sp.GetRequiredService<ILogger>(),
                 plugin => mainVm!.ShowDeveloperDetails(
-                    CreateDeveloperDetailsViewModel(sp, mainVm!, plugin)));
+                    CreateDeveloperDetailsViewModel(sp, mainVm!, plugin)),
+                confirmRisk: preview =>
+                {
+                    var dialog = new SourceRiskDialog(new SourceRiskDialogViewModel(preview))
+                    {
+                        Owner = Current.MainWindow
+                    };
+                    dialog.ShowDialog();
+                    return dialog.UserAccepted;
+                },
+                confirmRemove: name => MessageBox.Show(
+                    $"Remove {name}?" + Environment.NewLine + Environment.NewLine +
+                    "You will stop getting new mods and updates from this source. Mods you have " +
+                    "already installed from it stay installed, and you can still uninstall them.",
+                    "Remove source",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question,
+                    // The safe answer is the default, so a stray Enter keeps the source.
+                    MessageBoxResult.No) == MessageBoxResult.Yes);
 
             var gamesListVm = new GamesListViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),
@@ -151,6 +173,34 @@ public partial class App : Application
                     mainVm!.ShowGameDetails(detailsVm);
                 },
                 BrowseForFolder);
+
+            // Adding or removing a source changes which catalogs the Mods tab reads, so it has to
+            // re-read them. Without this, a user adds a source, is told it worked, and finds no new
+            // mods until they refresh by hand — which reads as the feature not working.
+            pluginsVm.SourcesChanged += () =>
+            {
+                // Queued, not skipped. A refresh already running means the catalog list it is
+                // working from is the OLD one, so dropping this request would leave the Mods tab
+                // stale until something else happened to refresh it — and the user was just told
+                // their source was added.
+                _ = RefreshModsWhenFreeAsync();
+            };
+
+            async Task RefreshModsWhenFreeAsync()
+            {
+                try
+                {
+                    while (!gamesListVm.RefreshGamesCommand.CanExecute(null))
+                        await Task.Delay(150);
+
+                    await gamesListVm.RefreshGamesCommand.ExecuteAsync(null);
+                }
+                catch (Exception ex)
+                {
+                    sp.GetRequiredService<ILogger>()
+                        .Warning(ex, "Couldn't refresh the mods list after a source change");
+                }
+            }
 
             mainVm = new MainViewModel(
                 pluginsVm, gamesListVm, settingsVm,

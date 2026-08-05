@@ -133,6 +133,13 @@ public class AuthorFilterRetentionTests
         public AppConfig Saved { get; private set; }
         public Task<AppConfig> LoadAsync() => Task.FromResult(_config);
         public Task SaveAsync(AppConfig config) { Saved = config; return Task.CompletedTask; }
+        public async Task<AppConfig> UpdateAsync(Action<AppConfig> change)
+        {
+            var config = await LoadAsync();
+            change(config);
+            await SaveAsync(config);
+            return config;
+        }
         public string? LastLoadProblem => null;
         public void AcknowledgeLoadProblem() { }
     }
@@ -158,6 +165,9 @@ public class AuthorFilterRetentionTests
             Task.FromException<Fetched<PluginRepoIndex>>(
                 new CatalogRefusedException(source.PluginId, "Its signature didn't check out."));
 
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
+
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -180,6 +190,9 @@ public class AuthorFilterRetentionTests
                     ReleasesByGameId = []
                 }
             });
+
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
 
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();

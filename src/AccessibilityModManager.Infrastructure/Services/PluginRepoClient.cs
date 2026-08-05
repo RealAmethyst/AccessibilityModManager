@@ -70,6 +70,27 @@ public sealed class PluginRepoClient : IPluginRepoClient
     public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(PluginEntry plugin, CancellationToken ct = default)
         => FetchPluginIndexAsync(CatalogSource.FromRegistry(plugin), ct);
 
+    /// <summary>
+    /// Live-only fetch for a source the user has not accepted yet. Deliberately shares the whole
+    /// acceptance path — the same size bound, the same strict decode, the same validation and the
+    /// same trust switch — and differs in exactly two ways: no cached copy is read when the live
+    /// fetch fails, and no cache is written when it succeeds.
+    ///
+    /// <para>Checking a candidate under weaker rules than the ones it will be read under later would
+    /// make the preview meaningless, so the only thing that changes is what is remembered.</para>
+    /// </summary>
+    public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default)
+    {
+        UrlValidator.RequireHttps(source.IndexUrl, $"plugin '{source.PluginId}' repo index");
+        RequireUsableTrust(source);
+
+        var bytes = await FetchBoundedAsync(source, ct);
+
+        // onAccepted deliberately null: acceptance here records nothing, because the user has not
+        // agreed to anything yet.
+        return await AcceptIndexAsync(source, bytes, fromCache: false, onAccepted: null);
+    }
+
     public async Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default)
     {
         UrlValidator.RequireHttps(source.IndexUrl, $"plugin '{source.PluginId}' repo index");

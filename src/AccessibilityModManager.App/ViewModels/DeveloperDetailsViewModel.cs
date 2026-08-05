@@ -174,10 +174,11 @@ public partial class DeveloperDetailsViewModel : ObservableObject
             {
                 try
                 {
-                    var latest = await _configService.LoadAsync();
-                    foreach (var (gameId, path) in detection.HealedOverrides)
-                        latest.KnownGameOverrides[gameId] = path;
-                    await _configService.SaveAsync(latest);
+                    await _configService.UpdateAsync(latest =>
+                    {
+                        foreach (var (gameId, path) in detection.HealedOverrides)
+                            latest.KnownGameOverrides[gameId] = path;
+                    });
                 }
                 catch (Exception ex)
                 {

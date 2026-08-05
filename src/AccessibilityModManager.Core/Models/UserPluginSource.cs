@@ -51,6 +51,19 @@ public sealed class UserPluginSource
     public string? AcceptedFor { get; set; }
 
     /// <summary>
+    /// Set when this source was created automatically because the developer left the signed
+    /// registry while their mods were still installed.
+    ///
+    /// <para>Recorded separately from <see cref="NoticeAcceptedUtc"/> on purpose. The user never saw
+    /// the risk notice for one of these, and writing an acceptance timestamp would be recording a
+    /// decision they did not make. What justifies it instead is a fact: the registry vouched for
+    /// this developer, the user installed their mods on that basis, and this only keeps working what
+    /// already worked. <see cref="AcceptedFor"/> still binds it to the exact id and address, so a
+    /// migrated source cannot inherit that standing after being edited either.</para>
+    /// </summary>
+    public DateTimeOffset? MigratedFromRegistryUtc { get; set; }
+
+    /// <summary>
     /// The value <see cref="AcceptedFor"/> must hold for this source to count as accepted. Ordinal
     /// on the URL because a different address is a different source even when it differs only by
     /// case or a trailing slash.

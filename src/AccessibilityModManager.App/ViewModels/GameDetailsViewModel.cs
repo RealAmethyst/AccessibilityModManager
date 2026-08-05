@@ -603,11 +603,12 @@ public partial class GameDetailsViewModel : ObservableObject
     {
         try
         {
-            var config = await _configService.LoadAsync();
-            config.KnownGameOverrides[GameId] = root;
-            if (!string.IsNullOrWhiteSpace(exeName))
-                config.InstalledEmulators[exeName.ToLowerInvariant()] = root;
-            await _configService.SaveAsync(config);
+            await _configService.UpdateAsync(config =>
+            {
+                config.KnownGameOverrides[GameId] = root;
+                if (!string.IsNullOrWhiteSpace(exeName))
+                    config.InstalledEmulators[exeName.ToLowerInvariant()] = root;
+            });
         }
         catch (Exception ex)
         {
@@ -767,9 +768,7 @@ public partial class GameDetailsViewModel : ObservableObject
         // and swap the in-memory install so this install + the Play button use the ASCII path.
         try
         {
-            var config = await _configService.LoadAsync();
-            config.KnownGameOverrides[GameId] = junctionPath;
-            await _configService.SaveAsync(config);
+            await _configService.UpdateAsync(config => config.KnownGameOverrides[GameId] = junctionPath);
         }
         catch (Exception ex)
         {

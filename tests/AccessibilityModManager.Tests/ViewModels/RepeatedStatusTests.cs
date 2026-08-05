@@ -65,6 +65,13 @@ public class RepeatedStatusTests
         private readonly AppConfig _config = new();
         public Task<AppConfig> LoadAsync() => Task.FromResult(_config);
         public Task SaveAsync(AppConfig config) => Task.CompletedTask;
+        public async Task<AppConfig> UpdateAsync(Action<AppConfig> change)
+        {
+            var config = await LoadAsync();
+            change(config);
+            await SaveAsync(config);
+            return config;
+        }
         public string? LastLoadProblem => null;
         public void AcknowledgeLoadProblem() { }
     }

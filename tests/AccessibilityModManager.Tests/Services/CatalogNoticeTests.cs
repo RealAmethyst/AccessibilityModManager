@@ -181,6 +181,9 @@ public sealed class CatalogNoticeTests
         public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromResult(new Fetched<PluginRepoIndex> { Value = Index });
 
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
+
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -245,6 +248,9 @@ public sealed class CatalogNoticeTests
         public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromException<Fetched<PluginRepoIndex>>(failure);
 
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
+
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
 
@@ -256,6 +262,9 @@ public sealed class CatalogNoticeTests
     {
         public Task<Fetched<PluginRepoIndex>> FetchPluginIndexAsync(CatalogSource source, CancellationToken ct = default) =>
             Task.FromResult(result);
+
+        public async Task<PluginRepoIndex> FetchIndexUncachedAsync(CatalogSource source, CancellationToken ct = default) =>
+            (await FetchPluginIndexAsync(source, ct)).Value;
 
         public Task<string> DownloadPackageAsync(Uri packageUrl, string destFile, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
@@ -269,6 +278,13 @@ public sealed class CatalogNoticeTests
         private readonly AppConfig _config = new();
         public Task<AppConfig> LoadAsync() => Task.FromResult(_config);
         public Task SaveAsync(AppConfig config) => Task.CompletedTask;
+        public async Task<AppConfig> UpdateAsync(Action<AppConfig> change)
+        {
+            var config = await LoadAsync();
+            change(config);
+            await SaveAsync(config);
+            return config;
+        }
         public string? LastLoadProblem => null;
         public void AcknowledgeLoadProblem() { }
     }

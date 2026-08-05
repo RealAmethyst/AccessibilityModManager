@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Serilog;
 
 namespace AccessibilityModManager.Infrastructure.Services;
@@ -114,6 +115,25 @@ public sealed class ConfigService : IConfigService
                 "Any unreadable file was kept next to the settings with a '.corrupt' name.";
         }
         return new AppConfig();
+    }
+
+    /// <summary>
+    /// Re-reads, mutates and saves under a cross-process lock, so a concurrent settings save cannot
+    /// be written from a snapshot taken before this change existed. The lock file sits beside the
+    /// config rather than inside it — a lock is not settings, and writing it through the same atomic
+    /// path would mean the thing guarding the write is itself a write.
+    /// </summary>
+    public async Task<AppConfig> UpdateAsync(Action<AppConfig> change)
+    {
+        ArgumentNullException.ThrowIfNull(change);
+
+        using var guard = await CrossProcessFileLock.AcquireAsync(
+            Path.Combine(_configDirectory, ".config.lock"), "settings");
+
+        var config = await LoadAsync();
+        change(config);
+        await SaveAsync(config);
+        return config;
     }
 
     public async Task SaveAsync(AppConfig config)

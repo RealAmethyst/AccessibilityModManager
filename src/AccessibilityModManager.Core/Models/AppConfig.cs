@@ -26,6 +26,21 @@ public sealed class AppConfig
     /// </summary>
     public List<UserPluginSource> UserPluginSources { get; set; } = [];
 
+    /// <summary>
+    /// The last index address the SIGNED registry gave for each plugin id, recorded every time one
+    /// of its catalogs is read.
+    ///
+    /// <para>This is what makes it possible to keep a developer working when they leave the
+    /// registry: their mods are still installed, but nothing names where their catalog lives any
+    /// more. The address is written down while the registry still vouches for it, so the record is
+    /// something the signed registry said, not something inferred later.</para>
+    ///
+    /// <para>It lives here rather than in the index cache — which also holds it — because clearing
+    /// the cache is a routine recovery step, and it must not be able to strand a developer whose
+    /// mods are installed.</para>
+    /// </summary>
+    public Dictionary<string, string> KnownPluginAddresses { get; set; } = [];
+
     public string DefaultChannel { get; set; } = "stable";
     public Dictionary<string, string> KnownGameOverrides { get; set; } = [];
 
