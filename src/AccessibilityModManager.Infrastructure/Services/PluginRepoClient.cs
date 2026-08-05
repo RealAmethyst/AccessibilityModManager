@@ -409,10 +409,16 @@ public sealed class PluginRepoClient : IPluginRepoClient
         // author's own checks match exactly what this client enforces. Trust violations refuse
         // the whole index; unobtainable releases are dropped one by one with a warning (one
         // stale entry must never blank the entire catalog - it did, live, 2026-07-24).
+        // A preview has no prior claim to bind the catalog to, so the identity comes FROM the
+        // document — and every other check, including that the releases inside agree with it, then
+        // runs against exactly that id. Anywhere else this is the id the registry named or the one
+        // the source was pinned to, and the catalog has to match it.
+        var expectedId = source.DiscoversIdentity ? ReadDeclaredPluginId(json) : source.PluginId;
+
         IndexValidationReport report;
         try
         {
-            report = PluginIndexValidation.Validate(source.PluginId, json);
+            report = PluginIndexValidation.Validate(expectedId, json);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
@@ -423,7 +429,7 @@ public sealed class PluginRepoClient : IPluginRepoClient
         }
 
         if (report.TrustErrors.Count > 0)
-            throw new CatalogRefusedException(source.PluginId, report.TrustErrors[0]);
+            throw new CatalogRefusedException(expectedId, report.TrustErrors[0]);
 
         foreach (var problem in report.UnobtainableReleases)
         {
@@ -432,6 +438,35 @@ public sealed class PluginRepoClient : IPluginRepoClient
         }
 
         return report.Index;
+    }
+
+    /// <summary>
+    /// The developer id a catalog declares about itself, for the preview path only.
+    ///
+    /// <para>Read with the plain parser and nothing else: it is used solely as the id the real
+    /// validation is then run against, so a document that lies about it fails that validation the
+    /// same way any other inconsistency does. It is checked for being a usable id here, because an
+    /// unusable one would otherwise reach a folder name later.</para>
+    /// </summary>
+    private static string ReadDeclaredPluginId(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty("pluginId", out var id) &&
+                id.ValueKind == JsonValueKind.String &&
+                SafeId.IsValid(id.GetString(), out _))
+            {
+                return id.GetString()!;
+            }
+        }
+        catch (JsonException)
+        {
+            // Falls through: validation below refuses an unreadable document with its own message.
+        }
+
+        return "";
     }
 
     // ---- offline cache (audit finding 33) ----

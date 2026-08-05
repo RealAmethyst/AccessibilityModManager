@@ -59,13 +59,10 @@ public sealed class UserSourceAdder(IPluginRepoClient repoClient, ILogger logger
             // Fetched as a user source from the start. Previewing it as anything else would mean
             // the document that gets checked is read under different rules from the one that will
             // be read later — and the whole point is to check the thing that will actually be used.
-            var candidate = CatalogSource.FromUserSource(new UserPluginSource
-            {
-                // Provisional: the real id comes from the document itself, below. This only has to
-                // be a usable placeholder for the fetch.
-                PluginId = "candidate",
-                IndexUrl = url.AbsoluteUri
-            });
+            // The id is not known yet — it is whatever this catalog declares about itself, and
+            // ForPreview is the one construction that says so. A placeholder id here refused every
+            // real catalog, because no genuine index claims to be called "candidate".
+            var candidate = CatalogSource.ForPreview(url);
 
             // Uncached on purpose: a cached copy would let this succeed while the address is
             // currently unreachable, and a cache WRITE would leave a trace of a source the user is

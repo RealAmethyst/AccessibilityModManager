@@ -34,7 +34,7 @@ public sealed class CatalogSource
 {
     private CatalogSource(
         CatalogSourceKind kind, string pluginId, Uri indexUrl, IndexTrustResolution trust,
-        PluginEntry? registryEntry, string? userDisplayName)
+        PluginEntry? registryEntry, string? userDisplayName, bool discoversIdentity = false)
     {
         Kind = kind;
         PluginId = pluginId;
@@ -42,6 +42,7 @@ public sealed class CatalogSource
         Trust = trust;
         RegistryEntry = registryEntry;
         UserDisplayName = userDisplayName;
+        DiscoversIdentity = discoversIdentity;
     }
 
     /// <summary>
@@ -54,6 +55,23 @@ public sealed class CatalogSource
 
     /// <summary>The name recorded when the user added this source, or null for a registry source.</summary>
     public string? UserDisplayName { get; }
+
+    /// <summary>
+    /// True only while LOOKING at an address the user has not added yet, where the developer id is
+    /// not known in advance — it is what the fetched catalog declares about itself.
+    ///
+    /// <para>Everywhere else, the id is a prior claim and the catalog must match it exactly: the
+    /// signed registry names it for a registry plugin, and an added source has it pinned, which is
+    /// what makes "this source changed its developer id" a refusal rather than a silent follow. A
+    /// preview has no such claim to check against, so the identity is ADOPTED from the document
+    /// instead — and then everything else, including that the releases inside agree with it, is
+    /// validated against exactly that id.</para>
+    ///
+    /// <para>This exists because the alternative did not work at all: feeding a placeholder id into
+    /// the identity check refused every real catalog, since no genuine index claims to be called
+    /// "candidate".</para>
+    /// </summary>
+    public bool DiscoversIdentity { get; }
 
     public CatalogSourceKind Kind { get; }
 
@@ -97,5 +115,18 @@ public sealed class CatalogSource
         return new CatalogSource(
             CatalogSourceKind.UserAdded, source.PluginId, url, IndexTrustResolution.UserApprovedUnsigned,
             registryEntry: null, userDisplayName: source.DisplayName);
+    }
+
+    /// <summary>
+    /// An address the user is only considering. Unsigned like any user source, and the one case
+    /// where the developer id is learned from the catalog rather than checked against a prior
+    /// claim — see <see cref="DiscoversIdentity"/>.
+    /// </summary>
+    public static CatalogSource ForPreview(Uri indexUrl)
+    {
+        ArgumentNullException.ThrowIfNull(indexUrl);
+        return new CatalogSource(
+            CatalogSourceKind.UserAdded, "", indexUrl, IndexTrustResolution.UserApprovedUnsigned,
+            registryEntry: null, userDisplayName: null, discoversIdentity: true);
     }
 }
