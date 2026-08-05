@@ -44,10 +44,13 @@ public static class CliServices
         services.AddSingleton<GitService>();
         services.AddSingleton<GitHubService>();
         services.AddSingleton<IndexFileService>();
+        services.AddSingleton<ManifestBuilderService>();
+        services.AddSingleton<Sha256HashService>();
 
         services.AddSingleton<AuthorProjectContext>();
         services.AddSingleton<JsonPayloadService>();
         services.AddSingleton<CatalogWorkflow>();
+        services.AddSingleton<PackageWorkflow>();
 
         return services.BuildServiceProvider();
     }

@@ -63,36 +63,17 @@ public sealed class ManifestBuilderService
         LifecycleScriptInputs? scripts = null,
         CancellationToken ct = default)
     {
-        if (!Directory.Exists(sourceFolder))
-            throw new DirectoryNotFoundException($"Source folder not found: {sourceFolder}");
-
-        sourceFolder = Path.GetFullPath(sourceFolder);
+        ct.ThrowIfCancellationRequested();
+        sourceFolder = ValidateBuildInputs(sourceFolder, scripts);
 
         var topLevelEntries = Directory
             .EnumerateFileSystemEntries(sourceFolder, "*", SearchOption.TopDirectoryOnly)
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // A pure script-only mod is a legitimate shape (e.g. a release that just toggles a
-        // registry key). Require non-empty content only when there are no scripts to run.
-        var hasAnyScript =
-            scripts?.PreInstall is not null ||
-            scripts?.PostInstall is not null ||
-            scripts?.PostUninstall is not null;
-        if (topLevelEntries.Count == 0 && !hasAnyScript)
-            throw new InvalidOperationException(
-                "Source folder is empty and no lifecycle script is enabled. Put your mod files in there first (e.g. version.dll, MelonLoader/, Mods/), or enable a script on the Scripts tab.");
-
-        // Verify each declared script can be located: either via the absolute path the author
-        // picked with Browse, or — failing that — under the source folder. Catches typos and
-        // missing files before the user uploads, since the manager's installer rejects
-        // manifests whose scripts aren't in the wrapped ZIP.
         var preInstall = scripts?.PreInstall;
         var postInstall = scripts?.PostInstall;
         var postUninstall = scripts?.PostUninstall;
-        ValidateScriptIsBundled(preInstall, scripts?.PreInstallSourcePath, sourceFolder, "Pre-install");
-        ValidateScriptIsBundled(postInstall, scripts?.PostInstallSourcePath, sourceFolder, "Post-install");
-        ValidateScriptIsBundled(postUninstall, scripts?.PostUninstallSourcePath, sourceFolder, "Post-uninstall");
 
         // Action source paths are relative to the staging dir's files/ subfolder — the
         // InstallerEngine passes <tempDir>/files as the executor's base path. Prepending
@@ -204,6 +185,51 @@ public sealed class ManifestBuilderService
             outputZipPath, fileCount, totalBytes);
 
         return new BuiltPackage(outputZipPath, fileCount, totalBytes);
+    }
+
+    /// <summary>
+    /// Performs every source-side check used by <see cref="BuildPackageAsync"/> without creating
+    /// an output directory or ZIP. The CLI uses this for a genuinely non-writing dry run.
+    /// </summary>
+    public static string ValidateBuildInputs(
+        string sourceFolder,
+        LifecycleScriptInputs? scripts = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceFolder);
+        if (!Directory.Exists(sourceFolder))
+            throw new DirectoryNotFoundException($"Source folder not found: {sourceFolder}");
+
+        var normalizedSource = Path.GetFullPath(sourceFolder);
+        var hasContent = Directory
+            .EnumerateFileSystemEntries(normalizedSource, "*", SearchOption.TopDirectoryOnly)
+            .Any();
+        var hasAnyScript =
+            scripts?.PreInstall is not null ||
+            scripts?.PostInstall is not null ||
+            scripts?.PostUninstall is not null;
+        if (!hasContent && !hasAnyScript)
+        {
+            throw new InvalidOperationException(
+                "Source folder is empty and no lifecycle script is enabled. Put your mod files in there first (e.g. version.dll, MelonLoader/, Mods/), or enable a script on the Scripts tab.");
+        }
+
+        ValidateScriptIsBundled(
+            scripts?.PreInstall,
+            scripts?.PreInstallSourcePath,
+            normalizedSource,
+            "Pre-install");
+        ValidateScriptIsBundled(
+            scripts?.PostInstall,
+            scripts?.PostInstallSourcePath,
+            normalizedSource,
+            "Post-install");
+        ValidateScriptIsBundled(
+            scripts?.PostUninstall,
+            scripts?.PostUninstallSourcePath,
+            normalizedSource,
+            "Post-uninstall");
+
+        return normalizedSource;
     }
 
     /// <summary>

@@ -38,6 +38,7 @@ public static class Program
         GameCommands.AddTo(root, services);
         DependencyCommands.AddTo(root, services);
         ScriptCommands.AddTo(root, services);
+        PackageCommands.AddTo(root, services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);
