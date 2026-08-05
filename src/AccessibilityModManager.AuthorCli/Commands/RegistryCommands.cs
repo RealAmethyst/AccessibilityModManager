@@ -7,9 +7,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class RegistryCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var writer = services.GetRequiredService<OutcomeWriter>();
@@ -149,7 +148,7 @@ public static class RegistryCommands
         registry.Subcommands.Add(publish);
         registry.Subcommands.Add(commit);
         registry.Subcommands.Add(push);
-        root.Subcommands.Add(registry);
+        return registry;
     }
 
     private static Option<string> Required(string name, string description) =>

@@ -34,9 +34,12 @@ public sealed class OutcomeWriter
             ? _console.Out
             : _console.Error;
 
-        if (result.Messages.Count > 0)
+        var messages = result.Messages
+            .SelectMany(AccessibleText.MeaningfulLines)
+            .ToArray();
+        if (messages.Length > 0)
         {
-            foreach (var message in result.Messages)
+            foreach (var message in messages)
             {
                 writer.WriteLine(message);
             }
@@ -45,14 +48,21 @@ public sealed class OutcomeWriter
             return;
         }
 
-        if (result.Value is string text && text.Length > 0)
+        if (result.Value is string text)
         {
-            writer.WriteLine(text);
-            writer.Flush();
-            return;
+            var lines = AccessibleText.MeaningfulLines(text);
+            if (lines.Count > 0)
+            {
+                foreach (var line in lines)
+                    writer.WriteLine(line);
+                writer.Flush();
+                return;
+            }
         }
 
-        writer.WriteLine(result.Status);
+        writer.WriteLine(AccessibleText.StatusOrFallback(
+            result.Status,
+            result.ErrorKind != WorkflowErrorKind.None));
         writer.Flush();
     }
 
@@ -64,9 +74,11 @@ public sealed class OutcomeWriter
 
         var payload = new JsonOutcome
         {
-            Status = result.Status,
+            Status = AccessibleText.StatusOrFallback(
+                result.Status,
+                result.ErrorKind != WorkflowErrorKind.None),
             Value = result.Value,
-            Messages = result.Messages,
+            Messages = result.Messages.SelectMany(AccessibleText.MeaningfulLines).ToArray(),
             ErrorKind = result.ErrorKind,
             CompletedPhases = result.CompletedPhases is { Count: > 0 }
                 ? result.CompletedPhases

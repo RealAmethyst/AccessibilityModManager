@@ -7,6 +7,14 @@ public interface ICliConsole
     TextWriter Error { get; }
     bool IsInputRedirected { get; }
     void WriteStatus(string message);
+    void WriteWarning(string message) => WriteLines(Error, message);
+
+    private static void WriteLines(TextWriter writer, string message)
+    {
+        foreach (var line in AccessibleText.MeaningfulLines(message))
+            writer.WriteLine(line);
+        writer.Flush();
+    }
 }
 
 public sealed class CliConsole : ICliConsole
@@ -41,7 +49,19 @@ public sealed class CliConsole : ICliConsole
             return;
         }
 
-        Error.WriteLine(message);
+        WriteLines(message);
+    }
+
+    public void WriteWarning(string message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        WriteLines(message);
+    }
+
+    private void WriteLines(string message)
+    {
+        foreach (var line in AccessibleText.MeaningfulLines(message))
+            Error.WriteLine(line);
         Error.Flush();
     }
 }

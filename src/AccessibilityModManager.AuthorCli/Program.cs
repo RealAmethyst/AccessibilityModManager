@@ -31,21 +31,7 @@ public static class Program
         }
 
         var outcomeWriter = services.GetRequiredService<OutcomeWriter>();
-        var root = RootCommands.Create();
-
-        ProjectCommands.AddTo(root, services);
-        AuthorCommands.AddTo(root, services);
-        GameCommands.AddTo(root, services);
-        DependencyCommands.AddTo(root, services);
-        ScriptCommands.AddTo(root, services);
-        PackageCommands.AddTo(root, services);
-        GitHubCommands.AddTo(root, services);
-        ReleaseCommands.AddTo(root, services);
-        IndexCommands.AddTo(root, services);
-        PatreonCommands.AddTo(root, services);
-        ServerCommands.AddTo(root, services);
-        SigningCommands.AddTo(root, services);
-        RegistryCommands.AddTo(root, services);
+        var root = CommandCatalog.CreateRoot(services);
 
         var parseInputs = args.Length == 0 ? new[] { "--help" } : args;
         var parseResult = root.Parse(parseInputs);

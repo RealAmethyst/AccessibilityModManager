@@ -356,7 +356,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     public PendingGateChange? GateChange { get; private set; }
 
     private readonly ServerUploadService _serverUpload;
-    private readonly ReleaseWorkflow _releaseWorkflow;
+    private readonly AuthoringWorkflowFacade _workflows;
 
     public ReleaseDialogViewModel(
         string gameId,
@@ -375,8 +375,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         Func<string, string, bool> confirmDialog,
         Func<string, string, string?, string?> browseForFile,
         Func<string, string?> showBuildPackageDialog,
-        ModRelease? existingRelease = null,
-        ReleaseWorkflow? releaseWorkflow = null)
+        ModRelease? existingRelease,
+        AuthoringWorkflowFacade workflows)
     {
         _gameId = gameId;
         GameDisplayName = gameDisplayName;
@@ -389,10 +389,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         _configService = configService;
         _patreonAuthor = patreonAuthor;
         _serverUpload = serverUpload;
-        _releaseWorkflow = releaseWorkflow ?? new ReleaseWorkflow(
-            gitHubService,
-            new PublishedAssetProbe(logger),
-            logger);
+        _workflows = workflows ?? throw new ArgumentNullException(nameof(workflows));
         _logger = logger;
         _showInfoDialog = showInfoDialog;
         _confirmDialog = confirmDialog;
@@ -857,7 +854,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         try
         {
             StatusMessage = $"Preparing {sourceName}...";
-            var stagedResult = await _releaseWorkflow.StagePackageAsync(
+            var stagedResult = await _workflows.StageReleasePackageAsync(
                 new PackageStageRequest(
                     _pluginId,
                     _gameId,

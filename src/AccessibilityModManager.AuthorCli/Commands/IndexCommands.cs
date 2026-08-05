@@ -9,16 +9,15 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class IndexCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var writer = services.GetRequiredService<OutcomeWriter>();
         var console = services.GetRequiredService<ICliConsole>();
         var projects = services.GetRequiredService<AuthorProjectContext>();
         var payloads = services.GetRequiredService<JsonPayloadService>();
-        var workflow = services.GetRequiredService<IIndexWorkflow>();
+        var workflows = services.GetRequiredService<AuthoringWorkflowFacade>();
         var config = services.GetRequiredService<AuthorConfigService>();
         var registry = services.GetRequiredService<RegistryMembershipChecker>();
 
@@ -41,7 +40,7 @@ public static class IndexCommands
         validate.SetAction(async (parseResult, cancellationToken) =>
         {
             var resolved = await CatalogCommandSupport.ResolveProjectAsync(projects, parseResult, cancellationToken);
-            var report = workflow.Validate(resolved.Index);
+            var report = workflows.ValidateIndex(resolved.Index);
             if (report.PublishBlockers.Count > 0)
             {
                 throw new WorkflowException(
@@ -65,13 +64,16 @@ public static class IndexCommands
             var resolved = await CatalogCommandSupport.ResolveProjectAsync(projects, parseResult, cancellationToken);
             if (CatalogCommandSupport.GetDryRun(parseResult))
             {
-                var preview = await workflow.ReconcileAsync(resolved.ProjectPath, dryRun: true, cancellationToken);
+                var preview = await workflows.ReconcileIndexAsync(resolved.ProjectPath, dryRun: true, cancellationToken);
                 ThrowIfFailed(preview);
                 return CatalogCommandSupport.Complete(writer, parseResult, preview);
             }
 
-            await using var lease = await projects.AcquireWriteLeaseAsync(resolved.ProjectPath, cancellationToken);
-            var result = await workflow.ReconcileAsync(resolved.ProjectPath, dryRun: false, cancellationToken);
+            var result = await workflows.ReconcileIndexAsync(
+                resolved.ProjectPath,
+                dryRun: false,
+                confirmAdoption: CatalogCommandSupport.GetYes(parseResult),
+                cancellationToken);
             ThrowIfFailed(result);
             return CatalogCommandSupport.Complete(writer, parseResult, result);
         });
@@ -97,13 +99,12 @@ public static class IndexCommands
             candidate = CatalogCommandSupport.StampGeneratedAt(candidate);
             if (CatalogCommandSupport.GetDryRun(parseResult))
             {
-                var preview = await workflow.SaveAsync(resolved.ProjectPath, candidate, dryRun: true, cancellationToken);
+                var preview = await workflows.SaveIndexAsync(resolved.ProjectPath, candidate, dryRun: true, cancellationToken);
                 ThrowIfFailed(preview);
                 return CatalogCommandSupport.Complete(writer, parseResult, preview);
             }
 
-            await using var lease = await projects.AcquireWriteLeaseAsync(resolved.ProjectPath, cancellationToken);
-            var result = await workflow.SaveAsync(resolved.ProjectPath, candidate, dryRun: false, cancellationToken);
+            var result = await workflows.SaveIndexAsync(resolved.ProjectPath, candidate, dryRun: false, cancellationToken);
             ThrowIfFailed(result);
             return CatalogCommandSupport.Complete(writer, parseResult, result);
         });
@@ -221,14 +222,14 @@ public static class IndexCommands
 
             if (request.DryRun)
             {
-                var preview = await workflow.PreviewPublishAsync(request, cancellationToken);
+                var preview = await workflows.PreviewIndexPublicationAsync(request, cancellationToken);
                 ThrowIfFailed(preview);
                 return CatalogCommandSupport.Complete(writer, parseResult, preview);
             }
 
             if (!CatalogCommandSupport.GetYes(parseResult))
             {
-                var preview = await workflow.PreviewPublishAsync(request, cancellationToken);
+                var preview = await workflows.PreviewIndexPublicationAsync(request, cancellationToken);
                 ThrowIfFailed(preview);
                 throw new WorkflowException(
                     WorkflowErrorKind.Conflict,
@@ -236,8 +237,7 @@ public static class IndexCommands
                     new[] { $"Publishing requires --yes after reviewing this destination: {preview.Value!.DestinationDescription}." });
             }
 
-            await using var lease = await projects.AcquireWriteLeaseAsync(resolved.ProjectPath, cancellationToken);
-            var result = await workflow.PublishAsync(request, confirmed: true, cancellationToken);
+            var result = await workflows.PublishIndexAsync(request, confirmed: true, cancellationToken);
             ThrowIfFailed(result);
             return CatalogCommandSupport.Complete(writer, parseResult, result);
         });
@@ -247,7 +247,7 @@ public static class IndexCommands
         lockShow.SetAction(async (parseResult, cancellationToken) =>
         {
             var resolved = await CatalogCommandSupport.ResolveProjectAsync(projects, parseResult, cancellationToken);
-            var result = await workflow.InspectLockAsync(resolved.Index.PluginId, cancellationToken);
+            var result = await workflows.InspectIndexLockAsync(resolved.Index.PluginId, cancellationToken);
             ThrowIfFailed(result);
             return CatalogCommandSupport.Complete(writer, parseResult, result);
         });
@@ -265,7 +265,7 @@ public static class IndexCommands
             var expected = parseResult.GetValue(fingerprint)!;
             if (CatalogCommandSupport.GetDryRun(parseResult))
             {
-                var current = await workflow.InspectLockAsync(resolved.Index.PluginId, cancellationToken);
+                var current = await workflows.InspectIndexLockAsync(resolved.Index.PluginId, cancellationToken);
                 ThrowIfFailed(current);
                 if (!current.Value!.Present ||
                     !string.Equals(current.Value.Fingerprint, expected, StringComparison.Ordinal))
@@ -285,7 +285,7 @@ public static class IndexCommands
                         "The exact displayed publish lock would be removed."));
             }
 
-            var result = await workflow.BreakLockAsync(
+            var result = await workflows.BreakIndexLockAsync(
                 resolved.Index.PluginId,
                 expected,
                 CatalogCommandSupport.GetYes(parseResult),
@@ -304,7 +304,7 @@ public static class IndexCommands
         index.Subcommands.Add(membership);
         index.Subcommands.Add(publish);
         index.Subcommands.Add(publishLock);
-        root.Subcommands.Add(index);
+        return index;
     }
 
     private static PublishDestination ParseDestination(string value) =>

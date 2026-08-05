@@ -9,9 +9,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class AuthorCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var outcomeWriter = services.GetRequiredService<OutcomeWriter>();
@@ -78,7 +77,6 @@ public static class AuthorCommands
 
         author.Subcommands.Add(show);
         author.Subcommands.Add(set);
-        root.Subcommands.Add(author);
+        return author;
     }
 }
-

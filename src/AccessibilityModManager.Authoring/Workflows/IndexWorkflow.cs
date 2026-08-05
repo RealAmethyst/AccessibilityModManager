@@ -39,6 +39,12 @@ public interface IIndexWorkflow
         string projectPath,
         bool dryRun,
         CancellationToken ct);
+    Task<WorkflowResult<PluginRepoIndex>> ReconcileAsync(
+        string projectPath,
+        bool dryRun,
+        bool confirmAdoption,
+        CancellationToken ct) =>
+        ReconcileAsync(projectPath, dryRun, ct);
     Task<WorkflowResult<string>> SaveAsync(
         string projectPath,
         PluginRepoIndex candidate,
@@ -117,11 +123,18 @@ public sealed class IndexWorkflow : IIndexWorkflow
     public Task<WorkflowResult<PluginRepoIndex>> ReconcileAsync(
         string projectPath,
         CancellationToken ct) =>
-        ReconcileAsync(projectPath, dryRun: false, ct);
+        ReconcileAsync(projectPath, dryRun: false, confirmAdoption: false, ct);
+
+    public Task<WorkflowResult<PluginRepoIndex>> ReconcileAsync(
+        string projectPath,
+        bool dryRun,
+        CancellationToken ct) =>
+        ReconcileAsync(projectPath, dryRun, confirmAdoption: false, ct);
 
     public async Task<WorkflowResult<PluginRepoIndex>> ReconcileAsync(
         string projectPath,
         bool dryRun,
+        bool confirmAdoption,
         CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectPath);
@@ -161,8 +174,14 @@ public sealed class IndexWorkflow : IIndexWorkflow
                     outcome.Message ?? "The published catalog could not be reconciled safely.",
                     local);
             case ReconcileAction.Unsigned:
-                return await ReconcileUnsignedAsync(fullProjectPath, local, localBytes, dryRun, ct);
-            case ReconcileAction.AdoptWithConsent:
+                return await ReconcileUnsignedAsync(
+                    fullProjectPath,
+                    local,
+                    localBytes,
+                    dryRun,
+                    confirmAdoption,
+                    ct);
+            case ReconcileAction.AdoptWithConsent when !confirmAdoption:
             {
                 var candidate = Deserialize(outcome.Document!);
                 return Failure(
@@ -171,6 +190,7 @@ public sealed class IndexWorkflow : IIndexWorkflow
                     outcome.Message ?? "Adopting the published catalog would replace unpublished local work.",
                     candidate);
             }
+            case ReconcileAction.AdoptWithConsent:
             case ReconcileAction.Adopt:
             {
                 var replacement = outcome.Document!;
@@ -553,6 +573,7 @@ public sealed class IndexWorkflow : IIndexWorkflow
         PluginRepoIndex local,
         byte[] localBytes,
         bool dryRun,
+        bool confirmAdoption,
         CancellationToken ct)
     {
         var destination = _config.GetPublishDestination(projectPath, local.PluginId);
@@ -609,7 +630,8 @@ public sealed class IndexWorkflow : IIndexWorkflow
 
         var localSha = Convert.ToHexStringLower(SHA256.HashData(localBytes));
         var lastPublished = _config.GetLastPublishedIndexSha(projectPath);
-        if (lastPublished is null || !string.Equals(localSha, lastPublished, StringComparison.OrdinalIgnoreCase))
+        if ((lastPublished is null || !string.Equals(localSha, lastPublished, StringComparison.OrdinalIgnoreCase)) &&
+            !confirmAdoption)
         {
             return Failure(
                 WorkflowErrorKind.Conflict,

@@ -8,16 +8,15 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class PackageCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var outcomeWriter = services.GetRequiredService<OutcomeWriter>();
         var console = services.GetRequiredService<ICliConsole>();
         var projects = services.GetRequiredService<AuthorProjectContext>();
         var config = services.GetRequiredService<AuthorConfigService>();
-        var workflow = services.GetRequiredService<PackageWorkflow>();
+        var workflows = services.GetRequiredService<AuthoringWorkflowFacade>();
         var hashes = services.GetRequiredService<Sha256HashService>();
 
         var package = new Command("package", "Build, validate, or hash wrapped mod packages.");
@@ -68,7 +67,7 @@ public static class PackageCommands
 
             if (CatalogCommandSupport.GetDryRun(parseResult))
             {
-                var preview = workflow.PreviewBuild(request);
+                var preview = workflows.PreviewPackageBuild(request);
                 return CatalogCommandSupport.Complete(
                     outcomeWriter,
                     parseResult,
@@ -88,7 +87,7 @@ public static class PackageCommands
                         $"Package build is valid and would write '{preview.OutputZipPath}'."));
             }
 
-            var inspection = await workflow.BuildAsync(request, cancellationToken);
+            var inspection = await workflows.BuildPackageAsync(request, cancellationToken);
             return CatalogCommandSupport.Complete(
                 outcomeWriter,
                 parseResult,
@@ -109,7 +108,7 @@ public static class PackageCommands
         validate.Options.Add(validateVersionOption);
         validate.SetAction(async (parseResult, cancellationToken) =>
         {
-            var inspection = await workflow.ValidateAsync(
+            var inspection = await workflows.ValidatePackageAsync(
                 parseResult.GetValue(zipOption)!,
                 parseResult.GetValue(pluginOption)!,
                 parseResult.GetValue(validateGameOption)!,
@@ -165,7 +164,7 @@ public static class PackageCommands
         package.Subcommands.Add(build);
         package.Subcommands.Add(validate);
         package.Subcommands.Add(hash);
-        root.Subcommands.Add(package);
+        return package;
     }
 
     private static Option<string> RequiredStringOption(string name, string description) =>

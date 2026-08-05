@@ -9,9 +9,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class DependencyCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var outcomeWriter = services.GetRequiredService<OutcomeWriter>();
@@ -226,7 +225,7 @@ public static class DependencyCommands
         dependency.Subcommands.Add(remove);
         dependency.Subcommands.Add(presets);
         dependency.Subcommands.Add(applyPreset);
-        root.Subcommands.Add(dependency);
+        return dependency;
     }
 
     private static Dependency ResolvePresetDependency(PluginRepoIndex index, string presetId)

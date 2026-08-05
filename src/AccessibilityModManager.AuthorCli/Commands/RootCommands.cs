@@ -21,32 +21,38 @@ public static class RootCommands
 
         root.Add(new Option<bool>(JsonOptionName)
         {
-            Description = "Write machine-readable JSON."
+            Description = "Write machine-readable JSON.",
+            Recursive = true
         });
 
         root.Add(new Option<bool>(QuietOptionName)
         {
-            Description = "Suppress human status lines."
+            Description = "Suppress human status lines.",
+            Recursive = true
         });
 
         root.Add(new Option<string?>(ProjectOptionName)
         {
-            Description = "Path to the author project directory."
+            Description = "Path to the author project directory.",
+            Recursive = true
         });
 
         root.Add(new Option<bool>(DryRunOptionName)
         {
-            Description = "Validate and preview without making durable changes."
+            Description = "Validate and preview without making durable changes.",
+            Recursive = true
         });
 
         root.Add(new Option<bool>(YesOptionName)
         {
-            Description = "Confirm prompts without bypassing validation or trust checks."
+            Description = "Confirm prompts without bypassing validation or trust checks.",
+            Recursive = true
         });
 
         root.Add(new Option<bool>(VerboseOptionName)
         {
-            Description = "Include detailed exception information."
+            Description = "Include detailed exception information.",
+            Recursive = true
         });
 
         root.SetAction(new Func<ParseResult, int>(_ =>

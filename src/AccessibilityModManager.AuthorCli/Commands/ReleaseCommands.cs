@@ -9,9 +9,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class ReleaseCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var writer = services.GetRequiredService<OutcomeWriter>();
@@ -20,8 +19,7 @@ public static class ReleaseCommands
         var indexFiles = services.GetRequiredService<IndexFileService>();
         var payloads = services.GetRequiredService<JsonPayloadService>();
         var catalog = services.GetRequiredService<CatalogWorkflow>();
-        var workflow = services.GetRequiredService<IReleaseWorkflow>();
-        var completeWorkflow = services.GetRequiredService<ICompleteReleasePublishWorkflow>();
+        var workflows = services.GetRequiredService<AuthoringWorkflowFacade>();
         var config = services.GetRequiredService<AuthorConfigService>();
 
         var release = new Command("release", "Read, edit, upload, or publish mod releases.");
@@ -163,15 +161,15 @@ public static class ReleaseCommands
                 cancellationToken);
             if (CatalogCommandSupport.GetDryRun(parseResult))
             {
-                var previewResult = await workflow.PreviewAsync(request, cancellationToken);
+                var previewResult = await workflows.PreviewReleaseAsync(request, cancellationToken);
                 ThrowIfFailed(previewResult);
                 return CatalogCommandSupport.Complete(writer, parseResult, previewResult);
             }
 
-            var preparedResult = await workflow.PrepareAsync(request, cancellationToken);
+            var preparedResult = await workflows.PrepareReleaseAsync(request, cancellationToken);
             ThrowIfFailed(preparedResult);
             await using var prepared = preparedResult.Value!;
-            var published = await workflow.PublishAsync(
+            var published = await workflows.PublishReleaseAsync(
                 prepared,
                 request,
                 CatalogCommandSupport.GetYes(parseResult),
@@ -228,14 +226,14 @@ public static class ReleaseCommands
 
             if (completeRequest.DryRun)
             {
-                var preview = await completeWorkflow.PreviewAsync(completeRequest, cancellationToken);
+                var preview = await workflows.PreviewCompleteReleaseAsync(completeRequest, cancellationToken);
                 ThrowIfFailed(preview);
                 return CatalogCommandSupport.Complete(writer, parseResult, preview);
             }
 
             if (!CatalogCommandSupport.GetYes(parseResult))
             {
-                var preview = await completeWorkflow.PreviewAsync(completeRequest, cancellationToken);
+                var preview = await workflows.PreviewCompleteReleaseAsync(completeRequest, cancellationToken);
                 ThrowIfFailed(preview);
                 throw new WorkflowException(
                     WorkflowErrorKind.Conflict,
@@ -246,7 +244,7 @@ public static class ReleaseCommands
                     });
             }
 
-            var result = await completeWorkflow.PublishAsync(
+            var result = await workflows.PublishCompleteReleaseAsync(
                 completeRequest,
                 confirmed: true,
                 cancellationToken);
@@ -263,7 +261,7 @@ public static class ReleaseCommands
         release.Subcommands.Add(remove);
         release.Subcommands.Add(upload);
         release.Subcommands.Add(publish);
-        root.Subcommands.Add(release);
+        return release;
     }
 
     private static Command CreateUploadCommand(string name, string description)

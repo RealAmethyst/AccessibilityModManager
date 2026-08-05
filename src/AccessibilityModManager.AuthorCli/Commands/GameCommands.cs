@@ -10,9 +10,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class GameCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var outcomeWriter = services.GetRequiredService<OutcomeWriter>();
@@ -284,7 +283,7 @@ public static class GameCommands
         game.Subcommands.Add(add);
         game.Subcommands.Add(update);
         game.Subcommands.Add(remove);
-        root.Subcommands.Add(game);
+        return game;
     }
 
     private static Option<string> CreateInputOption() =>

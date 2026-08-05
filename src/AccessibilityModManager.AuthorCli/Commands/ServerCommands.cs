@@ -9,9 +9,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class ServerCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var writer = services.GetRequiredService<OutcomeWriter>();
@@ -205,7 +204,7 @@ public static class ServerCommands
         server.Subcommands.Add(release);
         server.Subcommands.Add(gate);
         server.Subcommands.Add(publishLock);
-        root.Subcommands.Add(server);
+        return server;
     }
 
     private static Command CreateReleaseCommand(string name, string description)

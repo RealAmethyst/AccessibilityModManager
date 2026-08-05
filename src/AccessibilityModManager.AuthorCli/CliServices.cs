@@ -197,6 +197,8 @@ public static class CliServices
             services.AddSingleton<IServerWorkflow>(sp => sp.GetRequiredService<ServerWorkflow>());
         }
 
+        services.AddSingleton<AuthoringWorkflowFacade>();
+
         return services.BuildServiceProvider();
     }
 

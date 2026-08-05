@@ -7,9 +7,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class GitHubCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var gitHub = services.GetRequiredService<IGitHubService>();
@@ -68,7 +67,7 @@ public static class GitHubCommands
         command.Subcommands.Add(status);
         command.Subcommands.Add(repos);
         command.Subcommands.Add(releases);
-        root.Subcommands.Add(command);
+        return command;
     }
 
     private static async Task EnsureReadyAsync(IGitHubService gitHub, CancellationToken cancellationToken)

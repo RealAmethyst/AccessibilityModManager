@@ -7,9 +7,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class SigningCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var writer = services.GetRequiredService<OutcomeWriter>();
@@ -172,7 +171,7 @@ public static class SigningCommands
         signing.Subcommands.Add(change);
         signing.Subcommands.Add(claims);
         signing.Subcommands.Add(head);
-        root.Subcommands.Add(signing);
+        return signing;
     }
 
     private static Option<string> Required(string name, string description) =>

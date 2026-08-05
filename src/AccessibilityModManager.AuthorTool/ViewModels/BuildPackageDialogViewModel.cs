@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -10,7 +11,7 @@ namespace AccessibilityModManager.AuthorTool.ViewModels;
 
 public sealed partial class BuildPackageDialogViewModel : ObservableObject
 {
-    private readonly ManifestBuilderService _builder;
+    private readonly AuthoringWorkflowFacade _workflows;
     private readonly string _gameId;
     private readonly string _pluginId;
     private readonly IList<Dependency> _dependencies;
@@ -44,7 +45,7 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
         string pluginId,
         string suggestedVersion,
         IList<Dependency> dependencies,
-        ManifestBuilderService builder,
+        AuthoringWorkflowFacade workflows,
         Func<string?, string?> browseForFolder,
         Action<string, string> showInfoDialog,
         ILogger logger,
@@ -55,7 +56,7 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
         _pluginId = pluginId;
         _version = suggestedVersion;
         _dependencies = dependencies;
-        _builder = builder;
+        _workflows = workflows;
         _browseForFolder = browseForFolder;
         _showInfoDialog = showInfoDialog;
         _logger = logger;
@@ -117,14 +118,16 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
             var fileName = $"{_gameId}-v{sanitizedVersion}-amm.zip";
             var outputPath = Path.Combine(ManifestBuilderService.GetBuildsDirectory(), fileName);
 
-            var result = await _builder.BuildPackageAsync(
-                SourceFolder,
-                _gameId,
-                _pluginId,
-                sanitizedVersion,
-                _dependencies,
-                outputPath,
-                scripts: _scripts);
+            var result = await _workflows.BuildPackageAsync(
+                new PackageBuildRequest(
+                    SourceFolder,
+                    outputPath,
+                    _pluginId,
+                    _gameId,
+                    sanitizedVersion,
+                    _dependencies.ToList(),
+                    _scripts),
+                CancellationToken.None);
 
             ResultZipPath = result.ZipPath;
             StatusMessage = $"Built {result.FileCount} files. Returning to release dialog.";

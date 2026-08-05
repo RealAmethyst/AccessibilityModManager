@@ -7,9 +7,8 @@ namespace AccessibilityModManager.AuthorCli.Commands;
 
 public static class PatreonCommands
 {
-    public static void AddTo(RootCommand root, IServiceProvider services)
+    public static Command Create(IServiceProvider services)
     {
-        ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(services);
 
         var writer = services.GetRequiredService<OutcomeWriter>();
@@ -80,7 +79,7 @@ public static class PatreonCommands
         patreon.Subcommands.Add(logout);
         patreon.Subcommands.Add(tiers);
         patreon.Subcommands.Add(post);
-        root.Subcommands.Add(patreon);
+        return patreon;
     }
 
     private static int Complete<T>(
