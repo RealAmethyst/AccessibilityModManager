@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\AccessibilityModManager.Authoring\AccessibilityModManager.Authoring.csproj" />
     <ProjectReference Include="..\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
     <ProjectReference Include="..\AccessibilityModManager.Infrastructure\AccessibilityModManager.Infrastructure.csproj" />
   </ItemGroup>
@@ -10,7 +11,6 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.3" />
     <PackageReference Include="Serilog" Version="4.3.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
-    <PackageReference Include="SSH.NET" Version="2024.1.0" />
   </ItemGroup>
 
   <PropertyGroup>
