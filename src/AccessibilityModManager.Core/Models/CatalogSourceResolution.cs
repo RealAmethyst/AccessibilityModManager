@@ -96,15 +96,28 @@ public static class CatalogSourceResolver
     /// their uninstall records.</para>
     /// </summary>
     /// <returns>Null when the id is free; otherwise the reason it is not, written to be read aloud.</returns>
+    /// <param name="candidateIndexUrl">Where the candidate's catalog lives.</param>
+    /// <param name="knownAddresses">
+    /// The address this manager has known for each developer id — recorded from the signed registry
+    /// while it listed them, and from a source when the user added one.
+    ///
+    /// <para>This is what tells "the same catalog coming back" apart from "a stranger claiming an id
+    /// that has installs under it". Without it the installed-mods reservation blocks the most
+    /// ordinary thing there is: removing a source and putting it back, which is what removing one
+    /// is FOR.</para>
+    /// </param>
     public static string? CanAdd(
         IEnumerable<PluginEntry> registryPlugins,
         IEnumerable<UserPluginSource> existingSources,
         IEnumerable<string> installedPluginIds,
-        string candidatePluginId)
+        string candidatePluginId,
+        string candidateIndexUrl,
+        IReadOnlyDictionary<string, string> knownAddresses)
     {
         ArgumentNullException.ThrowIfNull(registryPlugins);
         ArgumentNullException.ThrowIfNull(existingSources);
         ArgumentNullException.ThrowIfNull(installedPluginIds);
+        ArgumentNullException.ThrowIfNull(knownAddresses);
 
         if (string.IsNullOrWhiteSpace(candidatePluginId))
             return "that source doesn't say which developer it belongs to";
@@ -114,9 +127,14 @@ public static class CatalogSourceResolver
         foreach (var existing in existingSources)
             claims.TryClaimUserSource(existing, out _);
 
-        // Last, so an id a configured source legitimately owns is attributed to that source rather
-        // than to its own installed files.
-        claims.ClaimInstalled(installedPluginIds);
+        // Installed mods reserve an identity only against a DIFFERENT catalog. Coming back with the
+        // same address the manager already knew for this developer is the same source returning,
+        // and the installs it would manage are the ones it created.
+        //
+        // The registry and configured-source refusals above are deliberately NOT exempted: those are
+        // about an id being in use right now, not about who created some files.
+        if (!IsSameCatalogAsBefore(knownAddresses, candidatePluginId, candidateIndexUrl))
+            claims.ClaimInstalled(installedPluginIds);
 
         if (!claims.IsClaimed(candidatePluginId, out var owner)) return null;
 
@@ -129,6 +147,27 @@ public static class CatalogSourceResolver
             _ =>
                 $"you have mods installed under the developer id \"{candidatePluginId}\", so a new source cannot use it"
         };
+    }
+
+    /// <summary>
+    /// Whether this exact catalog address is the one already on record for that developer id.
+    /// Ordinal on the address: a different address is a different catalog even when it differs only
+    /// by case or a trailing slash.
+    /// </summary>
+    private static bool IsSameCatalogAsBefore(
+        IReadOnlyDictionary<string, string> knownAddresses, string pluginId, string? candidateIndexUrl)
+    {
+        if (string.IsNullOrWhiteSpace(candidateIndexUrl)) return false;
+
+        foreach (var pair in knownAddresses)
+        {
+            if (!string.Equals(SafeId.Canonical(pair.Key), SafeId.Canonical(pluginId),
+                    StringComparison.OrdinalIgnoreCase)) continue;
+
+            return string.Equals(pair.Value?.Trim(), candidateIndexUrl.Trim(), StringComparison.Ordinal);
+        }
+
+        return false;
     }
 
     private static string Describe(UserPluginSource source) =>

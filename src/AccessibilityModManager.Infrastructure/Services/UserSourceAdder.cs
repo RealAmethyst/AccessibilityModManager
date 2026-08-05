@@ -35,11 +35,13 @@ public sealed class UserSourceAdder(IPluginRepoClient repoClient, ILogger logger
     /// <param name="registryPlugins">Entries from the accepted, signature-verified registry.</param>
     /// <param name="existingSources">Sources already configured.</param>
     /// <param name="installedPluginIds">Plugin ids with something installed under them.</param>
+    /// <param name="knownAddresses">Addresses already known per developer id — see CanAdd.</param>
     public async Task<SourcePreview> PreviewAsync(
         string? address,
         IReadOnlyList<PluginEntry> registryPlugins,
         IReadOnlyList<UserPluginSource> existingSources,
         IReadOnlyList<string> installedPluginIds,
+        IReadOnlyDictionary<string, string> knownAddresses,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(address))
@@ -96,7 +98,8 @@ public sealed class UserSourceAdder(IPluginRepoClient repoClient, ILogger logger
         }
 
         var clash = CatalogSourceResolver.CanAdd(
-            registryPlugins, existingSources, installedPluginIds, pluginId);
+            registryPlugins, existingSources, installedPluginIds, pluginId,
+            url.AbsoluteUri, knownAddresses);
         if (clash is not null)
             return Refuse($"That source can't be added because {clash}.");
 

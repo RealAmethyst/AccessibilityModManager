@@ -21,8 +21,10 @@ public sealed class UserSourceAdderTests
         IPluginRepoClient repo, string address,
         IReadOnlyList<PluginEntry>? registry = null,
         IReadOnlyList<UserPluginSource>? existing = null,
-        IReadOnlyList<string>? installed = null)
-        => Adder(repo).PreviewAsync(address, registry ?? [], existing ?? [], installed ?? []);
+        IReadOnlyList<string>? installed = null,
+        IReadOnlyDictionary<string, string>? known = null)
+        => Adder(repo).PreviewAsync(address, registry ?? [], existing ?? [], installed ?? [],
+            known ?? new Dictionary<string, string>());
 
     [Fact]
     public async Task A_good_address_previews_the_developer_and_their_mod_count()

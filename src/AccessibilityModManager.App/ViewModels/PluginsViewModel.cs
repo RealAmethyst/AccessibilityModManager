@@ -108,7 +108,8 @@ public partial class PluginsViewModel : ObservableObject
             var installed = await _receiptStore.InstalledPluginIdsAsync();
 
             var preview = await _sourceAdder.PreviewAsync(
-                address, registry.Plugins, config.UserPluginSources, installed, ct);
+                address, registry.Plugins, config.UserPluginSources, installed,
+                config.KnownPluginAddresses, ct);
 
             if (!preview.CanAdd)
             {
@@ -132,10 +133,15 @@ public partial class PluginsViewModel : ObservableObject
             await _configService.UpdateAsync(c =>
             {
                 var stillFree = CatalogSourceResolver.CanAdd(
-                    registry.Plugins, c.UserPluginSources, installed, preview.PluginId) is null;
+                    registry.Plugins, c.UserPluginSources, installed, preview.PluginId,
+                    preview.IndexUrl, c.KnownPluginAddresses) is null;
                 if (!stillFree) return;
 
                 c.UserPluginSources.Add(UserSourceAdder.Accept(preview, DateTimeOffset.UtcNow));
+
+                // Remembered so this source can be removed and added back later: the installed-mods
+                // reservation has to know this address is the one that created them.
+                c.KnownPluginAddresses[preview.PluginId] = preview.IndexUrl;
                 committed = true;
             });
 

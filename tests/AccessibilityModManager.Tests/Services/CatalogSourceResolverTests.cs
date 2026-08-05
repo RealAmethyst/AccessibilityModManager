@@ -13,6 +13,9 @@ public sealed class CatalogSourceResolverTests
     private static UserPluginSource Source(string id, string? name = null) =>
         TestUserSource.Accepted(id, name);
 
+    /// <summary>No address on record for anyone — the state before this manager has seen a source.</summary>
+    private static readonly Dictionary<string, string> NoHistory = [];
+
     [Fact]
     public void The_registry_is_read_first_and_user_sources_follow_in_the_order_added()
     {
@@ -72,7 +75,8 @@ public sealed class CatalogSourceResolverTests
     public void Adding_a_source_is_refused_when_the_registry_owns_the_id()
     {
         var reason = CatalogSourceResolver.CanAdd(
-            [TestPluginEntry.Unanchored("amethyst")], [], [], "amethyst");
+            [TestPluginEntry.Unanchored("amethyst")], [], [], "amethyst",
+            "https://example.invalid/new/index.json", NoHistory);
 
         Assert.NotNull(reason);
         Assert.Contains("amethyst", reason!, StringComparison.Ordinal);
@@ -85,7 +89,8 @@ public sealed class CatalogSourceResolverTests
         // different source taking that id would inherit those installs, including their uninstall
         // records — so the id stays reserved even though no catalog offers it any more.
         var reason = CatalogSourceResolver.CanAdd(
-            [TestPluginEntry.Unanchored("amethyst")], [], ["gone-away"], "gone-away");
+            [TestPluginEntry.Unanchored("amethyst")], [], ["gone-away"], "gone-away",
+            "https://example.invalid/new/index.json", NoHistory);
 
         Assert.NotNull(reason);
         Assert.Contains("installed", reason!, StringComparison.OrdinalIgnoreCase);
@@ -95,7 +100,8 @@ public sealed class CatalogSourceResolverTests
     public void Adding_a_source_is_refused_when_another_source_already_uses_the_id()
     {
         var reason = CatalogSourceResolver.CanAdd(
-            [], [Source("buu420", "Buu")], [], "buu420");
+            [], [Source("buu420", "Buu")], [], "buu420",
+            "https://example.invalid/new/index.json", NoHistory);
 
         Assert.NotNull(reason);
         Assert.Contains("already added", reason!, StringComparison.OrdinalIgnoreCase);
@@ -108,22 +114,76 @@ public sealed class CatalogSourceResolverTests
         // is attributed to that source rather than to its own files. Re-adding the same id is still
         // refused — but for the right reason, which is what the user is told.
         var reason = CatalogSourceResolver.CanAdd(
-            [], [Source("buu420", "Buu")], ["buu420"], "buu420");
+            [], [Source("buu420", "Buu")], ["buu420"], "buu420",
+            "https://example.invalid/new/index.json", NoHistory);
 
         Assert.NotNull(reason);
         Assert.Contains("already added", reason!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
+    public void The_same_source_can_be_added_back_after_being_removed()
+    {
+        // Exactly what Amethyst hit: she removed buu420's source, still had his mods installed, and
+        // was told "you have mods installed under the developer id buu420, so a new source cannot
+        // use it". The reservation is meant to stop a DIFFERENT catalog adopting somebody else's
+        // installs — not to stop the source that created them coming back, which is the whole point
+        // of being able to remove one.
+        var known = new Dictionary<string, string>
+        {
+            ["buu420"] = "https://raw.githubusercontent.com/buu420/buu-s-mods/main/index.json"
+        };
+
+        var reason = CatalogSourceResolver.CanAdd(
+            [TestPluginEntry.Unanchored("amethyst")], [], ["buu420"], "buu420",
+            "https://raw.githubusercontent.com/buu420/buu-s-mods/main/index.json", known);
+
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void A_DIFFERENT_catalog_still_cannot_take_an_id_with_installs_under_it()
+    {
+        // The other half. Same developer id, different address — that is a stranger claiming an
+        // identity whose installs someone else created, and it stays refused.
+        var known = new Dictionary<string, string>
+        {
+            ["buu420"] = "https://raw.githubusercontent.com/buu420/buu-s-mods/main/index.json"
+        };
+
+        var reason = CatalogSourceResolver.CanAdd(
+            [], [], ["buu420"], "buu420", "https://impostor.invalid/index.json", known);
+
+        Assert.NotNull(reason);
+        Assert.Contains("installed", reason!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_known_address_does_not_excuse_taking_a_registry_or_configured_id()
+    {
+        // The exemption is only about who created some FILES. An id that is in use right now stays
+        // refused however familiar the address is.
+        var known = new Dictionary<string, string>
+        {
+            ["amethyst"] = "https://accessibilitymods.com/registry/plugins/amethyst/index.json"
+        };
+
+        Assert.NotNull(CatalogSourceResolver.CanAdd(
+            [TestPluginEntry.Unanchored("amethyst")], [], [], "amethyst",
+            "https://accessibilitymods.com/registry/plugins/amethyst/index.json", known));
+    }
+
+    [Fact]
     public void A_free_id_may_be_added()
     {
         Assert.Null(CatalogSourceResolver.CanAdd(
-            [TestPluginEntry.Unanchored("amethyst")], [Source("buu420")], ["amethyst"], "newcomer"));
+            [TestPluginEntry.Unanchored("amethyst")], [Source("buu420")], ["amethyst"], "newcomer",
+            "https://example.invalid/new/index.json", NoHistory));
     }
 
     [Fact]
     public void A_source_with_no_id_is_refused_rather_than_added()
     {
-        Assert.NotNull(CatalogSourceResolver.CanAdd([], [], [], "   "));
+        Assert.NotNull(CatalogSourceResolver.CanAdd([], [], [], "   ", "https://example.invalid/i.json", NoHistory));
     }
 }

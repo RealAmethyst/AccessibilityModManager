@@ -48,7 +48,8 @@ public sealed class PreviewAgainstRealClientTests : IDisposable
         // The regression. Before the fix this failed for every genuine index, because no real
         // catalog declares itself to be called "candidate".
         var preview = await Adder(BuuStyleIndex()).PreviewAsync(
-            "https://raw.githubusercontent.com/buu420/buu-s-mods/main/index.json", [], [], []);
+            "https://raw.githubusercontent.com/buu420/buu-s-mods/main/index.json", [], [], [],
+            new Dictionary<string, string>());
 
         Assert.True(preview.CanAdd, preview.Refusal);
         Assert.Equal("buu420", preview.PluginId);
@@ -62,7 +63,7 @@ public sealed class PreviewAgainstRealClientTests : IDisposable
         // Declining must leave no trace, and a cached copy must never let a later preview succeed
         // against an address that is actually unreachable.
         await Adder(BuuStyleIndex()).PreviewAsync(
-            "https://example.invalid/index.json", [], [], []);
+            "https://example.invalid/index.json", [], [], [], new Dictionary<string, string>());
 
         var cacheDir = Path.Combine(_root, "cache", "indexes");
         var files = Directory.Exists(cacheDir)
@@ -82,7 +83,7 @@ public sealed class PreviewAgainstRealClientTests : IDisposable
             "\"pluginId\": \"someone-else\",\r\n        \"gameId\": \"ffviiold\"");
 
         var preview = await Adder(inconsistent).PreviewAsync(
-            "https://example.invalid/index.json", [], [], []);
+            "https://example.invalid/index.json", [], [], [], new Dictionary<string, string>());
 
         Assert.False(preview.CanAdd);
     }
@@ -93,7 +94,7 @@ public sealed class PreviewAgainstRealClientTests : IDisposable
         var bad = BuuStyleIndex().Replace("\"pluginId\": \"buu420\",\r\n  \"repoVersion\"",
                                           "\"pluginId\": \"buu420.\",\r\n  \"repoVersion\"");
 
-        var preview = await Adder(bad).PreviewAsync("https://example.invalid/index.json", [], [], []);
+        var preview = await Adder(bad).PreviewAsync("https://example.invalid/index.json", [], [], [], new Dictionary<string, string>());
 
         Assert.False(preview.CanAdd);
     }
@@ -104,7 +105,7 @@ public sealed class PreviewAgainstRealClientTests : IDisposable
         // The identity gate has to keep working now that the id comes from the document.
         var preview = await Adder(BuuStyleIndex().Replace("buu420", "amethyst")).PreviewAsync(
             "https://example.invalid/index.json",
-            [TestPluginEntry.Unanchored("amethyst")], [], []);
+            [TestPluginEntry.Unanchored("amethyst")], [], [], new Dictionary<string, string>());
 
         Assert.False(preview.CanAdd);
         Assert.Contains("amethyst", preview.Refusal!, StringComparison.OrdinalIgnoreCase);
