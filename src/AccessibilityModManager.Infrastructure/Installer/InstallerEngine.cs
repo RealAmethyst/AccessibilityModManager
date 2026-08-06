@@ -1524,62 +1524,116 @@ public sealed class InstallerEngine : IInstallerEngine
                 s.Dependency.Id, requestingPluginId);
         }
 
-        var blockers = statuses
+        var requiredBlockers = statuses
             .Where(s => s.Dependency.Required && s.Status != DependencyStatusKind.Installed)
             .ToList();
-        if (blockers.Count == 0)
+
+        // Optional dependencies never block the mod. Only optional entries with a complete
+        // automatic installer are offered here; manual-only optional links remain informational.
+        var optionalOffers = statuses
+            .Where(s => !s.Dependency.Required &&
+                        s.Status != DependencyStatusKind.Installed &&
+                        s.Dependency.Fix?.AutoInstall is not null)
+            .ToList();
+
+        if (requiredBlockers.Count == 0 && optionalOffers.Count == 0)
         {
             _logger.Information(
-                "Dep resolution for {GameId}/{PluginId}: all {Count} declared dependencies report Installed.",
-                game.Game.GameId, requestingPluginId, statuses.Count);
+                "Dep resolution for {GameId}/{PluginId}: no required blockers or optional auto-install offers.",
+                game.Game.GameId, requestingPluginId);
             return;
         }
 
-        _logger.Information("Dep resolution for {GameId}/{PluginId}: {BlockerCount} of {TotalCount} required deps need install: {Ids}",
-            game.Game.GameId, requestingPluginId, blockers.Count, statuses.Count,
-            string.Join(", ", blockers.Select(b => b.Dependency.Id)));
+        _logger.Information(
+            "Dep resolution for {GameId}/{PluginId}: {RequiredCount} required blockers and {OptionalCount} optional offers: {Ids}",
+            game.Game.GameId, requestingPluginId, requiredBlockers.Count, optionalOffers.Count,
+            string.Join(", ", requiredBlockers.Concat(optionalOffers).Select(b => b.Dependency.Id)));
 
         // Preserve manifest order (F14=A): match each blocker back to its position in the
         // game's Dependencies list so author-controlled ordering survives.
-        blockers = game.Game.Dependencies
-            .Select(d => blockers.FirstOrDefault(b => b.Dependency.Id == d.Id))
+        requiredBlockers = game.Game.Dependencies
+            .Select(d => requiredBlockers.FirstOrDefault(b => b.Dependency.Id == d.Id))
             .Where(b => b is not null)
             .Cast<DependencyStatus>()
             .ToList();
 
-        var autoBlockers = blockers
-            .Where(b => b.Dependency.Fix?.AutoInstall is not null)
+        optionalOffers = game.Game.Dependencies
+            .Select(d => optionalOffers.FirstOrDefault(b => b.Dependency.Id == d.Id))
+            .Where(b => b is not null)
+            .Cast<DependencyStatus>()
             .ToList();
 
-        if (autoBlockers.Count > 0)
+        var promptCandidates = game.Game.Dependencies
+            .Select(d => requiredBlockers.Concat(optionalOffers)
+                .FirstOrDefault(b => b.Dependency.Id == d.Id))
+            .Where(b => b?.Dependency.Fix?.AutoInstall is not null)
+            .Cast<DependencyStatus>()
+            .ToList();
+
+        var requiredAutoBlockers = promptCandidates.Where(b => b.Dependency.Required).ToList();
+        var selectedOptionalIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (promptCandidates.Count > 0)
         {
             if (host == null)
-                throw new MissingRequiredDependencyException(blockers,
-                    "Auto-installable dependencies are present but no dependency host was supplied.");
+            {
+                if (requiredAutoBlockers.Count > 0)
+                    throw new MissingRequiredDependencyException(requiredBlockers,
+                        "Auto-installable required dependencies are present but no dependency host was supplied.");
 
-            var prompt = BuildDependencyPrompt(game, requestingPluginId, autoBlockers);
-            var ok = await host.ConfirmDependencyInstallAsync(prompt, ct);
-            if (!ok)
-                throw new OperationCanceledException("User declined the dependency install.");
+                _logger.Information(
+                    "Skipping {Count} optional dependency offers because no dependency host was supplied: {Ids}",
+                    optionalOffers.Count, string.Join(", ", optionalOffers.Select(o => o.Dependency.Id)));
+            }
+            else
+            {
+                var prompt = BuildDependencyPrompt(game, requestingPluginId, promptCandidates);
+                var decision = await host.ConfirmDependencyInstallAsync(prompt, ct);
+                if (!decision.Accepted)
+                    throw new OperationCanceledException("User cancelled the dependency selection.");
+
+                selectedOptionalIds.UnionWith(decision.SelectedOptionalDependencyIds);
+            }
         }
 
-        foreach (var b in blockers)
+        var dependenciesToProcess = game.Game.Dependencies
+            .Select(d => requiredBlockers.Concat(optionalOffers)
+                .FirstOrDefault(b => b.Dependency.Id == d.Id))
+            .Where(b => b is not null &&
+                        (b.Dependency.Required || selectedOptionalIds.Contains(b.Dependency.Id)))
+            .Cast<DependencyStatus>()
+            .ToList();
+
+        foreach (var b in dependenciesToProcess)
         {
             ct.ThrowIfCancellationRequested();
             var dep = b.Dependency;
+            var isRequired = dep.Required;
+            DepAcquisition? thisAcquisition = null;
 
             if (dep.Fix?.AutoInstall is not null)
             {
                 var result = await _depAutoInstaller.InstallAsync(dep, game, requestingPluginId, host, ct);
                 if (!result.Succeeded)
-                    throw new InvalidOperationException(
-                        $"Dependency '{dep.Id}' auto-install failed: {result.ErrorMessage}");
+                {
+                    if (isRequired)
+                        throw new InvalidOperationException(
+                            $"Dependency '{dep.Id}' auto-install failed: {result.ErrorMessage}");
+
+                    _logger.Warning(
+                        "Optional dependency {DepId} failed to install; continuing with the core mod. Error: {Error}",
+                        dep.Id, result.ErrorMessage ?? "unknown error");
+                    continue;
+                }
                 // The installer reports exactly what it changed — nothing to release when the
                 // plugin was already refcounted before this run.
                 if (result.Acquisition != null)
-                    acquisitions.Add(result.Acquisition);
+                {
+                    thisAcquisition = result.Acquisition;
+                    acquisitions.Add(thisAcquisition);
+                }
             }
-            else if (!string.IsNullOrWhiteSpace(dep.Fix?.DownloadUrl))
+            else if (isRequired && !string.IsNullOrWhiteSpace(dep.Fix?.DownloadUrl))
             {
                 if (host == null)
                     throw new MissingRequiredDependencyException(new[] { b },
@@ -1600,18 +1654,38 @@ public sealed class InstallerEngine : IInstallerEngine
                     throw new OperationCanceledException(
                         $"User cancelled while installing '{dep.Id}' manually.");
             }
-            else
+            else if (isRequired)
             {
                 throw new MissingRequiredDependencyException(new[] { b },
                     $"Dependency '{dep.Id}' is missing and has no Fix configured.");
             }
+            else
+            {
+                continue;
+            }
 
-            // Recheck this single dep. Finding 26 (F5=B reversed): a required dep still missing
-            // after its install aborts the flow — the caller releases this run's acquisitions.
+            // Recheck this single dep. Required dependencies still fail closed. An optional
+            // install that did not satisfy its check is released when possible and does not block
+            // the core mod.
             var recheck = await _dependencyChecker.CheckAsync(game, ct);
             var still = recheck.FirstOrDefault(s => s.Dependency.Id == dep.Id);
-            if (still is { Status: not DependencyStatusKind.Installed })
+            if (still?.Status != DependencyStatusKind.Installed)
             {
+                if (!isRequired)
+                {
+                    if (thisAcquisition != null)
+                    {
+                        await _depAutoInstaller.ReleaseAcquisitionsAsync(
+                            game, requestingPluginId, new[] { thisAcquisition });
+                        acquisitions.Remove(thisAcquisition);
+                    }
+
+                    _logger.Warning(
+                        "Optional dependency {DepId} still reports {Status} after its installer; continuing with the core mod.",
+                        dep.Id, still?.Status.ToString() ?? "missing from recheck");
+                    continue;
+                }
+
                 // Says where it LOOKED, not just what it looked for. The two differ whenever the
                 // dependency installs into a subfolder — the check path is always relative to the
                 // game folder, while autoInstall.targetDir is not — and naming only the rule sends
@@ -1619,7 +1693,7 @@ public sealed class InstallerEngine : IInstallerEngine
                 // reported a missing 'version.dll' while the file sat in Updater\1.5.0, and nothing
                 // in the message said so.
                 throw new InvalidOperationException(
-                    $"Dependency '{dep.Id}' still reports {still.Status} after installing it — aborting so the mod " +
+                    $"Dependency '{dep.Id}' still reports {still?.Status.ToString() ?? "missing from recheck"} after installing it — aborting so the mod " +
                     $"isn't installed without its loader. Check rule: {DescribeCheck(dep)}, looked for under " +
                     $"'{game.InstallPath}'{DescribeInstallTarget(dep)}. If the dependency's files are actually in " +
                     "place, the check rule in the plugin index is wrong and needs fixing.");
@@ -1705,6 +1779,7 @@ public sealed class InstallerEngine : IInstallerEngine
             items.Add(new DependencyInstallPromptItem
             {
                 Dependency = b.Dependency,
+                IsRequired = b.Dependency.Required,
                 KindLabel = auto switch
                 {
                     ExtractZipAutoInstall => "Extract ZIP",

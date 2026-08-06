@@ -12,12 +12,13 @@ namespace AccessibilityModManager.Core.Interfaces;
 public interface IDependencyHost
 {
     /// <summary>
-    /// First step of the two-step combined consent (F16=C). Show the user the list of deps
-    /// that will be auto-installed before any download starts. Skipped when there are no
-    /// auto-installable dependencies.
+    /// First step of the two-step combined consent (F16=C). Show the user the list of required
+    /// deps that will be auto-installed and optional deps they may choose before any download
+    /// starts. Skipped when there are no auto-installable dependencies to show.
     /// </summary>
-    /// <returns>True to proceed with the dep install, false to abort.</returns>
-    Task<bool> ConfirmDependencyInstallAsync(DependencyInstallPrompt prompt, CancellationToken ct);
+    /// <returns>Whether to proceed and which optional dependencies the user selected.</returns>
+    Task<DependencyInstallDecision> ConfirmDependencyInstallAsync(
+        DependencyInstallPrompt prompt, CancellationToken ct);
 
     /// <summary>
     /// A required dependency has no <c>AutoInstall</c> block and the user has to install it
@@ -50,6 +51,12 @@ public sealed class DependencyInstallPromptItem
 {
     public required Dependency Dependency { get; init; }
 
+    /// <summary>
+    /// Required entries are always installed when the dialog is accepted. Optional entries are
+    /// offered unchecked and install only when their id is returned in the decision.
+    /// </summary>
+    public required bool IsRequired { get; init; }
+
     /// <summary>"Extract ZIP", "Run installer", or "Copy file" — friendly label for the dialog.</summary>
     public required string KindLabel { get; init; }
 
@@ -58,6 +65,19 @@ public sealed class DependencyInstallPromptItem
 
     /// <summary>True when the dep needs admin (runInstaller with NeedsAdmin=true).</summary>
     public bool NeedsAdmin { get; init; }
+}
+
+/// <summary>
+/// Result of the combined dependency prompt. Required dependencies are deliberately absent from
+/// the selection set: the engine enforces them independently so a host cannot accidentally omit
+/// one. Unknown optional ids are ignored.
+/// </summary>
+public sealed class DependencyInstallDecision
+{
+    public bool Accepted { get; init; }
+
+    public IReadOnlySet<string> SelectedOptionalDependencyIds { get; init; } =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>

@@ -54,18 +54,23 @@
             </ListBox.ItemContainerStyle>
             <ListBox.ItemTemplate>
                 <DataTemplate DataType="{x:Type vm:DependencyPromptItemViewModel}">
-                    <StackPanel>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="{Binding Heading}" FontWeight="Bold" FontSize="14"/>
-                            <TextBlock Text="  (needs administrator)"
-                                       Foreground="DarkRed"
-                                       FontWeight="Bold"
-                                       FontSize="13"
-                                       Visibility="{Binding NeedsAdminVisibility}"/>
+                    <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                              IsEnabled="{Binding CanChangeSelection}"
+                              AutomationProperties.Name="{Binding AnnouncementText}"
+                              HorizontalContentAlignment="Stretch">
+                        <StackPanel Margin="6,0,0,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Heading}" FontWeight="Bold" FontSize="14"/>
+                                <TextBlock Text="  (needs administrator)"
+                                           Foreground="DarkRed"
+                                           FontWeight="Bold"
+                                           FontSize="13"
+                                           Visibility="{Binding NeedsAdminVisibility}"/>
+                            </StackPanel>
+                            <TextBlock Text="{Binding KindLine}" Margin="0,4,0,0"/>
+                            <TextBlock Text="{Binding DownloadLine}" FontFamily="Consolas" Margin="0,2,0,0"/>
                         </StackPanel>
-                        <TextBlock Text="{Binding KindLine}" Margin="0,4,0,0"/>
-                        <TextBlock Text="{Binding DownloadLine}" FontFamily="Consolas" Margin="0,2,0,0"/>
-                    </StackPanel>
+                    </CheckBox>
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>
@@ -75,8 +80,8 @@
                     HorizontalAlignment="Right"
                     Margin="0,16,0,0">
             <Button x:Name="ProceedButton"
-                    Content="Install dependencies"
-                    AutomationProperties.Name="Install dependencies"
+                    Content="Continue"
+                    AutomationProperties.Name="Continue with selected dependencies"
                     Click="Proceed_Click"
                     MinWidth="180"
                     Margin="0,0,8,0"/>

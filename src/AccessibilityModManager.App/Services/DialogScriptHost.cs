@@ -61,16 +61,18 @@ public sealed class DialogScriptHost : IScriptHost, IDependencyHost
 
     // -------- IDependencyHost --------
 
-    public Task<bool> ConfirmDependencyInstallAsync(DependencyInstallPrompt prompt, CancellationToken ct)
+    public Task<DependencyInstallDecision> ConfirmDependencyInstallAsync(
+        DependencyInstallPrompt prompt, CancellationToken ct)
     {
-        if (ct.IsCancellationRequested) return Task.FromResult(false);
+        if (ct.IsCancellationRequested)
+            return Task.FromResult(new DependencyInstallDecision { Accepted = false });
 
         var op = _dispatcher.InvokeAsync(() =>
         {
             var vm = new DependencyWarningDialogViewModel(prompt);
             var dialog = new DependencyWarningDialog(vm) { Owner = _ownerProvider() };
             dialog.ShowDialog();
-            return dialog.UserAccepted;
+            return dialog.Decision;
         });
         return op.Task;
     }

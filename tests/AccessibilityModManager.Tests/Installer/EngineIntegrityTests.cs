@@ -119,6 +119,94 @@ public class EngineIntegrityTests : IDisposable
         Assert.Null(await _receiptStore.LoadAsync("game-x", "plug-b"));
     }
 
+    // ------------------------------------------------ optional dependency consent and isolation
+
+    [Fact]
+    public async Task Install_MissingOptionalAutoDependencies_Unselected_AreOfferedInManifestOrder()
+    {
+        var dependencies = new[]
+        {
+            MakeAutoDep("first-optional", required: false, "first.dll", new string('1', 64)),
+            MakeAutoDep("second-optional", required: false, "second.dll", new string('2', 64))
+        };
+        var host = new RecordingDepHost();
+        var engine = MakeEngine(new HttpClient(new RefuseHandler()));
+        var zip = CreateMod("plug-b", "game-x", "1.0.0");
+
+        var receipt = await engine.InstallAsync(
+            MakeGameWithDependencies("plug-b", dependencies),
+            MakeRelease("plug-b", "1.0.0", zip), zip, dependencyHost: host);
+
+        Assert.NotNull(host.Prompt);
+        Assert.Equal(new[] { "first-optional", "second-optional" },
+            host.Prompt!.Items.Select(i => i.Dependency.Id));
+        Assert.All(host.Prompt.Items, item => Assert.False(item.IsRequired));
+        Assert.Empty(host.StartedDependencyIds);
+        Assert.True(File.Exists(Path.Combine(_gameDir, "mods", "mod.dll")));
+        Assert.Equal("1.0.0", receipt.InstalledVersion);
+        Assert.Null(await _depStore.LoadAsync("game-x", "first-optional"));
+        Assert.Null(await _depStore.LoadAsync("game-x", "second-optional"));
+    }
+
+    [Fact]
+    public async Task Install_SelectedOptionalAutoDependency_InstallsBeforeCoreMod()
+    {
+        var depZip = MakeZip(("optional.dll", "optional-loader"));
+        var dependency = MakeAutoDep("optional-loader", required: false, "optional.dll", Sha(depZip));
+        var host = new RecordingDepHost("optional-loader");
+        var engine = MakeEngine(new HttpClient(new ServeFileHandler(depZip)));
+        var zip = CreateMod("plug-b", "game-x", "1.0.0");
+
+        await engine.InstallAsync(
+            MakeGameWithDependencies("plug-b", dependency),
+            MakeRelease("plug-b", "1.0.0", zip), zip, dependencyHost: host);
+
+        Assert.Equal(new[] { "optional-loader" }, host.StartedDependencyIds);
+        Assert.Contains(("optional-loader", true), host.FinishedDependencies);
+        Assert.True(File.Exists(Path.Combine(_gameDir, "optional.dll")));
+        Assert.True(File.Exists(Path.Combine(_gameDir, "mods", "mod.dll")));
+        Assert.NotNull(await _depStore.LoadAsync("game-x", "optional-loader"));
+    }
+
+    [Fact]
+    public async Task Install_SelectedOptionalAutoDependencyFails_CoreModStillInstalls()
+    {
+        var depZip = MakeZip(("optional.dll", "wrong-hash"));
+        var dependency = MakeAutoDep("optional-loader", required: false, "optional.dll", new string('0', 64));
+        var host = new RecordingDepHost("optional-loader");
+        var engine = MakeEngine(new HttpClient(new ServeFileHandler(depZip)));
+        var zip = CreateMod("plug-b", "game-x", "1.0.0");
+
+        var receipt = await engine.InstallAsync(
+            MakeGameWithDependencies("plug-b", dependency),
+            MakeRelease("plug-b", "1.0.0", zip), zip, dependencyHost: host);
+
+        Assert.Contains(("optional-loader", false), host.FinishedDependencies);
+        Assert.Equal("1.0.0", receipt.InstalledVersion);
+        Assert.True(File.Exists(Path.Combine(_gameDir, "mods", "mod.dll")));
+        Assert.False(File.Exists(Path.Combine(_gameDir, "optional.dll")));
+        Assert.Null(await _depStore.LoadAsync("game-x", "optional-loader"));
+    }
+
+    [Fact]
+    public async Task Install_RequiredAutoDependency_CannotBeOmittedByHostSelection()
+    {
+        var depZip = MakeZip(("required.dll", "required-loader"));
+        var dependency = MakeAutoDep("required-loader", required: true, "required.dll", Sha(depZip));
+        var host = new RecordingDepHost();
+        var engine = MakeEngine(new HttpClient(new ServeFileHandler(depZip)));
+        var zip = CreateMod("plug-b", "game-x", "1.0.0");
+
+        await engine.InstallAsync(
+            MakeGameWithDependencies("plug-b", dependency),
+            MakeRelease("plug-b", "1.0.0", zip), zip, dependencyHost: host);
+
+        var promptItem = Assert.Single(host.Prompt!.Items);
+        Assert.True(promptItem.IsRequired);
+        Assert.Equal(new[] { "required-loader" }, host.StartedDependencyIds);
+        Assert.True(File.Exists(Path.Combine(_gameDir, "required.dll")));
+    }
+
     // ---------------------------------------------------------------- finding 31: version cross-check
 
     [Fact]
@@ -521,6 +609,19 @@ public class EngineIntegrityTests : IDisposable
         };
     }
 
+    private GameInstall MakeGameWithDependencies(string pluginId, params Dependency[] dependencies) => new()
+    {
+        Game = new GameDefinition
+        {
+            GameId = "game-x",
+            DisplayName = "Game X",
+            Dependencies = dependencies.ToList()
+        },
+        PluginId = pluginId,
+        InstallPath = _gameDir,
+        IsValid = true
+    };
+
     private static ModRelease MakeRelease(string pluginId, string version, string zipPath) => new()
     {
         GameId = "game-x",
@@ -543,6 +644,21 @@ public class EngineIntegrityTests : IDisposable
             AutoInstall = new ExtractZipAutoInstall { Sha256 = sha }
         }
     };
+
+    private static Dependency MakeAutoDep(
+        string id, bool required, string checkFile, string sha) =>
+        new()
+        {
+            Id = id,
+            Type = "framework",
+            Required = required,
+            Check = new DependencyCheck { FilePath = checkFile },
+            Fix = new DependencyFix
+            {
+                DownloadUrl = $"https://example.invalid/{id}.zip",
+                AutoInstall = new ExtractZipAutoInstall { Sha256 = sha }
+            }
+        };
 
     private DependencyReceipt MakeDepReceipt(string depId, params string[] dependents) => new()
     {
@@ -712,11 +828,55 @@ public class EngineIntegrityTests : IDisposable
 
     private sealed class AcceptingDepHost : IDependencyHost
     {
-        public Task<bool> ConfirmDependencyInstallAsync(DependencyInstallPrompt prompt, CancellationToken ct) => Task.FromResult(true);
+        public Task<DependencyInstallDecision> ConfirmDependencyInstallAsync(
+            DependencyInstallPrompt prompt, CancellationToken ct) =>
+            Task.FromResult(new DependencyInstallDecision
+            {
+                Accepted = true,
+                SelectedOptionalDependencyIds = new HashSet<string>(
+                    prompt.Items.Where(i => !i.IsRequired).Select(i => i.Dependency.Id),
+                    StringComparer.OrdinalIgnoreCase)
+            });
         public Task<bool> AwaitManualDependencyAsync(DependencyManualPrompt prompt, CancellationToken ct) => Task.FromResult(true);
         public void OnDependencyStarting(string dependencyId, string kind, string displayName) { }
         public void OnDependencyOutputLine(string line) { }
         public void OnDependencyFinished(string dependencyId, bool succeeded) { }
+    }
+
+    private sealed class RecordingDepHost : IDependencyHost
+    {
+        private readonly HashSet<string> _selectedOptionalIds;
+
+        public RecordingDepHost(params string[] selectedOptionalIds)
+        {
+            _selectedOptionalIds = new HashSet<string>(selectedOptionalIds, StringComparer.OrdinalIgnoreCase);
+        }
+
+        public DependencyInstallPrompt? Prompt { get; private set; }
+        public List<string> StartedDependencyIds { get; } = new();
+        public List<(string Id, bool Succeeded)> FinishedDependencies { get; } = new();
+
+        public Task<DependencyInstallDecision> ConfirmDependencyInstallAsync(
+            DependencyInstallPrompt prompt, CancellationToken ct)
+        {
+            Prompt = prompt;
+            return Task.FromResult(new DependencyInstallDecision
+            {
+                Accepted = true,
+                SelectedOptionalDependencyIds = _selectedOptionalIds
+            });
+        }
+
+        public Task<bool> AwaitManualDependencyAsync(DependencyManualPrompt prompt, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public void OnDependencyStarting(string dependencyId, string kind, string displayName) =>
+            StartedDependencyIds.Add(dependencyId);
+
+        public void OnDependencyOutputLine(string line) { }
+
+        public void OnDependencyFinished(string dependencyId, bool succeeded) =>
+            FinishedDependencies.Add((dependencyId, succeeded));
     }
 
     private sealed class RefuseHandler : HttpMessageHandler

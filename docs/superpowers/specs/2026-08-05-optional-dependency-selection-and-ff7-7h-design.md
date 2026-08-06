@@ -7,9 +7,9 @@ Accessibility Mod Manager currently prompts only for missing required dependenci
 The fix has two coordinated parts:
 
 1. Accessibility Mod Manager will offer missing auto-installable optional dependencies in its existing dependency consent dialog.
-2. The Blind Soldier catalog will identify each FFVII edition using edition-specific files and will offer the official 7th Heaven installer as an optional, unchecked component for both editions.
+2. The Blind Soldier catalog will identify the native 2013 and 2026 runtimes using edition-specific files, plus expose a separate 2013 compatibility-runtime entry for people who want 7th Heaven with the Steam 2026 installation.
 
-FFNx will not be installed or configured directly by Blind Soldier. If the user chooses 7th Heaven, the official 7th Heaven installer remains responsible for its own FFNx integration.
+The native 2026 entry never offers or installs 7th Heaven or FFNx. A real 2013 install offers both components as optional choices. The 2013 compatibility entry installs both before the x86 Blind Soldier payload, placing FFNx in `ff7/workingdir` where the embedded runtime expects it.
 
 ## User Experience
 
@@ -50,7 +50,7 @@ After acceptance, the engine processes dependencies in manifest order:
 - selected optional failures are reported and skipped without creating an acquisition receipt;
 - required failures roll back acquisitions and abort.
 
-## FFVII Edition Detection
+## FFVII Runtime Detection
 
 The catalog will use the same concrete edition markers already validated by Blind Soldier's installer module.
 
@@ -70,22 +70,25 @@ FFVII 2026 requires:
 
 These rules intentionally reject a stale 2013 override that points to the 2026 root, and reject incomplete converted folders that do not contain a runnable 2013 installation.
 
-## Official 7th Heaven Component
+The separate `ffviioldsteam2026` entry uses the 2026 root probes, but installs the x86 package into the embedded 2013 runtime. Keeping a distinct game ID prevents the native x64 package and compatibility x86 package from replacing one another in manager state.
 
-Both game entries will declare the same optional `seventh-heaven` framework dependency:
+## 7th Heaven and FFNx Components
 
-- Required: false
+The real 2013 entry declares both `seventh-heaven` and `ffnx-game-driver` as optional. The compatibility-runtime entry declares both as required because that entry exists specifically to make 7th Heaven work with the embedded 2013 runtime. The native 2026 entry declares neither dependency.
+
+The official `seventh-heaven` dependency uses:
+
 - Minimum version: `4.5.2.0`
 - Detection: per-user uninstall registry entry for 7th Heaven, reading `DisplayVersion`
 - Installer: official 7th Heaven 4.5.2 release executable
 - SHA-256: `1a6cb7b3da0788e5fdc4174fd75367cb81a0825fec92e2817a8e95ef8f455c55`
 - Elevation: not requested by the manager; the signed/packaged installer may handle its own requirements
 
-The catalog will no longer label an FFNx archive as 7th Heaven, require `FFNx.toml`, or extract FFNx directly into the detected game directory.
+The pinned `ffnx-game-driver` dependency uses FFNx Steam 1.24.3 with SHA-256 `2be45f486974f0979b849d0525eb66427df62483ec99e9339e9773e9e52afc0d`. It checks and extracts at the game root for a real 2013 install, but checks and extracts under `ff7/workingdir` for the Steam 2026 compatibility runtime.
 
 ## Compatibility
 
-Older Accessibility Mod Manager builds ignore optional dependencies during resolution, so Blind Soldier remains installable after the catalog correction. Updated manager builds add the optional selection experience. This lets the catalog safety fix ship immediately without making the mod dependent on the manager PR being merged first.
+Older Accessibility Mod Manager builds ignore optional dependencies during resolution, so the native Blind Soldier packages remain installable after the catalog correction. Updated manager builds add the optional selection experience for real 2013 installs. The compatibility entry uses required dependencies and therefore works through the existing dependency flow as well.
 
 ## Verification
 
@@ -98,5 +101,4 @@ Manager tests will cover:
 - required dependencies remaining unavoidable and fatal on failure;
 - manifest order and accessible selection state.
 
-Catalog verification will parse the published JSON and exercise the edition probes against controlled 2013, 2026, cross-edition, and incomplete fixtures. It will also verify that both editions reference the official optional 7th Heaven installer and that no dependency named for 7th Heaven points to FFNx.
-
+Catalog verification will parse the published JSON and exercise the runtime probes against controlled 2013, 2026, cross-edition, and incomplete fixtures. It will verify the three-entry dependency split, the official 7th Heaven installer, the pinned FFNx archive and target folders, and the absence of both components from native 2026.

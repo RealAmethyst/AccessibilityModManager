@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan.
 
-**Goal:** Let users optionally install the official 7th Heaven package while making FFVII 2013 and FFVII 2026 detection edition-safe.
+**Goal:** Let real FFVII 2013 users optionally install 7th Heaven and FFNx, while providing a separate 2013 compatibility-runtime entry for Steam 2026 and keeping native 2026 free of both dependencies.
 
-**Architecture:** Extend the dependency-host consent contract with an explicit selection result, keep required-dependency enforcement in `InstallerEngine`, and expose required/optional state through native WPF checkboxes. Independently harden the Blind Soldier catalog with concrete executable/file/folder probes and an optional registry-detected official 7th Heaven installer.
+**Architecture:** Extend the dependency-host consent contract with an explicit selection result, keep required-dependency enforcement in `InstallerEngine`, and expose required/optional state through native WPF checkboxes. Independently harden the Blind Soldier catalog with three runtime-specific entries: real 2013, native 2026, and the embedded 2013 runtime inside Steam 2026.
 
-**Tech Stack:** .NET 9, C#, WPF, xUnit, PowerShell, JSON, GitHub CLI.
+**Tech Stack:** .NET 10, C#, WPF, xUnit, PowerShell, JSON, GitHub CLI.
 
 ## Global Constraints
 
@@ -14,7 +14,8 @@
 - Optional dependencies must never block installation of the core mod.
 - Required selections are enforced by the engine even if a host returns a malformed selection.
 - Keep all prompt items in catalog manifest order.
-- Do not install, configure, or overwrite FFNx directly.
+- Native 2026 must not declare 7th Heaven or FFNx.
+- FFNx targets the game root on real 2013 and `ff7/workingdir` on the compatibility runtime.
 - Do not modify either repository's main branch until verification succeeds.
 - Apply source edits with `apply_patch`.
 
@@ -98,10 +99,12 @@ dotnet build src\AccessibilityModManager.App\AccessibilityModManager.App.csproj 
 - [ ] First create a runnable catalog contract test that fails against the current JSON.
 - [ ] Assert the 2013 fixture passes only the 2013 probes and the 2026 fixture passes only the 2026 probes.
 - [ ] Assert incomplete and cross-edition roots fail.
-- [ ] Assert both entries offer `seventh-heaven` as optional, registry-detected version `4.5.2.0`, using the official installer URL and verified SHA-256.
-- [ ] Assert no dependency with a 7th Heaven ID downloads an FFNx asset or checks `FFNx.toml`.
+- [ ] Assert real 2013 offers `seventh-heaven` and `ffnx-game-driver` as optional.
+- [ ] Assert native 2026 contains neither dependency.
+- [ ] Assert the 2013 compatibility entry requires both dependencies, uses the 2026 probes, and targets FFNx at `ff7/workingdir`.
+- [ ] Assert the compatibility release uses the x86 Blind Soldier payload under its own game ID.
 - [ ] Run the test and observe failure.
-- [ ] Update both game definitions and rerun until green.
+- [ ] Update all three runtime definitions and rerun until green.
 
 Verification command:
 
@@ -116,7 +119,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Verify-Ff7Catalog.ps1
 - [ ] Run the complete manager test suite.
 - [ ] Run the catalog contract test.
 - [ ] Validate the catalog using the author CLI.
-- [ ] Verify the official 7th Heaven installer hash independently.
+- [ ] Verify the official 7th Heaven installer and FFNx archive hashes independently.
 - [ ] Verify current FFVII 2026 is detected only as 2026 and the stale 2013 override is rejected.
 - [ ] Inspect final diffs for accidental package/release changes.
 
@@ -137,4 +140,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Verify-Ff7Catalog.ps1
 - [ ] Fast-forward the owned catalog main branch only after tests pass, then push it.
 - [ ] Fetch the raw published `index.json` and verify probes, optional dependency metadata, and current releases.
 - [ ] Report the PR and publication links plus exact verification results.
-
