@@ -567,29 +567,264 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             : PublishDestinationLabel + ".";
     }
 
+    /// <summary>Reads what the catalog's own download addresses actually serve.</summary>
+    private static readonly PublishedAssetProbe PublishedAssets = new();
+
     /// <summary>
-    /// Whether a download address actually answers.
-    /// <para>
-    /// Deliberately a GET, not a HEAD: the download server answers GET (401 for a gated file, 404
-    /// for a missing one) but rejects HEAD with 405, so a HEAD check would report every healthy
-    /// release as unreachable. Reading response headers only means the package body is never
-    /// pulled down just to prove it's there.
-    /// </para>
+    /// How long to keep asking before calling a public address unreachable.
+    ///
+    /// <para>The download server does not read the catalog on every request — it reloads it on a
+    /// timer (30 seconds at the time of writing). So for up to one full interval after an index
+    /// goes live, a release the catalog now describes is one the server has not heard about yet,
+    /// and it answers 404 correctly. Asking once, immediately, tests the timer rather than the
+    /// configuration. Two full intervals is the smallest window that survives a publish landing
+    /// just after a tick.</para>
     /// </summary>
-    private async Task<bool> PublicUrlServesSomethingAsync(string url)
+    private static readonly TimeSpan ReachabilityDeadline = TimeSpan.FromSeconds(75);
+
+    private static readonly TimeSpan ReachabilityRetryGap = TimeSpan.FromSeconds(4);
+
+    /// <summary>
+    /// Per-request bound. Generous because a hit streams and hashes a whole mod package, and a
+    /// large one over a slow line is not a fault.
+    /// </summary>
+    private static readonly TimeSpan ReachabilityRequestTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The whole check's budget. A per-release bound is not enough on its own: a catalog of
+    /// releases that are each slow, or each absent, would multiply into something that looks like
+    /// a hang long after the answer stopped being in doubt.
+    /// </summary>
+    private static readonly TimeSpan ReachabilityTotalBudget = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Whether a download address answers, retrying across the download server's catalog reload.
+    ///
+    /// <para>Deliberately a GET, not a HEAD: the download server answers GET (401 for a gated file,
+    /// 404 for a missing one) but rejects HEAD with 405, so a HEAD check would report every healthy
+    /// release as unreachable.</para>
+    ///
+    /// <para><paramref name="retryUntil"/> is shared by every release in one check rather than
+    /// restarted for each. The wait exists to let ONE catalog reload happen; once it has, a second
+    /// release learns nothing by waiting again, and per-release windows would multiply a catalog of
+    /// absent releases into many minutes of asking questions already answered.</para>
+    /// </summary>
+    private async Task<PublishedAssetResult> PublicUrlAnswersAsync(
+        Uri url, bool hash, DateTimeOffset retryUntil, CancellationToken ct)
     {
-        try
+        PublishedAssetResult result;
+
+        while (true)
         {
-            using var response = await CatalogHttp.GetAsync(
-                url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
-            return response.IsSuccessStatusCode;
+            result = await PublishedAssets.ReadAsync(url, hash, ReachabilityRequestTimeout, ct);
+
+            // Only absence is worth waiting out — it is the one answer the catalog reload changes.
+            // A 5xx, a refused connection or bytes that don't match are not repaired by waiting,
+            // and retrying them would just make the author wait to be told the same thing.
+            if (result.Status != PublishedAssetStatus.Absent) break;
+            if (DateTimeOffset.UtcNow + ReachabilityRetryGap >= retryUntil) break;
+
+            await Task.Delay(ReachabilityRetryGap, ct);
         }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "Couldn't reach the public download address {Url}", url);
-            return false;
-        }
+
+        _logger.Information("Public download {Url}: {Status} ({Detail})", url, result.Status, result.Detail);
+        return result;
     }
+
+    /// <summary>
+    /// Proves that every public release the live catalog describes can actually be downloaded from
+    /// the author's own server, and that what comes back is what the catalog promised.
+    ///
+    /// <para>This is the check the release dialog cannot make. An ungated file is servable only
+    /// because the catalog says so, so before the index is live the right answer to "does this
+    /// address work" is "no", and no amount of checking at upload time can distinguish that from a
+    /// public base URL that points somewhere the uploads never went. Once the catalog is live the
+    /// question has a true answer, and this asks it.</para>
+    ///
+    /// <para>Every public server-hosted release is checked, not just the one that changed. The
+    /// cost is the size of the public catalog, paid once per publish, and the breadth is the point:
+    /// a base URL that changes, a web root that moves, or an upload that never landed breaks
+    /// releases nobody edited that day, and the diff-shaped version of this check would look
+    /// straight past them. It also removes the need to remember anything between runs — a release
+    /// that could not be verified last time is simply checked again on the next publish.</para>
+    ///
+    /// <para>NEVER GATES THE PUBLISH. It runs after the catalog is live and after any queued tier
+    /// change has been applied, and reports what it found. Letting it fail the publish would let a
+    /// health check undo a committed publishing position, or — worse — leave a release the catalog
+    /// calls public still locked on the server, because that removal is what a failed publish
+    /// skips.</para>
+    /// </summary>
+    private async Task VerifyPublicDownloadsAsync()
+    {
+        var cfg = _configService.GetServerUploadConfig();
+        if (cfg is null) return;
+
+        var downloads = PublicDownloadVerification.ServerHostedPublicDownloads(_index, cfg.PublicBaseUrl);
+        if (downloads.Count == 0) return;
+
+        // What the publish itself just said. Kept, because that is the part the author was waiting
+        // for — a health check appended to it must not erase it.
+        var published = StatusMessage?.TrimEnd() ?? "";
+
+        // Three outcomes, kept apart because they license completely different sentences. "The
+        // server says there is nothing there" is a fact about what every user will get. "This
+        // computer couldn't tell" is a fact about this computer — a name that didn't resolve, a
+        // proxy, a timeout, a 500 — and saying it means the download is broken for everyone is the
+        // same overreach that sent the author to check settings that were correct.
+        var missing = new List<PublicDownload>();
+        var wrongBytes = new List<PublicDownload>();
+        var unverified = new List<(PublicDownload Download, string Reason)>();
+
+        using var budget = new CancellationTokenSource(ReachabilityTotalBudget);
+        var retryUntil = DateTimeOffset.UtcNow + ReachabilityDeadline;
+
+        for (var i = 0; i < downloads.Count; i++)
+        {
+            var download = downloads[i];
+
+            if (budget.IsCancellationRequested)
+            {
+                unverified.Add((download, "the check ran out of time before reaching it"));
+                continue;
+            }
+
+            StatusMessage = $"Checking your downloads work ({i + 1} of {downloads.Count}): {download.Describe()}...";
+
+            PublishedAssetResult result;
+            try
+            {
+                result = await PublicUrlAnswersAsync(download.Url, hash: true, retryUntil, budget.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // The budget ran out mid-read. Nothing was learned about this address, and saying
+                // otherwise would report a slow line as a broken release.
+                _logger.Warning("Checking public downloads ran out of time at {Url}", download.Url);
+                unverified.Add((download, "the check ran out of time"));
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "Checking {Url} stopped unexpectedly", download.Url);
+                unverified.Add((download, ex.Message));
+                continue;
+            }
+
+            switch (result.Status)
+            {
+                case PublishedAssetStatus.Absent:
+                    missing.Add(download);
+                    break;
+
+                case PublishedAssetStatus.Unreadable:
+                    unverified.Add((download, result.Detail));
+                    break;
+
+                default:
+                    if (!string.Equals(result.Sha256, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                        wrongBytes.Add(download);
+                    break;
+            }
+        }
+
+        if (missing.Count == 0 && wrongBytes.Count == 0 && unverified.Count == 0)
+        {
+            var verified = downloads.Count == 1
+                ? "Your public download works."
+                : $"All {downloads.Count} of your public downloads work.";
+            StatusMessage = Follows(published, verified);
+            return;
+        }
+
+        ReportBrokenDownloads(missing, wrongBytes, unverified, cfg, published);
+    }
+
+    /// <summary>
+    /// Says what was actually observed, and offers the likeliest cause as a suggestion rather than
+    /// a diagnosis. The old wording asserted that a missing file MEANT the public base URL and the
+    /// remote releases path disagreed, and sent the author to check settings that were correct —
+    /// absence can equally be an upload that never landed or a download server that hasn't picked
+    /// the catalog up, and "couldn't be read" is usually neither.
+    /// </summary>
+    private void ReportBrokenDownloads(
+        List<PublicDownload> missing,
+        List<PublicDownload> wrongBytes,
+        List<(PublicDownload Download, string Reason)> unverified,
+        ServerUploadConfig cfg,
+        string published)
+    {
+        var body = new StringBuilder(
+            "Your index is published — this is about the files it points at.\n\n");
+
+        if (missing.Count > 0)
+        {
+            body.Append(missing.Count == 1
+                ? "Your server says this release isn't there:\n"
+                : "Your server says these releases aren't there:\n");
+
+            foreach (var download in missing)
+                body.Append($"\n  {download.Describe()}\n  {download.Url}\n");
+
+            body.Append(
+                $"\nThat answer is the same for everyone, so anyone following your catalog would get " +
+                $"nothing. Worth checking: that the public base URL and the remote releases path in " +
+                $"Server upload settings describe the same place on {cfg.Host}, and that the file " +
+                $"really did land on the server.\n");
+        }
+
+        if (wrongBytes.Count > 0)
+        {
+            if (missing.Count > 0) body.Append('\n');
+            body.Append(wrongBytes.Count == 1
+                ? "This release downloaded, but the file doesn't match what your catalog promises:\n"
+                : "These releases downloaded, but the files don't match what your catalog promises:\n");
+
+            foreach (var download in wrongBytes)
+                body.Append($"\n  {download.Describe()}\n  {download.Url}\n");
+
+            body.Append(
+                "\nEvery user's manager checks the fingerprint before installing, so these would be " +
+                "refused. Upload the release again.\n");
+        }
+
+        if (unverified.Count > 0)
+        {
+            if (missing.Count > 0 || wrongBytes.Count > 0) body.Append('\n');
+            body.Append(unverified.Count == 1
+                ? "This release couldn't be checked from this computer:\n"
+                : "These releases couldn't be checked from this computer:\n");
+
+            foreach (var (download, reason) in unverified)
+                body.Append($"\n  {download.Describe()} — {reason}\n");
+
+            body.Append(
+                "\nThat isn't the server saying they're missing — it's this check not getting an " +
+                "answer it could read, which a connection here can cause just as easily as anything " +
+                "on the server. They may well be fine. Publishing again checks them.\n");
+        }
+
+        var broken = missing.Count + wrongBytes.Count;
+
+        _showInfoDialog(
+            broken > 0 ? "Published, but some downloads don't work" : "Published, but not everything was checked",
+            body.ToString().TrimEnd());
+
+        var summary = (broken, unverified.Count) switch
+        {
+            (0, var u) => u == 1
+                ? "One of your public downloads couldn't be checked."
+                : $"{u} of your public downloads couldn't be checked.",
+            (1, 0) => "One of your public downloads doesn't work.",
+            (var b, 0) => $"{b} of your public downloads don't work.",
+            (1, _) => "One of your public downloads doesn't work, and others couldn't be checked.",
+            (var b, _) => $"{b} of your public downloads don't work, and others couldn't be checked."
+        };
+        StatusMessage = Follows(published, summary);
+    }
+
+    /// <summary>Appends a health line to whatever the publish itself reported, if anything.</summary>
+    private static string Follows(string published, string addition) =>
+        published.Length == 0 ? addition : $"{published} {addition}";
 
     /// <summary>
     /// Remembers exactly what went live, so a later open can tell "this folder is stale" apart
@@ -1110,7 +1345,11 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             return;
         }
 
-        await PublishToDestinationAsync(SuggestCommitMessage(), confirmFirst: true);
+        // Only when the live catalog describes this folder. On every other outcome what is live is
+        // something else — an earlier publish that turned out to have landed, or nothing at all —
+        // and checking THIS folder's addresses would be asking about a catalog that isn't there.
+        if (await PublishToDestinationAsync(SuggestCommitMessage(), confirmFirst: true))
+            await VerifyPublicDownloadsAsync();
     }
 
     /// <summary>
@@ -1865,7 +2104,11 @@ public sealed partial class IndexEditorViewModel : ObservableObject
 
         var catalogMatches = await PublishToDestinationAsync(commitMessage, confirmFirst: true);
 
-        if (gateChange == null) return;
+        if (gateChange == null)
+        {
+            if (catalogMatches) await VerifyPublicDownloadsAsync();
+            return;
+        }
 
         // What the server enforces changes here and nowhere else: only once the public catalog
         // describes the release does the enforcement follow it. A declined or failed publish
@@ -1891,19 +2134,6 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 await _serverUploadService.RemoveGateAsync(
                     cfg, gateChange.GameId, gateChange.Version, CancellationToken.None);
 
-                // Now that it's actually public, the address in the index can finally be proved —
-                // the one check a still-locked release couldn't run for itself.
-                if (!string.IsNullOrWhiteSpace(gateChange.PublicUrl) &&
-                    !await PublicUrlServesSomethingAsync(gateChange.PublicUrl!))
-                {
-                    _showInfoDialog("Published, but the download address doesn't answer",
-                        $"The release is public now, but {gateChange.PublicUrl} didn't return the file.\n\n" +
-                        "Users following your catalog would get nothing. Check that the public base URL and " +
-                        "the remote releases path in Server upload settings describe the same place.");
-                    StatusMessage = "Published, but the public download address didn't answer.";
-                    return;
-                }
-
                 StatusMessage = "Published the index, and the release is now public on your server.";
             }
             else
@@ -1924,7 +2154,14 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                     ? "Until that's cleared, patrons can download it and everyone else is turned away."
                     : "Until then, your server still enforces the old tiers.") +
                 "\n\nSave the release again to retry.");
+            return;
         }
+
+        // Only now — with the catalog live AND the server enforcing what it says — is there a
+        // question worth asking about the addresses. Checking before the tier lock came off would
+        // have reported a release that is public in the catalog and still gated on the wire, which
+        // is a true description of an intermediate state and a useless thing to alarm anyone with.
+        await VerifyPublicDownloadsAsync();
     }
 
     private string SuggestCommitMessage()

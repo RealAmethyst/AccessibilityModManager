@@ -25,13 +25,8 @@ namespace AccessibilityModManager.AuthorTool.ViewModels;
 /// before the bytes it protects exist.)
 /// </para>
 /// </summary>
-/// <param name="PublicUrl">
-/// Where the release will be downloadable once the lock is off — so the editor can confirm the
-/// address actually serves it, which is the one check a still-gated release can't do for itself.
-/// Null when the change doesn't make anything public.
-/// </param>
 public sealed record PendingGateChange(
-    string GameId, string Version, PatreonGate? Gate, string? PublicUrl = null);
+    string GameId, string Version, PatreonGate? Gate);
 
 /// <summary>
 /// What the release dialog hands back: the release to file in the index, plus any server-side
@@ -42,7 +37,13 @@ public sealed record ReleaseDialogResult(ModRelease Release, PendingGateChange? 
 public sealed partial class ReleaseDialogViewModel : ObservableObject
 {
     /// <summary>Reads back what's already published, to compare it with what's about to be.</summary>
-    private static readonly System.Net.Http.HttpClient PublishedAssetHttp = new();
+    private static readonly PublishedAssetProbe PublishedAssets = new();
+
+    /// <summary>
+    /// How long one read of a published package may take. Generous: these are mod packages, and
+    /// hashing one means streaming all of it.
+    /// </summary>
+    private static readonly TimeSpan PublishedAssetTimeout = TimeSpan.FromMinutes(5);
 
     private readonly Sha256HashService _hashService;
     private readonly GitHubService _gitHubService;
@@ -963,6 +964,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             }
         }
 
+        var verificationDeferred = false;
+
         try
         {
             StatusMessage = state.PackageMatches
@@ -981,34 +984,49 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             // Handed to the index editor, which removes the lock only after the public catalog
             // has switched to the version that says this release is open.
             if (outcome.GateRemovalPending)
-                GateChange = new PendingGateChange(_gameId, version, null, outcome.PublicUrl);
+                GateChange = new PendingGateChange(_gameId, version, null);
             else if (outcome.GateChangePending)
                 GateChange = new PendingGateChange(_gameId, version, gate);
 
-            // For a public release, prove the address in the index actually serves these bytes.
-            // Uploading over SFTP and building a URL from settings are two different things: a
-            // web root that doesn't correspond to the upload path produces a confident publish
-            // and a 404 for every user. (A gated release can't be checked this way — the server
-            // would rightly turn us away — so its first real test is a patron's download. Nor can
-            // one whose tier lock is still standing while the catalog catches up: it is public in
-            // intent but correctly still gated on the wire.)
+            // For a public release, read back what the address actually serves. Uploading over SFTP
+            // and building a URL from settings are two different things: a web root that doesn't
+            // correspond to the upload path produces a confident publish and a 404 for every user.
+            // (A gated release can't be checked this way — the server would rightly turn us away —
+            // so its first real test is a patron's download. Nor can one whose tier lock is still
+            // standing while the catalog catches up: it is public in intent but correctly still
+            // gated on the wire.)
+            //
+            // A CLEAN 404 IS THE EXPECTED ANSWER HERE, and reading it as a fault made publishing a
+            // new public release impossible. The download server serves an ungated file only when
+            // the live catalog already lists that exact address as public — deliberately, so a file
+            // appearing on disk can never become downloadable on its own. At this point the release
+            // has not been saved into the index, let alone published, so the catalog cannot list it
+            // and the server is right to say there is nothing there. Refusing the save on that
+            // answer also made it unreachable for ever: the save was the only thing that could have
+            // put it in the catalog. Proving the address therefore belongs after the catalog is
+            // live, and that is where the index editor now does it.
             if (gate == null && !outcome.GateRemovalPending)
             {
                 StatusMessage = "Checking the public address serves it...";
-                var (status, servedSha) = await TryHashPublishedAsync(new Uri(outcome.PublicUrl));
-                if (status != PublishedProbe.Found)
+                var probe = await TryHashPublishedAsync(new Uri(outcome.PublicUrl));
+
+                // Anything but a clean "not there" is still worth stopping for. A 5xx, a TLS
+                // failure or a name that doesn't resolve says nothing about the catalog and
+                // everything about the address, and none of them is repaired by publishing.
+                if (probe.Status == PublishedAssetStatus.Unreadable)
                 {
-                    _showInfoDialog("Uploaded, but the public address doesn't serve it",
-                        $"The file went up, but {outcome.PublicUrl} " +
-                        (status == PublishedProbe.Absent ? "returned nothing." : "couldn't be read.") +
-                        "\n\nIf it returned nothing, the public base URL and the remote releases path in " +
-                        "Server upload settings most likely point at different places. The release hasn't " +
-                        "been saved — check that and save again.");
-                    StatusMessage = "Published, but not reachable at its public address.";
+                    _showInfoDialog("Uploaded, but the public address couldn't be read",
+                        $"The file went up, but reading {outcome.PublicUrl} gave: {probe.Detail}.\n\n" +
+                        "A release your catalog doesn't list yet is declined with a plain \"not there\", " +
+                        "and this wasn't that. It could be the public base URL in Server upload settings, " +
+                        "your download server, or the connection from this computer.\n\n" +
+                        "The release hasn't been saved.");
+                    StatusMessage = "Uploaded, but the public address couldn't be read.";
                     return false;
                 }
 
-                if (!string.Equals(servedSha, staged.Sha256, StringComparison.OrdinalIgnoreCase))
+                if (probe.Status == PublishedAssetStatus.Found &&
+                    !string.Equals(probe.Sha256, staged.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     _showInfoDialog("The public address serves different bytes",
                         $"{outcome.PublicUrl} returned a file that isn't the one just published. Something " +
@@ -1017,9 +1035,14 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                     StatusMessage = "Published, but the public address serves something else.";
                     return false;
                 }
+
+                // The expected answer for a release the live catalog doesn't describe yet. Recorded
+                // rather than passed over, so the status line doesn't imply the address was proved
+                // when proving it is still to come.
+                verificationDeferred = probe.Status == PublishedAssetStatus.Absent;
             }
 
-            StatusMessage = DescribeOutcome(outcome);
+            StatusMessage = DescribeOutcome(outcome, verificationDeferred);
             return true;
         }
         catch (Exception ex)
@@ -1033,7 +1056,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         }
     }
 
-    private static string DescribeOutcome(ServerUploadService.ReleasePublishOutcome outcome)
+    private static string DescribeOutcome(
+        ServerUploadService.ReleasePublishOutcome outcome, bool verificationDeferred = false)
     {
         var what = outcome.PackageUploaded
             ? "Uploaded"
@@ -1041,6 +1065,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         if (outcome.GateRemovalPending) what += "; the tier lock comes off once the catalog is live";
         else if (outcome.GateChangePending) what += "; the new tiers apply once the catalog is live";
         else if (outcome.GateWritten) what += ", tier lock in place";
+        else if (verificationDeferred)
+            what += "; its download gets checked once you publish the catalog that lists it";
         return $"{what}. URL: {outcome.PublicUrl}";
     }
 
@@ -1099,8 +1125,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 return false;
             }
 
-            // The address the index will carry for this release — the one worth proving works.
-            GateChange = new PendingGateChange(_gameId, version, null, PackageUrl);
+            GateChange = new PendingGateChange(_gameId, version, null);
             return true;
         }
 
@@ -1155,9 +1180,9 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         // went out, and forever if it didn't.
         if (hasTag)
         {
-            var (status, publishedSha) = await TryHashPublishedAsync(assetUrl);
+            var published = await TryHashPublishedAsync(assetUrl);
 
-            if (status == PublishedProbe.Unreadable)
+            if (published.Status == PublishedAssetStatus.Unreadable)
             {
                 // The upload below replaces whatever is at that address. Doing that without
                 // knowing what's there is how live bytes get overwritten behind a published
@@ -1169,9 +1194,9 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 return false;
             }
 
-            if (status == PublishedProbe.Found)
+            if (published.Status == PublishedAssetStatus.Found)
             {
-                if (!string.Equals(publishedSha, staged.Sha256, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(published.Sha256, staged.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     _showInfoDialog("That release already has this file",
                         $"{SourceRepo} {tag} already publishes {staged.FileName}, and this ZIP is a different " +
@@ -1227,48 +1252,20 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         return true;
     }
 
-    /// <summary>What reading a published asset told us. The three cases must not be conflated.</summary>
-    private enum PublishedProbe
-    {
-        /// <summary>It's there and we hashed it.</summary>
-        Found,
-        /// <summary>The server says there's nothing at that address.</summary>
-        Absent,
-        /// <summary>We couldn't tell — a network blip, a proxy error, anything but a clean 404.</summary>
-        Unreadable
-    }
-
     /// <summary>
-    /// Hashes whatever is published at <paramref name="url"/>, streaming it rather than holding
-    /// it in memory — these are mod packages, and buffering one to compare a fingerprint is
-    /// needless pressure. "Couldn't read it" is deliberately distinct from "it isn't there":
-    /// treating a transient failure as absence is exactly how an overwrite gets waved through.
+    /// Hashes whatever is published at <paramref name="url"/>. Every outcome is logged, including
+    /// absence: the "it isn't there" answer used to be the one that said nothing at all, which is
+    /// how a live publishing failure left a log with a silent gap exactly where the reason was.
     /// </summary>
-    private async Task<(PublishedProbe Status, string? Sha256)> TryHashPublishedAsync(Uri url)
+    private async Task<PublishedAssetResult> TryHashPublishedAsync(Uri url)
     {
-        try
-        {
-            var separator = string.IsNullOrEmpty(url.Query) ? "?" : "&";
-            var busted = new Uri(url.AbsoluteUri + separator + "_=" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            using var response = await PublishedAssetHttp.GetAsync(
-                busted, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
+        var result = await PublishedAssets.ReadAsync(
+            url, hash: true, PublishedAssetTimeout, CancellationToken.None);
 
-            if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Gone)
-                return (PublishedProbe.Absent, null);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.Warning("Reading {Url} returned {Status}", url, response.StatusCode);
-                return (PublishedProbe.Unreadable, null);
-            }
+        _logger.Information("Reading the published asset at {Url}: {Status} ({Detail})",
+            url, result.Status, result.Detail);
 
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            return (PublishedProbe.Found, Convert.ToHexStringLower(await SHA256.HashDataAsync(stream)));
-        }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "Couldn't read the published asset at {Url}", url);
-            return (PublishedProbe.Unreadable, null);
-        }
+        return result;
     }
 
     /// <summary>
