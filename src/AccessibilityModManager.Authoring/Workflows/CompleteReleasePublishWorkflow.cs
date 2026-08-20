@@ -117,7 +117,8 @@ public sealed class CompleteReleasePublishWorkflow(
                     candidate,
                     normalized.IndexDestination,
                     normalized.IndexCommitMessage,
-                    DryRun: true),
+                    DryRun: true,
+                    PreserveExistingReleaseIdentities: true),
                 ct);
             if (indexPreview.ErrorKind != WorkflowErrorKind.None || indexPreview.Value is null)
                 return ForwardFailure<IndexPublishPreview, CompleteReleasePublishPreview>(indexPreview);
@@ -254,7 +255,8 @@ public sealed class CompleteReleasePublishWorkflow(
                     candidate,
                     normalized.IndexDestination,
                     normalized.IndexCommitMessage,
-                    DryRun: false),
+                    DryRun: false,
+                    PreserveExistingReleaseIdentities: true),
                 confirmed: true,
                 ct);
 

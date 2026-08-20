@@ -1,4 +1,3 @@
-using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -16,7 +15,8 @@ public sealed record IndexPublishRequest(
     PluginRepoIndex Candidate,
     PublishDestination Destination,
     string CommitMessage,
-    bool DryRun);
+    bool DryRun,
+    bool PreserveExistingReleaseIdentities = false);
 
 public sealed record IndexPublishPreview(
     string PluginId,
@@ -85,7 +85,6 @@ public sealed class IndexWorkflow : IIndexWorkflow
     private readonly AuthorConfigService _config;
     private readonly IndexFileService _indexFiles;
     private readonly IGitHubService _gitHub;
-    private readonly HttpClient _http;
     private readonly ILogger _logger;
 
     public IndexWorkflow(
@@ -98,7 +97,6 @@ public sealed class IndexWorkflow : IIndexWorkflow
         AuthorConfigService config,
         IndexFileService indexFiles,
         IGitHubService gitHub,
-        HttpClient http,
         ILogger logger)
     {
         _reconciler = reconciler ?? throw new ArgumentNullException(nameof(reconciler));
@@ -110,7 +108,6 @@ public sealed class IndexWorkflow : IIndexWorkflow
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _indexFiles = indexFiles ?? throw new ArgumentNullException(nameof(indexFiles));
         _gitHub = gitHub ?? throw new ArgumentNullException(nameof(gitHub));
-        _http = http ?? throw new ArgumentNullException(nameof(http));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -449,15 +446,25 @@ public sealed class IndexWorkflow : IIndexWorkflow
                 var secondAuthorization = await _unsignedGate.AuthorizeAsync(registry, request.Candidate.PluginId, ct);
                 return secondAuthorization.Allowed ? null : secondAuthorization.Message;
             },
+            request.PreserveExistingReleaseIdentities
+                ? ReleaseIdentityPreservation.ValidateTransition
+                : null,
             ct);
 
         if (result.Outcome is not (GitPublishOutcome.Published or GitPublishOutcome.PublishedPendingCdn))
         {
+            var remoteChanged = result.Outcome == GitPublishOutcome.PublishedVerificationFailed;
             return Failure<IndexPublishResult>(
-                result.Outcome == GitPublishOutcome.CommittedNotPushed ? WorkflowErrorKind.Conflict : WorkflowErrorKind.Validation,
+                result.Outcome == GitPublishOutcome.CommittedNotPushed || remoteChanged
+                    ? WorkflowErrorKind.Conflict
+                    : WorkflowErrorKind.Validation,
                 "githubIndexPublishFailed",
                 result.Message,
-                result.Outcome == GitPublishOutcome.CommittedNotPushed ? new[] { "indexCommitted" } : null);
+                result.Outcome == GitPublishOutcome.CommittedNotPushed
+                    ? new[] { "indexCommitted" }
+                    : remoteChanged
+                        ? new[] { "indexPublished" }
+                        : null);
         }
 
         var publishedBytes = result.PublishedBytes ?? GitHubIndexPublisher.NormalizeToLf(candidate);
@@ -593,12 +600,10 @@ public sealed class IndexWorkflow : IIndexWorkflow
                 var (target, _) = await _gitHubPublisher.ResolveTargetAsync(projectPath, ct);
                 if (target is null)
                     return Success("catalogReconcileSkipped", local, "The GitHub publication target could not be resolved, so no live catalog was adopted.");
-                using var response = await _http.GetAsync(target.BranchRawUrl, ct);
-                if (response.StatusCode is not (HttpStatusCode.NotFound or HttpStatusCode.Gone))
-                {
-                    response.EnsureSuccessStatusCode();
-                    live = await response.Content.ReadAsByteArrayAsync(ct);
-                }
+                var remote = await _gitHubPublisher.ReadRemoteIndexAsync(target, ct);
+                if (!remote.Succeeded)
+                    return Failure("catalogLiveReadFailed", WorkflowErrorKind.Conflict, remote.Error ?? "The exact remote catalog could not be read.", local);
+                live = remote.IndexBytes;
             }
             else
             {

@@ -1978,6 +1978,11 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 StatusMessage = "Committed locally, but not pushed — managers can't see it.";
                 return false;
 
+            case GitPublishOutcome.PublishedVerificationFailed:
+                _showInfoDialog(result.Title, result.Message);
+                StatusMessage = "Published, but verification failed; inspect the named commit before publishing again.";
+                return false;
+
             default:
                 _showInfoDialog(result.Title, result.Message);
                 StatusMessage = "Nothing was published.";

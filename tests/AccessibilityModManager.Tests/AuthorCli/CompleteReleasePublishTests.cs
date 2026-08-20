@@ -47,6 +47,24 @@ public sealed class CompleteReleasePublishTests : IDisposable
             release => release.Version == "9.9.9" && release.Channel == "stable");
     }
 
+    [Fact]
+    public async Task Complete_release_requires_existing_release_identities_to_survive_publication()
+    {
+        var package = await BuildPackageAsync();
+        var indexes = new ControlledIndexWorkflow(_indexFiles, failBefore: null);
+        var workflow = CreateWorkflow(
+            new ControlledReleaseWorkflow(failBefore: null, TestLogger.Create()),
+            indexes);
+
+        var result = await workflow.PublishAsync(
+            CreateRequest(package),
+            confirmed: true,
+            CancellationToken.None);
+
+        Assert.Equal(WorkflowErrorKind.None, result.ErrorKind);
+        Assert.True(indexes.LastPublishRequest!.PreserveExistingReleaseIdentities);
+    }
+
     public static TheoryData<string, string[]> FailureCases => new()
     {
         {
@@ -282,6 +300,7 @@ public sealed class CompleteReleasePublishTests : IDisposable
     {
         public int SaveCalls { get; private set; }
         public int PublishCalls { get; private set; }
+        public IndexPublishRequest? LastPublishRequest { get; private set; }
 
         public IndexValidationReport Validate(PluginRepoIndex candidate)
         {
@@ -361,6 +380,7 @@ public sealed class CompleteReleasePublishTests : IDisposable
             CancellationToken ct)
         {
             PublishCalls++;
+            LastPublishRequest = request;
             if (failBefore == "indexPublished")
             {
                 return Task.FromResult(new WorkflowResult<IndexPublishResult>(
