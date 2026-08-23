@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Security.Cryptography;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Patreon;
@@ -356,6 +357,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     public PendingGateChange? GateChange { get; private set; }
 
     private readonly ServerUploadService _serverUpload;
+    private readonly AuthoringWorkflowFacade _workflows;
 
     public ReleaseDialogViewModel(
         string gameId,
@@ -374,7 +376,8 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         Func<string, string, bool> confirmDialog,
         Func<string, string, string?, string?> browseForFile,
         Func<string, string?> showBuildPackageDialog,
-        ModRelease? existingRelease = null)
+        ModRelease? existingRelease,
+        AuthoringWorkflowFacade workflows)
     {
         _gameId = gameId;
         GameDisplayName = gameDisplayName;
@@ -387,6 +390,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         _configService = configService;
         _patreonAuthor = patreonAuthor;
         _serverUpload = serverUpload;
+        _workflows = workflows ?? throw new ArgumentNullException(nameof(workflows));
         _logger = logger;
         _showInfoDialog = showInfoDialog;
         _confirmDialog = confirmDialog;
@@ -847,11 +851,29 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
 
         // Copying and hashing a wrapped ZIP is real I/O — off the UI thread, or the window
         // freezes and takes the screen reader's feedback with it.
-        StagedPackage staged;
+        PreparedRelease staged;
         try
         {
             StatusMessage = $"Preparing {sourceName}...";
-            staged = await Task.Run(() => StagedPackage.Create(LocalZipPath!, AssetFileName));
+            var stagedResult = await _workflows.StageReleasePackageAsync(
+                new PackageStageRequest(
+                    _pluginId,
+                    _gameId,
+                    version,
+                    LocalZipPath!,
+                    AssetFileName),
+                CancellationToken.None);
+            if (stagedResult.ErrorKind != WorkflowErrorKind.None || stagedResult.Value is null)
+            {
+                _showInfoDialog(
+                    stagedResult.Status == "packageValidationFailed"
+                        ? "The package won't install"
+                        : "Can't read the wrapped ZIP",
+                    string.Join("\n\n", stagedResult.Messages));
+                return false;
+            }
+
+            staged = stagedResult.Value;
         }
         catch (Exception ex)
         {
@@ -860,24 +882,13 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             return false;
         }
 
-        using (staged)
+        await using (staged)
         {
-            StatusMessage = $"Checking {staged.FileName}...";
-            var report = await Task.Run(() => PluginPackageValidation.Validate(
-                staged.Stream, _pluginId, _gameId, version, _logger));
-            if (!report.IsValid)
-            {
-                _showInfoDialog("The package won't install",
-                    "The manager would refuse this ZIP on the user's machine:\n\n" +
-                    string.Join("\n\n", report.Errors));
-                return false;
-            }
-
             // The authoritative identity: the hash comes off the held handle, after the manifest
             // check, right before the bytes are published — and it is recorded here so the saved
             // release describes THIS package even if the form is edited later.
             Sha256 = staged.Sha256;
-            AssetFileName = staged.FileName;
+            AssetFileName = staged.Preview.AssetFileName;
             _published = new PublishedIdentity(version, staged.Sha256);
 
             var published = destination switch
@@ -889,7 +900,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             if (!published) return false;
 
             if (destination == PublishDestination.None)
-                StatusMessage = $"Checked {staged.FileName}. SHA256: {staged.Sha256}";
+                StatusMessage = $"Checked {staged.Preview.AssetFileName}. SHA256: {staged.Sha256}";
 
             return true;
         }
@@ -901,7 +912,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// version that is already live with different bytes, and asks first when saving a release
     /// as public would strip a Patreon gate that's currently in force.
     /// </summary>
-    private async Task<bool> PublishToServerAsync(StagedPackage staged, string version, PatreonGate? gate)
+    private async Task<bool> PublishToServerAsync(PreparedRelease staged, string version, PatreonGate? gate)
     {
         var serverCfg = _configService.GetServerUploadConfig();
         if (serverCfg == null)
@@ -917,7 +928,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         {
             StatusMessage = $"Checking what's already published on {serverCfg.Host}...";
             state = await _serverUpload.ProbeReleaseAsync(
-                serverCfg, _gameId, version, staged.FileName, staged.Stream, staged.Sha256,
+                serverCfg, _gameId, version, staged.Preview.AssetFileName, staged.Stream, staged.Sha256,
                 CancellationToken.None);
         }
         catch (Exception ex)
@@ -932,7 +943,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         {
             _showInfoDialog("That version folder already holds another file",
                 $"Version {version} on {serverCfg.Host} already contains {string.Join(", ", state.OtherAssets)}, " +
-                $"which isn't the file you're publishing ({staged.FileName}).\n\n" +
+                $"which isn't the file you're publishing ({staged.Preview.AssetFileName}).\n\n" +
                 "A version folder holds exactly one package, because the Patreon tier lock applies to the " +
                 "whole folder — a second file there would ride this release's lock, or lose its own when " +
                 "this one goes public.\n\n" +
@@ -969,11 +980,11 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         try
         {
             StatusMessage = state.PackageMatches
-                ? $"Confirming {staged.FileName} on {serverCfg.Host}..."
-                : $"Uploading {staged.FileName} to {serverCfg.Host}...";
+                ? $"Confirming {staged.Preview.AssetFileName} on {serverCfg.Host}..."
+                : $"Uploading {staged.Preview.AssetFileName} to {serverCfg.Host}...";
 
             var outcome = await _serverUpload.PublishReleaseAsync(
-                serverCfg, _gameId, version, staged.FileName, staged.Stream, staged.Sha256,
+                serverCfg, _gameId, version, staged.Preview.AssetFileName, staged.Stream, staged.Sha256,
                 gate, CancellationToken.None);
 
             if (gate != null)
@@ -1150,7 +1161,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// release when the tag is new, or replaces the asset on an existing tag. Uploads the
     /// staged copy, so what lands on the release is the file that was hashed and checked.
     /// </summary>
-    private async Task<bool> PublishToGitHubAsync(StagedPackage staged, string version)
+    private async Task<bool> PublishToGitHubAsync(PreparedRelease staged, string version)
     {
         if (string.IsNullOrWhiteSpace(SourceRepo))
         {
@@ -1168,7 +1179,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         }
 
         var tag = string.IsNullOrWhiteSpace(TagName) ? $"v{version}" : TagName!.Trim();
-        var assetUrl = GitHubService.BuildAssetUrl(SourceRepo, tag, staged.FileName);
+        var assetUrl = GitHubService.BuildAssetUrl(SourceRepo, tag, staged.Preview.AssetFileName);
 
         StatusMessage = $"Checking what's already published at {SourceRepo} {tag}...";
         var existingReleases = await _gitHubService.ListReleasesAsync(SourceRepo);
@@ -1199,7 +1210,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 if (!string.Equals(published.Sha256, staged.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     _showInfoDialog("That release already has this file",
-                        $"{SourceRepo} {tag} already publishes {staged.FileName}, and this ZIP is a different " +
+                        $"{SourceRepo} {tag} already publishes {staged.Preview.AssetFileName}, and this ZIP is a different " +
                         "file. Replacing it would break the download for anyone whose catalog still lists the " +
                         "old fingerprint.\n\nBump the version and publish that instead. Nothing was uploaded.");
                     return false;
@@ -1212,7 +1223,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             }
         }
 
-        StatusMessage = $"Uploading {staged.FileName} to {SourceRepo} {tag}...";
+        StatusMessage = $"Uploading {staged.Preview.AssetFileName} to {SourceRepo} {tag}...";
 
         var notes = string.IsNullOrWhiteSpace(ReleaseNotes)
             ? $"Release {tag} for the Accessibility Mod Manager."
@@ -1221,7 +1232,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         ProcessResult result;
         if (hasTag)
         {
-            result = await _gitHubService.UploadReleaseAssetAsync(SourceRepo, tag, staged.Path, clobber: true);
+            result = await _gitHubService.UploadReleaseAssetAsync(SourceRepo, tag, staged.StagedPath, clobber: true);
             if (result.Success && !string.IsNullOrWhiteSpace(ReleaseNotes))
             {
                 // Tag already existed; refresh its release notes too.
@@ -1236,7 +1247,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 SourceRepo, tag,
                 title: tag,
                 notes: notes,
-                new[] { staged.Path });
+                new[] { staged.StagedPath });
         }
 
         if (!result.Success)
@@ -1266,88 +1277,6 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             url, result.Status, result.Detail);
 
         return result;
-    }
-
-    /// <summary>
-    /// A private copy of the wrapped ZIP, named the way it will be published, held open for as
-    /// long as the publish takes. The copy lives in our own temp folder rather than beside the
-    /// author's build output: renaming in place used to overwrite whatever file already had
-    /// that name in their folder, and a build tool writing to the original mid-publish would
-    /// have made the published hash a lie. Deleting the folder is what disposal is for.
-    /// </summary>
-    private sealed class StagedPackage : IDisposable
-    {
-        private readonly string _tempDir;
-
-        public FileStream Stream { get; }
-        public string Path { get; }
-        public string FileName { get; }
-        public string Sha256 { get; }
-
-        private StagedPackage(string tempDir, string path, string fileName, FileStream stream, string sha256)
-        {
-            _tempDir = tempDir;
-            Path = path;
-            FileName = fileName;
-            Stream = stream;
-            Sha256 = sha256;
-        }
-
-        public static StagedPackage Create(string sourcePath, string? assetFileName)
-        {
-            if (!File.Exists(sourcePath))
-                throw new FileNotFoundException($"The wrapped ZIP isn't there any more: {sourcePath}", sourcePath);
-
-            // The published filename becomes a path segment locally and remotely, so it has to
-            // be a plain file name (audit finding 38c).
-            var fileName = PathSafety.EnsureLeafFileName(
-                string.IsNullOrWhiteSpace(assetFileName) ? System.IO.Path.GetFileName(sourcePath) : assetFileName,
-                "Asset filename");
-
-            var tempDir = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), "AccessibilityModManager.AuthorTool", "publish", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempDir);
-
-            try
-            {
-                var stagedPath = System.IO.Path.Combine(tempDir, fileName);
-                File.Copy(sourcePath, stagedPath);
-
-                // FileShare.Read: readers (the gh CLI) are fine, writers are locked out for the
-                // lifetime of the publish.
-                var stream = new FileStream(
-                    stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                try
-                {
-                    var sha = Convert.ToHexStringLower(SHA256.HashData(stream));
-                    stream.Position = 0;
-                    return new StagedPackage(tempDir, stagedPath, fileName, stream, sha);
-                }
-                catch
-                {
-                    stream.Dispose();
-                    throw;
-                }
-            }
-            catch
-            {
-                TryDelete(tempDir);
-                throw;
-            }
-        }
-
-        public void Dispose()
-        {
-            Stream.Dispose();
-            TryDelete(_tempDir);
-        }
-
-        private static void TryDelete(string dir)
-        {
-            try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
-            catch (IOException) { /* temp folder; the OS cleans up */ }
-            catch (UnauthorizedAccessException) { }
-        }
     }
 
     [RelayCommand]

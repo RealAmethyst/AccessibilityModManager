@@ -29,6 +29,8 @@ x86/
 publish/
 dist/
 dist-admin/
+dist-author-cli/
+dist-author-cli-admin/
 
 ## User-specific
 *.suo

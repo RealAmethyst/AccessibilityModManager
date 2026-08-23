@@ -1,6 +1,10 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
+using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Tests.Authoring;
 using AccessibilityModManager.Tests.Helpers;
 using Xunit;
 
@@ -303,6 +307,104 @@ public sealed class GitHubIndexPublisherTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoteSnapshotReadsTheIndexFromTheExactFetchedCommit()
+    {
+        var candidate = CatalogBytes(CatalogWithBothGamesAt("1.0.0", "stable"));
+        var published = await Publisher().PublishAsync(
+            Target(), candidate, "publish exact snapshot", () => Task.FromResult<string?>(null));
+
+        var snapshot = await Publisher().ReadRemoteIndexAsync(Target());
+
+        Assert.True(snapshot.Succeeded, snapshot.Error);
+        Assert.True(snapshot.BranchExists);
+        Assert.Equal(published.Commit, snapshot.Commit);
+        Assert.Equal(GitHubIndexPublisher.NormalizeToLf(candidate), snapshot.IndexBytes);
+    }
+
+    [Fact]
+    public async Task SecondGamePublishCannotDropTheFirstGameReleaseFromAStaleCandidate()
+    {
+        var publisher = Publisher();
+        var catalog = new CatalogWorkflow();
+        var initial = CatalogWithBothGamesAt("1.0.0", "stable");
+        Assert.Equal(
+            GitPublishOutcome.Published,
+            (await publisher.PublishAsync(
+                Target(), CatalogBytes(initial), "seed dual catalog", () => Task.FromResult<string?>(null))).Outcome);
+
+        var firstGameCandidate = catalog.AddRelease(initial, "ff7", Release("ff7", "2.0.0", "beta"));
+        Assert.Equal(
+            GitPublishOutcome.Published,
+            (await publisher.PublishAsync(
+                Target(),
+                CatalogBytes(firstGameCandidate),
+                "publish first game",
+                () => Task.FromResult<string?>(null),
+                ReleaseIdentityPreservation.ValidateTransition,
+                CancellationToken.None)).Outcome);
+        var firstGameCommit = RemoteHead();
+
+        // This is exactly what the mutable branch-raw cache returned in production: the catalog
+        // from before the first publish, with only the second game's new row added to it.
+        var staleSecondGameCandidate = catalog.AddRelease(initial, "re4", Release("re4", "2.0.0", "beta"));
+        var refused = await publisher.PublishAsync(
+            Target(),
+            CatalogBytes(staleSecondGameCandidate),
+            "publish stale second game",
+            () => Task.FromResult<string?>(null),
+            ReleaseIdentityPreservation.ValidateTransition,
+            CancellationToken.None);
+
+        Assert.Equal(GitPublishOutcome.Refused, refused.Outcome);
+        Assert.Contains("ff7 2.0.0 (beta)", refused.Message);
+        Assert.Equal(firstGameCommit, RemoteHead());
+
+        var exact = await publisher.ReadRemoteIndexAsync(Target());
+        Assert.True(exact.Succeeded, exact.Error);
+        var freshBase = JsonSerializer.Deserialize<PluginRepoIndex>(exact.IndexBytes!, CatalogJson)!;
+        var correctSecondGameCandidate = catalog.AddRelease(
+            freshBase,
+            "re4",
+            Release("re4", "2.0.0", "beta"));
+        var second = await publisher.PublishAsync(
+            Target(),
+            CatalogBytes(correctSecondGameCandidate),
+            "publish second game from exact remote",
+            () => Task.FromResult<string?>(null),
+            ReleaseIdentityPreservation.ValidateTransition,
+            CancellationToken.None);
+
+        Assert.Equal(GitPublishOutcome.Published, second.Outcome);
+        var live = JsonSerializer.Deserialize<PluginRepoIndex>(RemoteBlob("index.json"), CatalogJson)!;
+        Assert.Single(live.ReleasesByGameId["ff7"], release =>
+            release.Version == "2.0.0" && release.Channel == "beta");
+        Assert.Single(live.ReleasesByGameId["re4"], release =>
+            release.Version == "2.0.0" && release.Channel == "beta");
+    }
+
+    [Fact]
+    public async Task SemanticTransitionIsVerifiedAgainAfterThePushLands()
+    {
+        var validationCalls = 0;
+        string? Validate(byte[]? _, byte[] __) =>
+            ++validationCalls == 2 ? "post-publish release preservation failed" : null;
+
+        var candidate = CatalogBytes(CatalogWithBothGamesAt("1.0.0", "stable"));
+        var result = await Publisher().PublishAsync(
+            Target(),
+            candidate,
+            "publish with post verification",
+            () => Task.FromResult<string?>(null),
+            Validate,
+            CancellationToken.None);
+
+        Assert.Equal(GitPublishOutcome.PublishedVerificationFailed, result.Outcome);
+        Assert.Equal(2, validationCalls);
+        Assert.Contains("post-publish release preservation failed", result.Message);
+        Assert.Equal(GitHubIndexPublisher.NormalizeToLf(candidate), RemoteBlob("index.json"));
+    }
+
+    [Fact]
     public void NormalizingLineEndingsOnlyTouchesCrlf()
     {
         var lf = Encoding.UTF8.GetBytes("a\nb\n");
@@ -341,6 +443,37 @@ public sealed class GitHubIndexPublisherTests : IDisposable
         Assert.Null(GitHubIndexPublisher.ParseGitHubSlug(url));
 
     // ------------------------------------------------------------------ helpers
+
+    private static readonly JsonSerializerOptions CatalogJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
+
+    private static PluginRepoIndex CatalogWithBothGamesAt(string version, string channel)
+    {
+        var catalog = new CatalogWorkflow();
+        var initial = CatalogWorkflowTests.CatalogFixture.CreateCompleteIndex();
+        initial.ReleasesByGameId["ff7"].Clear();
+        return catalog.AddRelease(
+            catalog.AddRelease(initial, "ff7", Release("ff7", version, channel)),
+            "re4",
+            Release("re4", version, channel));
+    }
+
+    private static ModRelease Release(string gameId, string version, string channel) => new()
+    {
+        GameId = gameId,
+        PluginId = CatalogWorkflowTests.CatalogFixture.PluginId,
+        Version = version,
+        Channel = channel,
+        PackageUrl = new Uri($"https://downloads.example.invalid/{gameId}/{version}.zip"),
+        Sha256 = new string(gameId == "ff7" ? 'a' : 'b', 64),
+        ChangelogUrl = $"https://downloads.example.invalid/{gameId}/{version}/changes"
+    };
+
+    private static byte[] CatalogBytes(PluginRepoIndex index) =>
+        Encoding.UTF8.GetBytes(JsonSerializer.Serialize(index, CatalogJson));
 
     private string LocalHead() => Git(_work, "rev-parse", "HEAD").Trim();
 

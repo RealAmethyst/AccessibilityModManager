@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
@@ -47,6 +48,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly ProjectReconciler _reconciler;
     private readonly IndexPublishCoordinator _publishCoordinator;
     private readonly Action<string, RegistryTrustState> _showClaimSigningDialog;
+    private readonly AuthoringWorkflowFacade _workflows;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -193,6 +195,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         IndexPublishCoordinator publishCoordinator,
         GitHubIndexPublisher gitHubPublisher,
         UnsignedPublishGate unsignedGate,
+        AuthoringWorkflowFacade workflows,
         Action<string, RegistryTrustState> showClaimSigningDialog)
     {
         _gitHubPublisher = gitHubPublisher;
@@ -217,6 +220,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         _registryChecker = registryChecker;
         _reconciler = reconciler;
         _publishCoordinator = publishCoordinator;
+        _workflows = workflows;
         _showClaimSigningDialog = showClaimSigningDialog;
 
         _patreon.StateChanged += OnPatreonStateChanged;
@@ -1388,8 +1392,17 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             ServerUploadService.RemoteLock found;
             try
             {
-                found = await _serverUploadService.ReadPublishLockAsync(
-                    cfg, _index.PluginId, CancellationToken.None);
+                var inspected = await _workflows.InspectIndexLockAsync(
+                    _index.PluginId,
+                    CancellationToken.None);
+                if (inspected.ErrorKind != WorkflowErrorKind.None)
+                {
+                    _showInfoDialog(
+                        "Couldn't check the publish lock",
+                        string.Join("\n\n", inspected.Messages));
+                    return;
+                }
+                found = inspected.Value;
             }
             catch (Exception ex)
             {
@@ -1404,6 +1417,15 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                     $"Nothing is holding the publish lock for '{_index.PluginId}', so there is nothing " +
                     "to clear. If publishing is refusing for another reason, the message it gave says " +
                     "which.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(found.Fingerprint))
+            {
+                _showInfoDialog(
+                    "Couldn't identify the publish lock",
+                    "The lock exists, but it has no stable fingerprint. It was left alone because " +
+                    "the tool cannot prove it is still the same lock after confirmation.");
                 return;
             }
 
@@ -1428,8 +1450,23 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 // The lock the author just read about is named, so a different one that has since
                 // been taken at the same path is left alone rather than deleted on the strength of
                 // a question that was about something else.
-                cleared = await _serverUploadService.BreakPublishLockAsync(
-                    cfg, _index.PluginId, found.Fingerprint, CancellationToken.None);
+                var result = await _workflows.BreakIndexLockAsync(
+                    _index.PluginId,
+                    found.Fingerprint!,
+                    confirmed: true,
+                    CancellationToken.None);
+                if (result.ErrorKind != WorkflowErrorKind.None)
+                {
+                    if (result.Status == "publishLockChanged")
+                    {
+                        _showInfoDialog("The lock changed", string.Join("\n\n", result.Messages));
+                        return;
+                    }
+
+                    _showInfoDialog("Couldn't clear the publish lock", string.Join("\n\n", result.Messages));
+                    return;
+                }
+                cleared = result.Value;
             }
             catch (Exception ex)
             {
@@ -1885,7 +1922,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     /// Writes <c>index.json</c> to disk, including all in-progress game edits. Returns false on
     /// failure (caller surfaces nothing extra; the dialog already showed an error).
     /// </summary>
-    private bool TrySaveIndexToDisk()
+    private async Task<bool> TrySaveIndexToDiskAsync()
     {
         try
         {
@@ -1897,9 +1934,21 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 GeneratedAt = DateTime.UtcNow,
                 Games = _index.Games,
                 ReleasesByGameId = _index.ReleasesByGameId,
-                Author = _index.Author
+                Author = _index.Author,
+                DependencyPresets = _index.DependencyPresets
             };
-            _indexFileService.Save(_projectPath, updated);
+
+            var saved = await _workflows.SaveIndexAsync(
+                _projectPath,
+                updated,
+                dryRun: false,
+                CancellationToken.None);
+            if (saved.ErrorKind != WorkflowErrorKind.None)
+            {
+                _showInfoDialog("Save failed", string.Join(Environment.NewLine, saved.Messages));
+                return false;
+            }
+
             _index = updated;
             HasUnsavedChanges = false;
             return true;
@@ -1939,9 +1988,113 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             OnPropertyChanged(nameof(PublishButtonName));
         }
 
-        return destination == PublishDestination.GitHub
-            ? await PublishIndexToGitHubAsync(commitMessage, confirmFirst)
-            : await PublishIndexToServerAsync(commitMessage, confirmFirst);
+        var request = new IndexPublishRequest(
+            _projectPath,
+            _index,
+            destination,
+            commitMessage,
+            DryRun: false);
+        WorkflowResult<IndexPublishPreview> preview;
+        try
+        {
+            preview = await _workflows.PreviewIndexPublicationAsync(request, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Index publication preview failed");
+            _showInfoDialog("Can't publish index", ex.Message);
+            StatusMessage = "Saved locally. Nothing was published.";
+            return false;
+        }
+
+        if (preview.ErrorKind != WorkflowErrorKind.None || preview.Value is null)
+        {
+            _showInfoDialog("Can't publish index", string.Join("\n\n", preview.Messages));
+            StatusMessage = "Saved locally. Nothing was published.";
+            return false;
+        }
+
+        if (confirmFirst)
+        {
+            var changes = preview.Value.CatalogChanges.Count == 0
+                ? "No catalog entry changes were detected."
+                : string.Join("\n", preview.Value.CatalogChanges.Select(change => $"- {change}"));
+            if (!_confirmDialog(
+                    "Publish index",
+                    $"This publishes index.json for '{_index.PluginId}' to:\n\n" +
+                    $"{preview.Value.DestinationDescription}\n\n" +
+                    $"Change: {preview.Value.CommitMessage}\n\n{changes}\n\nProceed?"))
+            {
+                StatusMessage = "Saved locally. Publish index when ready.";
+                return false;
+            }
+        }
+
+        if (!TryBeginServerOperation())
+        {
+            _showInfoDialog("Busy", AnotherOperationInFlight);
+            return false;
+        }
+
+        try
+        {
+            StatusMessage = destination == PublishDestination.GitHub
+                ? "Publishing index to GitHub..."
+                : "Publishing index to the server...";
+            var result = await _workflows.PublishIndexAsync(
+                request,
+                confirmed: true,
+                CancellationToken.None);
+            if (result.ErrorKind != WorkflowErrorKind.None || result.Value is null)
+            {
+                var phases = result.CompletedPhases ?? [];
+                var title = phases.Contains("indexPublished", StringComparer.Ordinal)
+                    ? "Published, but verification did not finish"
+                    : phases.Contains("indexCommitted", StringComparer.Ordinal)
+                        ? "Committed, but not pushed"
+                        : "Publish failed";
+                _showInfoDialog(title, string.Join("\n\n", result.Messages));
+                StatusMessage = phases.Contains("indexPublished", StringComparer.Ordinal)
+                    ? "The index may be live, but verification did not finish. Publish again to reconcile it."
+                    : phases.Contains("indexCommitted", StringComparer.Ordinal)
+                        ? "Committed locally, but not pushed — managers can't see it."
+                        : "Saved locally. Nothing was published.";
+                return false;
+            }
+
+            try
+            {
+                _liveIndexAtLoad = File.ReadAllBytes(Path.Combine(_projectPath, "index.json"));
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "Couldn't refresh the live-index baseline after publication");
+            }
+
+            StatusMessage = $"Published to {result.Value.DestinationDescription}.";
+            if (destination == PublishDestination.GitHub && IsListedInRegistry is false)
+            {
+                _showInfoDialog(
+                    "Pushed, but not listed yet",
+                    "index.json is live, but the manager only reads catalogs listed in the signed " +
+                    "registry. Add this exact index address to the registry before expecting users " +
+                    "to see it.");
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Index publication stopped unexpectedly");
+            _showInfoDialog(
+                "Publish stopped",
+                $"{ex.Message}\n\nChoose Publish index again. It will reconcile the local and live state before changing anything.");
+            StatusMessage = "Saved locally. Publication did not finish.";
+            return false;
+        }
+        finally
+        {
+            EndServerOperation();
+        }
     }
 
     /// <summary>
@@ -2064,6 +2217,11 @@ public sealed partial class IndexEditorViewModel : ObservableObject
                 StatusMessage = "Committed locally, but not pushed — managers can't see it.";
                 return false;
 
+            case GitPublishOutcome.PublishedVerificationFailed:
+                _showInfoDialog(result.Title, result.Message);
+                StatusMessage = "Published, but verification failed; inspect the named commit before publishing again.";
+                return false;
+
             default:
                 _showInfoDialog(result.Title, result.Message);
                 StatusMessage = "Nothing was published.";
@@ -2099,7 +2257,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private async Task PublishAfterReleaseChangeAsync(
         string commitMessage, PendingGateChange? gateChange = null)
     {
-        if (!TrySaveIndexToDisk())
+        if (!await TrySaveIndexToDiskAsync())
             return;
 
         var catalogMatches = await PublishToDestinationAsync(commitMessage, confirmFirst: true);

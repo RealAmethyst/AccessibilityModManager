@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Windows;
+using AccessibilityModManager.Authoring.Workflows;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.AuthorTool.ViewModels;
 using AccessibilityModManager.AuthorTool.Views;
@@ -41,10 +42,25 @@ public partial class App : Application
         services.AddSingleton<Sha256HashService>();
         services.AddSingleton<GitService>();
         services.AddSingleton<GitHubService>();
+        services.AddSingleton<IGitHubService>(sp => sp.GetRequiredService<GitHubService>());
+        services.AddSingleton<IPublishedAssetProbe, PublishedAssetProbe>();
+        services.AddSingleton<ReleaseWorkflow>();
+        services.AddSingleton<IReleaseWorkflow>(sp => sp.GetRequiredService<ReleaseWorkflow>());
         services.AddSingleton<ManifestBuilderService>();
+        services.AddSingleton<PackageWorkflow>();
+        services.AddSingleton<CatalogWorkflow>();
+        services.AddSingleton<AuthorProjectContext>();
         services.AddSingleton<RegistryMembershipChecker>();
         services.AddSingleton<PatreonAuthorService>();
         services.AddSingleton<ServerUploadService>();
+        services.AddSingleton<PatreonAuthorSession>();
+        services.AddSingleton<IPatreonAuthorSession>(sp => sp.GetRequiredService<PatreonAuthorSession>());
+        services.AddSingleton<PatreonWorkflow>();
+        services.AddSingleton<IPatreonWorkflow>(sp => sp.GetRequiredService<PatreonWorkflow>());
+        services.AddSingleton<ServerAuthorTransport>();
+        services.AddSingleton<IServerAuthorTransport>(sp => sp.GetRequiredService<ServerAuthorTransport>());
+        services.AddSingleton<ServerWorkflow>();
+        services.AddSingleton<IServerWorkflow>(sp => sp.GetRequiredService<ServerWorkflow>());
 
         // The signed-catalog side. Registered together because they only mean anything together:
         // the head store is this machine's memory of what it published, the key store holds what it
@@ -57,6 +73,18 @@ public partial class App : Application
         services.AddSingleton<IndexPublishCoordinator>();
         services.AddSingleton<GitHubIndexPublisher>();
         services.AddSingleton<UnsignedPublishGate>();
+        services.AddSingleton<SigningCatalogSource>();
+        services.AddSingleton<ISigningCatalogSource>(sp => sp.GetRequiredService<SigningCatalogSource>());
+        services.AddSingleton<SigningWorkflow>();
+        services.AddSingleton<ISigningWorkflow>(sp => sp.GetRequiredService<SigningWorkflow>());
+        services.AddSingleton<RegistryAdminWorkflow>();
+        services.AddSingleton<IRegistryAdminWorkflow>(sp => sp.GetRequiredService<RegistryAdminWorkflow>());
+        services.AddSingleton<IndexWorkflow>();
+        services.AddSingleton<IIndexWorkflow>(sp => sp.GetRequiredService<IndexWorkflow>());
+        services.AddSingleton<CompleteReleasePublishWorkflow>();
+        services.AddSingleton<ICompleteReleasePublishWorkflow>(
+            sp => sp.GetRequiredService<CompleteReleasePublishWorkflow>());
+        services.AddSingleton<AuthoringWorkflowFacade>();
 
         services.AddTransient<ProjectPickerViewModel>();
         services.AddTransient<IndexEditorViewModel>();
@@ -154,6 +182,7 @@ public partial class App : Application
             sp.GetRequiredService<IndexPublishCoordinator>(),
             sp.GetRequiredService<GitHubIndexPublisher>(),
             sp.GetRequiredService<UnsignedPublishGate>(),
+            sp.GetRequiredService<AuthoringWorkflowFacade>(),
             (pluginId, trust) => ShowClaimSigningDialog(sp, pluginId, trust));
     }
 
@@ -225,7 +254,8 @@ public partial class App : Application
             ConfirmDialog,
             BrowseForFile,
             showBuildPackage,
-            existingRelease);
+            existingRelease,
+            sp.GetRequiredService<AuthoringWorkflowFacade>());
 
         var dialog = new ReleaseDialog(vm)
         {
@@ -243,7 +273,7 @@ public partial class App : Application
     {
         var vm = new BuildPackageDialogViewModel(
             gameId, gameDisplayName, pluginId, suggestedVersion, deps,
-            sp.GetRequiredService<ManifestBuilderService>(),
+            sp.GetRequiredService<AuthoringWorkflowFacade>(),
             BrowseForFolder,
             ShowInfoDialog,
             sp.GetRequiredService<ILogger>(),

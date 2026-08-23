@@ -37,7 +37,10 @@ public enum GitPublishOutcome
     Refused,
 
     /// <summary>Committed locally, and the push did not land. Managers cannot see it.</summary>
-    CommittedNotPushed
+    CommittedNotPushed,
+
+    /// <summary>The push landed, but exact post-publish verification failed.</summary>
+    PublishedVerificationFailed
 }
 
 public sealed record GitPublishResult(GitPublishOutcome Outcome, string Title, string Message)
@@ -53,6 +56,14 @@ public sealed record GitPublishResult(GitPublishOutcome Outcome, string Title, s
     /// </summary>
     public byte[]? PublishedBytes { get; init; }
 }
+
+/// <summary>An index read from one exact fetched remote commit, never from a mutable CDN URL.</summary>
+public sealed record GitRemoteIndexSnapshot(
+    bool Succeeded,
+    bool BranchExists,
+    string? Commit,
+    byte[]? IndexBytes,
+    string? Error);
 
 /// <summary>
 /// Publishes an index by committing and pushing it, for authors who host their catalog on GitHub
@@ -128,6 +139,96 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
     }
 
     /// <summary>
+    /// Fetches the configured branch and reads <c>index.json</c> from the resulting immutable commit.
+    /// A branch-based raw.githubusercontent.com address is deliberately not involved: that address
+    /// may continue serving the preceding commit for its cache lifetime immediately after a push.
+    /// </summary>
+    public async Task<GitRemoteIndexSnapshot> ReadRemoteIndexAsync(
+        GitPublishTarget target,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+
+        var lsRemote = await RunResultAsync(
+            target.WorktreeRoot,
+            ct,
+            "ls-remote",
+            target.Remote,
+            $"refs/heads/{target.Branch}");
+        if (!lsRemote.Success)
+        {
+            return new GitRemoteIndexSnapshot(
+                false,
+                false,
+                null,
+                null,
+                $"Asking {target.Describe} for its branch failed:\n\n{lsRemote.Combined}");
+        }
+
+        if (string.IsNullOrWhiteSpace(lsRemote.Stdout))
+            return new GitRemoteIndexSnapshot(true, false, null, null, null);
+
+        var fetch = await RunResultAsync(
+            target.WorktreeRoot,
+            ct,
+            "fetch",
+            target.Remote,
+            target.Branch);
+        if (!fetch.Success)
+        {
+            return new GitRemoteIndexSnapshot(
+                false,
+                true,
+                null,
+                null,
+                $"Fetching {target.Describe} failed:\n\n{fetch.Combined}");
+        }
+
+        var commit = await RunAsync(target.WorktreeRoot, ct, "rev-parse", "--verify", "FETCH_HEAD");
+        if (commit is null)
+            return new GitRemoteIndexSnapshot(false, true, null, null, "Git did not report the fetched commit id.");
+
+        var tree = await RunResultAsync(
+            target.WorktreeRoot,
+            ct,
+            "ls-tree",
+            "--name-only",
+            commit,
+            "--",
+            target.IndexPathInRepo);
+        if (!tree.Success)
+        {
+            return new GitRemoteIndexSnapshot(
+                false,
+                true,
+                commit,
+                null,
+                $"The fetched commit could not be inspected:\n\n{tree.Combined}");
+        }
+
+        var pathExists = tree.Stdout
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => path.Trim().Replace('\\', '/'))
+            .Any(path => string.Equals(path, target.IndexPathInRepo, StringComparison.Ordinal));
+        if (!pathExists)
+            return new GitRemoteIndexSnapshot(true, true, commit, null, null);
+
+        var (exit, bytes, stderr) = await ProcessRunner.RunBinaryAsync(
+            "git",
+            new[] { "show", $"{commit}:{target.IndexPathInRepo}" },
+            target.WorktreeRoot,
+            ct: ct);
+        return exit == 0
+            ? new GitRemoteIndexSnapshot(true, true, commit, bytes, null)
+            : new GitRemoteIndexSnapshot(
+                false,
+                true,
+                commit,
+                null,
+                $"The fetched index could not be read:\n\n{stderr}");
+    }
+
+    /// <summary>
     /// The whole transaction: refuse on anything unexpected, commit only the index, take the final
     /// authorization with the commit made but nothing pushed, then push one explicit refspec.
     /// </summary>
@@ -136,11 +237,26 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
     /// stopping still costs nothing remote. Returning a message here aborts and leaves the local
     /// commit, which is reported rather than silently reset.
     /// </param>
+    public Task<GitPublishResult> PublishAsync(
+        GitPublishTarget target,
+        byte[] rawCandidate,
+        string commitMessage,
+        Func<Task<string?>> authorizeBeforePush,
+        CancellationToken ct = default) =>
+        PublishAsync(
+            target,
+            rawCandidate,
+            commitMessage,
+            authorizeBeforePush,
+            transitionValidator: null,
+            ct);
+
     public async Task<GitPublishResult> PublishAsync(
         GitPublishTarget target,
         byte[] rawCandidate,
         string commitMessage,
         Func<Task<string?>> authorizeBeforePush,
+        Func<byte[]?, byte[], string?>? transitionValidator,
         CancellationToken ct = default)
     {
         // Normalized FIRST, so what is written, what is staged and what is compared are one thing.
@@ -176,16 +292,15 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
         // a branch that was never pushed fails with "couldn't find remote ref", and reading that as
         // "the remote is unreachable" turns the ordinary FIRST publish into a hard error. A brand
         // new index repository is empty by definition.
-        var lsRemote = await RunResultAsync(target.WorktreeRoot, ct,
-            "ls-remote", target.Remote, $"refs/heads/{target.Branch}");
-        if (!lsRemote.Success)
+        var remoteSnapshot = await ReadRemoteIndexAsync(target, ct);
+        if (!remoteSnapshot.Succeeded)
         {
             return Refused("Couldn't reach the remote",
-                $"Asking {target.Describe} what it has failed, so there is no way to tell whether this " +
-                $"is up to date:\n\n{lsRemote.Combined}\n\nNothing was committed or pushed.");
+                $"There is no exact remote catalog baseline to publish against:\n\n" +
+                $"{remoteSnapshot.Error}\n\nNothing was committed or pushed.");
         }
 
-        var remoteBranchExists = !string.IsNullOrWhiteSpace(lsRemote.Stdout);
+        var remoteBranchExists = remoteSnapshot.BranchExists;
 
         // An unborn HEAD — a repository with no commits yet — is a normal state for a new index
         // repo, and the index commit simply becomes the first one.
@@ -195,15 +310,7 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
         {
             // ---- it exists, so this publish must build on exactly what is there ----
 
-            var fetch = await RunResultAsync(target.WorktreeRoot, ct, "fetch", target.Remote, target.Branch);
-            if (!fetch.Success)
-            {
-                return Refused("Couldn't reach the remote",
-                    $"Fetching {target.Describe} failed, so there is no way to tell whether this is up " +
-                    $"to date:\n\n{fetch.Combined}\n\nNothing was committed or pushed.");
-            }
-
-            var remoteHead = await RunAsync(target.WorktreeRoot, ct, "rev-parse", "--verify", "FETCH_HEAD");
+            var remoteHead = remoteSnapshot.Commit;
             if (remoteHead is null)
                 return Refused("Couldn't compare with the remote", "Nothing was committed or pushed.");
 
@@ -248,6 +355,14 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
             logger.Information(
                 "Remote branch {Branch} does not exist on {Remote}; this publish will create it",
                 target.Branch, target.Remote);
+        }
+
+        if (transitionValidator is not null &&
+            transitionValidator(remoteSnapshot.IndexBytes, candidate) is { } transitionError)
+        {
+            return Refused(
+                "The catalog would lose published releases",
+                $"{transitionError}\n\nNothing was committed or pushed.");
         }
 
         // ---- write, stage only the index, and prove what git actually stored ----
@@ -320,7 +435,13 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
             };
         }
 
-        return await VerifyPushedAsync(target, commitSha, candidate, ct);
+        return await VerifyPushedAsync(
+            target,
+            commitSha,
+            candidate,
+            remoteSnapshot.IndexBytes,
+            transitionValidator,
+            ct);
     }
 
     /// <summary>
@@ -332,11 +453,65 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
     /// perfectly good one.</para>
     /// </summary>
     private async Task<GitPublishResult> VerifyPushedAsync(
-        GitPublishTarget target, string commitSha, byte[] candidate, CancellationToken ct)
+        GitPublishTarget target,
+        string commitSha,
+        byte[] candidate,
+        byte[]? previousIndex,
+        Func<byte[]?, byte[], string?>? transitionValidator,
+        CancellationToken ct)
     {
-        var remoteRef = await RunAsync(target.WorktreeRoot, ct,
+        var remoteRef = await RunResultAsync(target.WorktreeRoot, ct,
             "ls-remote", target.Remote, $"refs/heads/{target.Branch}");
-        var remoteSha = remoteRef?.Split('\t', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim();
+        var remoteSha = remoteRef.Success
+            ? remoteRef.Stdout.Split('\t', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim()
+            : null;
+
+        if (remoteSha is null)
+        {
+            return new GitPublishResult(
+                GitPublishOutcome.PublishedVerificationFailed,
+                "Published, but the remote ref could not be verified",
+                $"The push command succeeded, but reading back {target.Describe} failed:\n\n" +
+                $"{remoteRef.Combined}")
+            {
+                Commit = commitSha,
+                Target = target
+            };
+        }
+
+        var (blobExit, committedBytes, blobError) = await ProcessRunner.RunBinaryAsync(
+            "git",
+            new[] { "show", $"{commitSha}:{target.IndexPathInRepo}" },
+            target.WorktreeRoot,
+            ct: ct);
+        if (blobExit != 0 || !committedBytes.AsSpan().SequenceEqual(candidate))
+        {
+            return new GitPublishResult(
+                GitPublishOutcome.PublishedVerificationFailed,
+                "Published, but the committed index did not verify",
+                blobExit != 0
+                    ? $"The pushed commit's index could not be read back:\n\n{blobError}"
+                    : "The pushed commit's index bytes do not match the approved candidate.")
+            {
+                Commit = commitSha,
+                Target = target,
+                PublishedBytes = blobExit == 0 ? committedBytes : null
+            };
+        }
+
+        if (transitionValidator is not null &&
+            transitionValidator(previousIndex, committedBytes) is { } transitionError)
+        {
+            return new GitPublishResult(
+                GitPublishOutcome.PublishedVerificationFailed,
+                "Published, but release preservation did not verify",
+                transitionError)
+            {
+                Commit = commitSha,
+                Target = target,
+                PublishedBytes = committedBytes
+            };
+        }
 
         if (remoteSha is not null && !string.Equals(remoteSha, commitSha, StringComparison.Ordinal))
         {
@@ -346,7 +521,7 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
             {
                 Commit = commitSha,
                 Target = target,
-                PublishedBytes = candidate
+                PublishedBytes = committedBytes
             };
         }
 
@@ -357,7 +532,7 @@ public sealed class GitHubIndexPublisher(GitService git, ILogger logger)
         {
             Commit = commitSha,
             Target = target,
-            PublishedBytes = candidate
+            PublishedBytes = committedBytes
         };
     }
 
