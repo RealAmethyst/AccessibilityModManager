@@ -26,6 +26,8 @@ public sealed class InstallReceipt
     public required string GameId { get; init; }
     public required string PluginId { get; init; }
     public required string InstalledVersion { get; init; }
+    /// <summary>Runtime selected when this receipt was installed. Older receipts omit it.</summary>
+    public string? TargetPlatform { get; init; }
     public required DateTime InstalledAt { get; init; }
     public required List<FileChange> Changes { get; init; }
     public required string BackupFolder { get; init; }

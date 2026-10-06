@@ -84,6 +84,7 @@ public sealed partial class ProjectPickerViewModel : ObservableObject
                 Exists = Directory.Exists(p.Path)
             });
         }
+        SelectedRecent = RecentProjects.FirstOrDefault();
     }
 
     [RelayCommand]
@@ -140,8 +141,11 @@ public sealed partial class ProjectPickerViewModel : ObservableObject
             }
             if (!await _gitHubService.IsAuthenticatedAsync())
             {
+                var gh = OperatingSystem.IsLinux()
+                    ? "\"" + Path.Combine(AppContext.BaseDirectory, "tools", "gh") + "\""
+                    : "gh";
                 _showInfoDialog("Not signed in to GitHub",
-                    "You're not signed in to the GitHub CLI yet. Open a terminal and run:\n\n    gh auth login\n\nThen try again.");
+                    $"You're not signed in to the GitHub CLI yet. Open a terminal and run:\n\n    {gh} auth login\n\nThen try again.");
                 return;
             }
 

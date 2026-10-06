@@ -25,6 +25,10 @@ public sealed class Manifest
     public required string GameId { get; init; }
     public required string PluginId { get; init; }
     public required string ModVersion { get; init; }
+    /// <summary>Must match the selected release target. Absent in older packages means Windows.</summary>
+    public string? TargetPlatform { get; init; }
+    /// <summary>Steam launch setup for a Proton package. Paths are relative to the game folder.</summary>
+    public ProtonLaunchConfig? ProtonLaunch { get; init; }
     public List<InstallAction> InstallActions { get; init; } = [];
     public List<Dependency> Dependencies { get; init; } = [];
     public List<VerifyRule> Verify { get; init; } = [];
@@ -48,6 +52,32 @@ public sealed class Manifest
     /// logs but doesn't block the uninstall.
     /// </summary>
     public LifecycleScript? PostUninstall { get; init; }
+}
+
+public sealed class ProtonLaunchConfig
+{
+    public required string SteamAppId { get; init; }
+    public required string GameDisplayName { get; init; }
+    public required string GameExecutable { get; init; }
+    /// <summary>"replaceExecutable" is the legacy Reloaded II behavior; "direct" keeps Steam's game command intact.</summary>
+    public string LaunchMode { get; init; } = "replaceExecutable";
+    public string? LauncherPath { get; init; }
+    /// <summary>Optional game-relative directory containing Prism's Wine host modules.</summary>
+    public string? BridgeDirectory { get; init; }
+    /// <summary>Wine DLL load rules such as "version=n,b" or "winhttp.dll=n,b".</summary>
+    public List<string> WineDllOverrides { get; init; } = [];
+    /// <summary>Optional game-relative proxy path for an override name; absent means a DLL beside the game executable.</summary>
+    public Dictionary<string, string> WineDllProxyPaths { get; init; } = [];
+    /// <summary>Use a matching loader already installed beside the game; never claim ownership of it.</summary>
+    public bool UseInstalledWineDllProxy { get; init; }
+    /// <summary>Use a matching proxy from a pinned, game-relative ZIP dependency in this manifest.</summary>
+    public bool WineDllProxyFromDependency { get; init; }
+    public string? WindowsDesktopRuntimeVersion { get; init; }
+    /// <summary>Official Windows Desktop Runtime installer SHA-512. Required except for legacy 9.0.20 packages.</summary>
+    public string? WindowsDesktopRuntimeSha512 { get; init; }
+    /// <summary>Relative loader root for a Reloaded II launcher managed inside this prefix.</summary>
+    public string? ReloadedRoot { get; init; }
+    public string? ReloadedModId { get; init; }
 }
 
 /// <summary>
@@ -136,6 +166,12 @@ public sealed class Dependency
 {
     public required string Id { get; init; }
     public required string Type { get; init; } // "system" or "framework"
+    /// <summary>
+    /// Explicit release targets for this dependency. Null preserves older catalogs: the
+    /// Windows rule is also tried under Proton, where the Linux installer checks whether its
+    /// file check and install action are usable. Native Linux requires an explicit entry.
+    /// </summary>
+    public List<string>? TargetPlatforms { get; init; }
     public string? MinVersion { get; init; }
     public DependencyCheck? Check { get; init; }
     public DependencyFix? Fix { get; init; }

@@ -189,11 +189,16 @@ public partial class DeveloperDetailsViewModel : ObservableObject
             Mods.Clear();
             foreach (var game in _pluginIndex.Games)
             {
+                if (!_pluginIndex.ReleasesByGameId.TryGetValue(game.GameId, out var gameReleases) ||
+                    !gameReleases.Any(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform)))
+                    continue;
+
                 var install = _installs.FirstOrDefault(i => i.Game.GameId == game.GameId && i.IsValid);
                 var receipt = await _receiptStore.LoadAsync(game.GameId, _plugin.Id);
 
                 var latestVersion = _pluginIndex.ReleasesByGameId.TryGetValue(game.GameId, out var rels)
-                    ? rels.Where(r => r.Channel == config.DefaultChannel)
+                    ? rels.Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform) &&
+                                      r.Channel == config.DefaultChannel)
                           .OrderByDescending(r => r.Version, VersionComparer.Instance)
                           .FirstOrDefault()?.Version
                     : null;
@@ -306,7 +311,8 @@ public partial class DeveloperDetailsViewModel : ObservableObject
 
         // Skip Patreon-gated releases — their PackageUrl is null and the Patreon post URL
         // isn't a stable place to derive a mod name from.
-        var url = releases.Select(r => r.PackageUrl).FirstOrDefault(u => u is not null);
+        var url = releases.Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform))
+            .Select(r => r.PackageUrl).FirstOrDefault(u => u is not null);
         if (url is not null && string.Equals(url.Host, "github.com", StringComparison.OrdinalIgnoreCase))
         {
             var segments = url.Segments;

@@ -276,7 +276,8 @@ public partial class GameDetailsViewModel : ObservableObject
                 .SelectMany(idx => idx.ReleasesByGameId.TryGetValue(GameId, out var rels)
                     ? rels
                     : Enumerable.Empty<ModRelease>())
-                .Where(IsReleaseVisibleToUser)
+                .Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform) &&
+                            IsReleaseVisibleToUser(r))
                 .Select(r => r.Channel)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -324,7 +325,8 @@ public partial class GameDetailsViewModel : ObservableObject
                 // Patreon block (Q6=C — channel-default schema is gone) so the gate decision
                 // is purely per-release.
                 var filtered = releases
-                    .Where(r => r.Channel == SelectedChannel)
+                    .Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform) &&
+                                r.Channel == SelectedChannel)
                     .Where(r => IsReleaseVisibleToUser(r))
                     .OrderByDescending(r => r.Version, VersionComparer.Instance)
                     .ToList();
@@ -368,7 +370,8 @@ public partial class GameDetailsViewModel : ObservableObject
             // releases — saves tab stops + visual clutter when no beta builds exist.
             HasMultipleChannels = _activeIndexes.Values
                 .SelectMany(idx => idx.ReleasesByGameId.TryGetValue(GameId, out var rels)
-                    ? rels.Select(r => r.Channel)
+                    ? rels.Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform))
+                          .Select(r => r.Channel)
                     : Enumerable.Empty<string>())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Count() > 1;

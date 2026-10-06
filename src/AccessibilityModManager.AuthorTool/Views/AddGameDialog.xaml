@@ -1,7 +1,7 @@
 <Window x:Class="AccessibilityModManager.AuthorTool.Views.AddGameDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels;assembly=AccessibilityModManager.Authoring"
         xmlns:views="clr-namespace:AccessibilityModManager.AuthorTool.Views"
         xmlns:controls="clr-namespace:AccessibilityModManager.AuthorTool.Controls"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -39,6 +39,7 @@
                 <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
                     <Grid>
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
@@ -114,8 +115,15 @@
                                    TextWrapping="Wrap"
                                    Margin="0,0,0,8"/>
 
-                        <TextBlock Grid.Row="8" Grid.Column="0" Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
-                        <controls:FlatComboBox Grid.Row="8" Grid.Column="1"
+                        <TextBlock Grid.Row="8" Grid.Column="0" Text="Linux executable:" VerticalAlignment="Center" Margin="0,4"/>
+                        <TextBox Grid.Row="8" Grid.Column="1"
+                                 Text="{Binding LinuxExeName, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="Native Linux executable filename"
+                                 AutomationProperties.HelpText="Game-relative Linux executable for a native Linux release. Leave blank for Proton-only games."
+                                 Margin="0,4"/>
+
+                        <TextBlock Grid.Row="9" Grid.Column="0" Text="GitHub repo:" VerticalAlignment="Center" Margin="0,4"/>
+                        <controls:FlatComboBox Grid.Row="9" Grid.Column="1"
                                   IsEditable="True"
                                   ItemsSource="{Binding AvailableGitHubRepos}"
                                   Text="{Binding GitHubRepo, UpdateSourceTrigger=PropertyChanged}"
@@ -123,7 +131,7 @@
                                   AutomationProperties.HelpText="Optional. Pick from your GitHub repos, or type a name. Saved per game in author config."
                                   Margin="0,4"/>
 
-                        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
+                        <TextBlock Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
                                    Text="The GitHub repo isn't written to index.json — it's local author-only metadata used by the upload flow."
                                    Foreground="#666"
                                    TextWrapping="Wrap"

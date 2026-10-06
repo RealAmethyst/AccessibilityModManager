@@ -1,12 +1,12 @@
 using System.Collections.ObjectModel;
 using System.IO;
-using AccessibilityModManager.AuthorTool.Services;
+using AccessibilityModManager.Authoring.Services;
 using AccessibilityModManager.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
 
-namespace AccessibilityModManager.AuthorTool.ViewModels;
+namespace AccessibilityModManager.Authoring.ViewModels;
 
 public sealed partial class BuildPackageDialogViewModel : ObservableObject
 {
@@ -26,6 +26,45 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
 
     [ObservableProperty]
     private string? _version;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsProton))]
+    private string _targetPlatform = "windows";
+
+    public bool IsProton => TargetPlatform == ReleaseTarget.Proton;
+
+    [ObservableProperty]
+    private string? _steamAppId;
+
+    [ObservableProperty]
+    private string? _gameExecutable;
+
+    [ObservableProperty]
+    private string _launchMode = "direct";
+
+    [ObservableProperty]
+    private string? _launcherPath;
+
+    [ObservableProperty]
+    private string? _bridgeDirectory;
+
+    [ObservableProperty]
+    private string? _wineDllOverrides;
+
+    [ObservableProperty]
+    private string? _wineDllProxyPaths;
+
+    [ObservableProperty]
+    private string? _windowsDesktopRuntimeVersion;
+
+    [ObservableProperty]
+    private string? _windowsDesktopRuntimeSha512;
+
+    [ObservableProperty]
+    private string? _reloadedRoot;
+
+    [ObservableProperty]
+    private string? _reloadedModId;
 
     [ObservableProperty]
     private bool _isBusy;
@@ -114,8 +153,29 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
         try
         {
             var sanitizedVersion = Version!.Trim();
-            var fileName = $"{_gameId}-v{sanitizedVersion}-amm.zip";
+            var fileName = $"{_gameId}-v{sanitizedVersion}" +
+                           (TargetPlatform == ReleaseTarget.Windows ? "" : "-" + TargetPlatform) + "-amm.zip";
             var outputPath = Path.Combine(ManifestBuilderService.GetBuildsDirectory(), fileName);
+            ProtonLaunchConfig? protonLaunch = null;
+            if (IsProton)
+            {
+                protonLaunch = new ProtonLaunchConfig
+                {
+                    SteamAppId = SteamAppId?.Trim() ?? "",
+                    GameDisplayName = GameDisplayName,
+                    GameExecutable = GameExecutable?.Trim() ?? "",
+                    LaunchMode = LaunchMode,
+                    LauncherPath = EmptyAsNull(LauncherPath),
+                    BridgeDirectory = EmptyAsNull(BridgeDirectory),
+                    WineDllOverrides = (WineDllOverrides ?? "")
+                        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(),
+                    WineDllProxyPaths = ParseProxyPaths(WineDllProxyPaths),
+                    WindowsDesktopRuntimeVersion = EmptyAsNull(WindowsDesktopRuntimeVersion),
+                    WindowsDesktopRuntimeSha512 = EmptyAsNull(WindowsDesktopRuntimeSha512),
+                    ReloadedRoot = EmptyAsNull(ReloadedRoot),
+                    ReloadedModId = EmptyAsNull(ReloadedModId)
+                };
+            }
 
             var result = await _builder.BuildPackageAsync(
                 SourceFolder,
@@ -124,7 +184,9 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
                 sanitizedVersion,
                 _dependencies,
                 outputPath,
-                scripts: _scripts);
+                targetPlatform: TargetPlatform,
+                protonLaunch: protonLaunch,
+                scripts: TargetPlatform == ReleaseTarget.Windows ? _scripts : null);
 
             ResultZipPath = result.ZipPath;
             StatusMessage = $"Built {result.FileCount} files. Returning to release dialog.";
@@ -140,6 +202,24 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    private static string? EmptyAsNull(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static Dictionary<string, string> ParseProxyPaths(string? value)
+    {
+        var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in (value ?? "").Split(';',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = item.Split('=', 2, StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 || parts[0].Length == 0 || parts[1].Length == 0 ||
+                !paths.TryAdd(parts[0], parts[1]))
+                throw new InvalidOperationException(
+                    "Wine proxy paths must use unique name=relative/path.dll entries separated by semicolons.");
+        }
+        return paths;
     }
 
     [RelayCommand]

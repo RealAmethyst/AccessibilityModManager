@@ -156,12 +156,13 @@ public sealed class PatreonService
         }
     }
 
-    public async Task SignInAsync(CancellationToken ct)
+    public async Task SignInAsync(CancellationToken ct, IProgress<string>? progress = null)
     {
-        var account = await _client.SignInAsync(ct);
+        var account = await _client.SignInAsync(ct, progress);
+        progress?.Report("Saving Patreon sign-in...");
+        await _store.SaveAsync(account);
         _sessionGeneration++;
         _currentAccount = account;
-        await _store.SaveAsync(account);
         _cache.Invalidate();
         await RefreshOwnedCampaignsAsync(ct);
         SignInStateChanged?.Invoke();

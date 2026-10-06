@@ -1,6 +1,8 @@
 using System.Net.Http;
 using System.Windows;
 using AccessibilityModManager.AuthorTool.Services;
+using AccessibilityModManager.Authoring.Services;
+using AccessibilityModManager.Authoring.ViewModels;
 using AccessibilityModManager.AuthorTool.ViewModels;
 using AccessibilityModManager.AuthorTool.Views;
 using AccessibilityModManager.Core.Models;
@@ -145,16 +147,16 @@ public partial class App : Application
             BrowseForFile,
             () => mainVm.CloseProject(),
             (gameId, gameDisplayName, pluginId, projPath, initialSourceRepo, repos, deps, scriptInputs, existing)
-                => ShowReleaseDialog(sp, gameId, gameDisplayName, pluginId, projPath, initialSourceRepo, repos, deps, scriptInputs, existing),
-            (existingIds, repos) => ShowAddGameDialog(existingIds, repos),
-            (pluginId, existing) => ShowAuthorInfoDialog(pluginId, existing),
-            () => ShowServerUploadSettingsDialog(sp),
+                => Task.FromResult(ShowReleaseDialog(sp, gameId, gameDisplayName, pluginId, projPath, initialSourceRepo, repos, deps, scriptInputs, existing)),
+            (existingIds, repos) => Task.FromResult(ShowAddGameDialog(existingIds, repos)),
+            (pluginId, existing) => Task.FromResult(ShowAuthorInfoDialog(pluginId, existing)),
+            () => { ShowServerUploadSettingsDialog(sp); return Task.CompletedTask; },
             sp.GetRequiredService<RegistryMembershipChecker>(),
             sp.GetRequiredService<ProjectReconciler>(),
             sp.GetRequiredService<IndexPublishCoordinator>(),
             sp.GetRequiredService<GitHubIndexPublisher>(),
             sp.GetRequiredService<UnsignedPublishGate>(),
-            (pluginId, trust) => ShowClaimSigningDialog(sp, pluginId, trust));
+            (pluginId, trust) => { ShowClaimSigningDialog(sp, pluginId, trust); return Task.CompletedTask; });
     }
 
     private static void ShowServerUploadSettingsDialog(IServiceProvider sp)
@@ -209,8 +211,8 @@ public partial class App : Application
         // bundle is captured the same way — it's constant for the lifetime of the release
         // dialog, so the closure forwards it on every Build click without changing the
         // Func shape.
-        Func<string, string?> showBuildPackage = version
-            => ShowBuildPackageDialog(sp, gameId, gameDisplayName, pluginId, version, deps, scriptInputs);
+        Func<string, Task<string?>> showBuildPackage = version
+            => Task.FromResult(ShowBuildPackageDialog(sp, gameId, gameDisplayName, pluginId, version, deps, scriptInputs));
 
         var vm = new ReleaseDialogViewModel(
             gameId, gameDisplayName, pluginId, projectPath, initialSourceRepo,

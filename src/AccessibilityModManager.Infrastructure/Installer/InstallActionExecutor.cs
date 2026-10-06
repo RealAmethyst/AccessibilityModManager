@@ -139,8 +139,7 @@ public sealed class InstallActionExecutor
     /// </summary>
     private static string ResolveSafe(string baseDir, string relativePath, string context)
     {
-        var fullPath = Path.GetFullPath(Path.Combine(baseDir, relativePath));
-        var contained = PathSafety.EnsureContained(baseDir, fullPath, context);
+        var contained = PathSafety.CombineContained(baseDir, relativePath);
         PathSafety.EnsureNoReparseTraversal(baseDir, contained, context);
         return contained;
     }

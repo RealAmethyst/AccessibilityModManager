@@ -10,6 +10,9 @@ public sealed class ModRelease
     public required string Version { get; init; }
     public required string Channel { get; init; } // "stable" or "beta"
 
+    /// <summary>"windows", "proton", or "linux". Absent in older indexes means Windows.</summary>
+    public string? TargetPlatform { get; init; }
+
     /// <summary>
     /// Public HTTPS URL for the wrapped ZIP. Set on every public release. <c>null</c> when
     /// <see cref="Patreon"/> is set instead — the manager fetches the asset from Patreon's

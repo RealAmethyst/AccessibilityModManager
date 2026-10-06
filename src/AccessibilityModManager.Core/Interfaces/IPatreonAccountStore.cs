@@ -3,9 +3,8 @@ using AccessibilityModManager.Core.Models;
 namespace AccessibilityModManager.Core.Interfaces;
 
 /// <summary>
-/// Persists the user's Patreon access + refresh tokens locally, encrypted via Windows
-/// DPAPI (Q5=B). Same machine + same Windows user can read; copying the file to another
-/// machine yields garbage. Returns null when the user isn't signed in.
+/// Persists Patreon access and refresh tokens through the platform's protected user store.
+/// Returns null when the user isn't signed in.
 /// </summary>
 public interface IPatreonAccountStore
 {

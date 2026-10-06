@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Security;
@@ -22,9 +23,12 @@ public sealed class DependencyChecker : IDependencyChecker
         _logger = logger;
     }
 
-    public Task<List<DependencyStatus>> CheckAsync(GameInstall game, CancellationToken ct = default)
+    public Task<List<DependencyStatus>> CheckAsync(GameInstall game, CancellationToken ct = default,
+        string? targetPlatform = null)
     {
-        var dependencies = game.Game.Dependencies;
+        var target = targetPlatform ?? (OperatingSystem.IsWindows()
+            ? ReleaseTarget.Windows : ReleaseTarget.Proton);
+        var dependencies = DependencyTargeting.ForTarget(game.Game.Dependencies, target);
         _logger.Information("Checking {Count} dependencies for {GameId}",
             dependencies.Count, game.Game.GameId);
 
@@ -121,13 +125,24 @@ public sealed class DependencyChecker : IDependencyChecker
         if (!string.IsNullOrEmpty(dep.Check.FilePath))
         {
             var normalizedBase = Path.GetFullPath(gameInstallPath);
-            var fullPath = Path.GetFullPath(Path.Combine(normalizedBase, dep.Check.FilePath));
-
-            // Path traversal protection — PathSafety canonicalizes both sides (separators, case,
-            // trailing separators) so a VDF/folder-picker style base can't foil the check.
-            if (!PathSafety.IsContained(normalizedBase, fullPath))
+            string fullPath;
+            try
             {
-                _logger.Warning("Dependency check path escapes game directory: {Path}", dep.Check.FilePath);
+                // Catalogs authored on Windows use backslashes even when the game is running
+                // through Proton. Treat them as separators after rejecting rooted paths.
+                var relativePath = dep.Check.FilePath;
+                if (!OperatingSystem.IsWindows())
+                {
+                    if (relativePath.StartsWith('/') || relativePath.StartsWith('\\') ||
+                        relativePath.Contains(':'))
+                        throw new InvalidOperationException("A game dependency check must be relative to the game folder.");
+                    relativePath = relativePath.Replace('\\', '/');
+                }
+                fullPath = PathSafety.CombineContained(normalizedBase, relativePath);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
+            {
+                _logger.Warning(ex, "Dependency check path is invalid: {Path}", dep.Check.FilePath);
                 return new DependencyStatus
                 {
                     Dependency = dep,
@@ -162,6 +177,20 @@ public sealed class DependencyChecker : IDependencyChecker
     /// a version that's only too old is Incompatible; otherwise Missing (audit finding 35).
     /// </summary>
     private DependencyStatus CheckRegistry(Dependency dep)
+    {
+        if (OperatingSystem.IsWindows())
+            return CheckWindowsRegistry(dep);
+
+        return new DependencyStatus
+        {
+            Dependency = dep,
+            Status = DependencyStatusKind.Missing,
+            Details = "This dependency requires a Windows registry check"
+        };
+    }
+
+    [SupportedOSPlatform("windows")]
+    private DependencyStatus CheckWindowsRegistry(Dependency dep)
     {
         // Authors sometimes write the hive INTO the key ("HKEY_LOCAL_MACHINE\SOFTWARE\...") —
         // the old code silently opened that whole string relative to HKLM, which can never
@@ -227,6 +256,7 @@ public sealed class DependencyChecker : IDependencyChecker
         return best!;
     }
 
+    [SupportedOSPlatform("windows")]
     private static RegistryHive? ParseHive(string value) => value.Trim().ToUpperInvariant() switch
     {
         "HKLM" or "HKEY_LOCAL_MACHINE" => RegistryHive.LocalMachine,
@@ -243,6 +273,7 @@ public sealed class DependencyChecker : IDependencyChecker
     /// Public because the pin's whole point is EXCLUSION, and tests can't prove exclusion
     /// against a real hive without elevation (HKCU is shared between views) — they prove it here.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static RegistryView[]? ParseViews(string? registryView) =>
         registryView?.Trim().ToUpperInvariant() switch
         {
@@ -252,6 +283,7 @@ public sealed class DependencyChecker : IDependencyChecker
             _ => null
         };
 
+    [SupportedOSPlatform("windows")]
     private DependencyStatus CheckRegistryView(Dependency dep, RegistryHive hive, RegistryView view, string keyPath)
     {
         try

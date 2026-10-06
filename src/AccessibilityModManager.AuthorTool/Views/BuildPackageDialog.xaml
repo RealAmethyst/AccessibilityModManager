@@ -1,19 +1,21 @@
 <Window x:Class="AccessibilityModManager.AuthorTool.Views.BuildPackageDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+        xmlns:vm="clr-namespace:AccessibilityModManager.Authoring.ViewModels;assembly=AccessibilityModManager.Authoring"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance vm:BuildPackageDialogViewModel}"
         Title="Build mod package"
-        Height="640" Width="640"
+        Height="780" Width="680"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
         AutomationProperties.Name="Build mod package">
 
     <Grid Margin="16">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -77,19 +79,63 @@
                      AutomationProperties.HelpText="Examples: 1.0.0, 1.8.0, 2.0.0-beta1"/>
         </Grid>
 
-        <TextBlock Grid.Row="4"
+        <StackPanel Grid.Row="4" Margin="0,0,0,8">
+            <TextBlock Text="Package platform:"/>
+            <ComboBox SelectedItem="{Binding TargetPlatform}"
+                      AutomationProperties.Name="Package platform"
+                      AutomationProperties.HelpText="Choose Proton for a Windows game played through Steam on Linux, or Linux for a native Linux game. Windows lifecycle scripts are included only in Windows packages."
+                      Margin="0,3,0,0">
+                <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">windows</sys:String>
+                <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">proton</sys:String>
+                <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">linux</sys:String>
+            </ComboBox>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="5" MaxHeight="250" VerticalScrollBarVisibility="Auto"
+                      Visibility="{Binding IsProton, Converter={StaticResource BoolToVisConverter}}">
+            <StackPanel>
+                <TextBlock Text="Steam app ID:"/><TextBox Text="{Binding SteamAppId}" AutomationProperties.Name="Steam app ID"/>
+                <TextBlock Text="Game executable relative to game folder:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding GameExecutable}" AutomationProperties.Name="Game executable"/>
+                <TextBlock Text="Launch mode:" Margin="0,6,0,0"/>
+                <ComboBox SelectedItem="{Binding LaunchMode}" AutomationProperties.Name="Proton launch mode">
+                    <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">direct</sys:String>
+                    <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">replaceExecutable</sys:String>
+                </ComboBox>
+                <TextBlock Text="Launcher executable, for replaceExecutable only:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding LauncherPath}" AutomationProperties.Name="Launcher executable"/>
+                <TextBlock Text="Prism Wine bridge directory, optional:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding BridgeDirectory}" AutomationProperties.Name="Prism Wine bridge directory"/>
+                <TextBlock Text="Wine DLL overrides, separated by semicolons, optional:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding WineDllOverrides}" AutomationProperties.Name="Wine DLL overrides"
+                         AutomationProperties.HelpText="Example: version=n,b for MelonLoader or winhttp.dll=n,b for BepInEx."/>
+                <TextBlock Text="Wine proxy paths, only when a DLL is not beside the game executable:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding WineDllProxyPaths}" AutomationProperties.Name="Wine DLL proxy paths"
+                         AutomationProperties.HelpText="Example: freetype=app_digister/freetype.dll. Separate several entries with semicolons."/>
+                <TextBlock Text="Windows Desktop Runtime version, optional:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding WindowsDesktopRuntimeVersion}" AutomationProperties.Name="Windows Desktop Runtime version"/>
+                <TextBlock Text="Official runtime installer SHA-512, required for runtimes other than 9.0.20:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding WindowsDesktopRuntimeSha512}" AutomationProperties.Name="Windows Desktop Runtime SHA-512"/>
+                <TextBlock Text="Reloaded II root directory, optional:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding ReloadedRoot}" AutomationProperties.Name="Reloaded II root directory"/>
+                <TextBlock Text="Reloaded II mod ID, paired with root directory:" Margin="0,6,0,0"/>
+                <TextBox Text="{Binding ReloadedModId}" AutomationProperties.Name="Reloaded II mod ID"/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="6"
                    Text="Detected layout:"
                    FontWeight="SemiBold"
                    AutomationProperties.HeadingLevel="Level2"
                    Margin="0,8,0,4"/>
 
-        <TextBlock Grid.Row="5"
+        <TextBlock Grid.Row="7"
                    Text="No source folder picked yet."
                    Foreground="#888"
                    Margin="0,0,0,4"
                    Visibility="{Binding SourceFolder, Converter={StaticResource NullToVisibleConverter}}"/>
 
-        <ListBox Grid.Row="6"
+        <ListBox Grid.Row="8"
                  ItemsSource="{Binding DetectedEntries}"
                  AutomationProperties.Name="Detected entries that will be packaged"
                  Visibility="{Binding SourceFolder, Converter={StaticResource NullToCollapsedConverter}}">
@@ -115,14 +161,14 @@
             </ListBox.ItemTemplate>
         </ListBox>
 
-        <TextBlock Grid.Row="7"
+        <TextBlock Grid.Row="9"
                    Text="{Binding StatusMessage}"
                    AutomationProperties.LiveSetting="Polite"
                    TextWrapping="Wrap"
                    Margin="0,8,0,8"
                    Visibility="{Binding StatusMessage, Converter={StaticResource NullToCollapsedConverter}}"/>
 
-        <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Build"
                     Command="{Binding BuildCommand}"
                     AutomationProperties.Name="Build the wrapped package"

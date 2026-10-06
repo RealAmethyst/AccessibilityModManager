@@ -1,0 +1,56 @@
+diff --git a/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs b/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs
+index 0a013db..92a4903 100644
+--- a/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs
++++ b/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Collections.Generic;
+ using Avalonia.Automation.Peers;
+ using Avalonia.Automation.Provider;
+ using Avalonia.Platform;
+@@ -49,14 +50,39 @@ private void OnRootFocusChanged(object? sender, EventArgs e)
+         {
+             var focused = RootProvider.GetFocus();
+             var focusedNode = Server.TryGetAttachedNode(focused);
+-            if (focusedNode is null)
++            if (focusedNode is null && focused is not null)
++                focusedNode = AttachFocusedDescendant(focused);
++            Server.EmitFocusChange(focusedNode);
++        }
++
++        private AtSpiNode? AttachFocusedDescendant(AutomationPeer focused)
++        {
++            var ancestors = new HashSet<AutomationPeer>();
++            AutomationPeer? peer = focused;
++            while (peer is not null && ancestors.Add(peer))
++                peer = peer.GetParent();
++
++            if (!ancestors.Contains(Peer))
++                return null;
++
++            AtSpiNode node = this;
++            while (!ReferenceEquals(node.Peer, focused))
+             {
+-                // Focus can shift before children are queried;
+-                // refresh visible root children lazily.
+-                EnsureChildren();
+-                focusedNode = Server.TryGetAttachedNode(focused);
++                AtSpiNode? next = null;
++                foreach (var child in node.EnsureChildren())
++                {
++                    if (!ancestors.Contains(child.Peer))
++                        continue;
++                    next = child;
++                    break;
++                }
++
++                if (next is null)
++                    return null;
++                node = next;
+             }
+-            Server.EmitFocusChange(focusedNode);
++
++            return node;
+         }
+ 
+         private void OnWindowActivated()

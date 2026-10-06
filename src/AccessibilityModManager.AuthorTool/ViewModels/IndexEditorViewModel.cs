@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AccessibilityModManager.AuthorTool.Services;
+using AccessibilityModManager.Authoring.Services;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.CatalogClaims;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -39,14 +40,14 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     private readonly Func<string, string, bool> _confirmDialog;
     private readonly Func<string, string, string?, string?> _browseForFile;
     private readonly Action _closeProject;
-    private readonly Func<string, string, string, string, string?, ObservableCollection<string>, IList<Dependency>, LifecycleScriptInputs, ModRelease?, ReleaseDialogResult?> _showReleaseDialog;
-    private readonly Func<ISet<string>, ObservableCollection<string>, AddGameDialogViewModel?> _showAddGameDialog;
-    private readonly Func<string, PluginAuthorInfo?, PluginAuthorInfo?> _showAuthorInfoDialog;
-    private readonly Action _showServerUploadSettingsDialog;
+    private readonly Func<string, string, string, string, string?, ObservableCollection<string>, IList<Dependency>, LifecycleScriptInputs, ModRelease?, Task<ReleaseDialogResult?>> _showReleaseDialog;
+    private readonly Func<ISet<string>, ObservableCollection<string>, Task<AddGameDialogViewModel?>> _showAddGameDialog;
+    private readonly Func<string, PluginAuthorInfo?, Task<PluginAuthorInfo?>> _showAuthorInfoDialog;
+    private readonly Func<Task> _showServerUploadSettingsDialog;
     private readonly RegistryMembershipChecker _registryChecker;
     private readonly ProjectReconciler _reconciler;
     private readonly IndexPublishCoordinator _publishCoordinator;
-    private readonly Action<string, RegistryTrustState> _showClaimSigningDialog;
+    private readonly Func<string, RegistryTrustState, Task> _showClaimSigningDialog;
 
     private PluginRepoIndex _index;
     private bool _suppressDirty;
@@ -184,16 +185,16 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         Func<string, string, bool> confirmDialog,
         Func<string, string, string?, string?> browseForFile,
         Action closeProject,
-        Func<string, string, string, string, string?, ObservableCollection<string>, IList<Dependency>, LifecycleScriptInputs, ModRelease?, ReleaseDialogResult?> showReleaseDialog,
-        Func<ISet<string>, ObservableCollection<string>, AddGameDialogViewModel?> showAddGameDialog,
-        Func<string, PluginAuthorInfo?, PluginAuthorInfo?> showAuthorInfoDialog,
-        Action showServerUploadSettingsDialog,
+        Func<string, string, string, string, string?, ObservableCollection<string>, IList<Dependency>, LifecycleScriptInputs, ModRelease?, Task<ReleaseDialogResult?>> showReleaseDialog,
+        Func<ISet<string>, ObservableCollection<string>, Task<AddGameDialogViewModel?>> showAddGameDialog,
+        Func<string, PluginAuthorInfo?, Task<PluginAuthorInfo?>> showAuthorInfoDialog,
+        Func<Task> showServerUploadSettingsDialog,
         RegistryMembershipChecker registryChecker,
         ProjectReconciler reconciler,
         IndexPublishCoordinator publishCoordinator,
         GitHubIndexPublisher gitHubPublisher,
         UnsignedPublishGate unsignedGate,
-        Action<string, RegistryTrustState> showClaimSigningDialog)
+        Func<string, RegistryTrustState, Task> showClaimSigningDialog)
     {
         _gitHubPublisher = gitHubPublisher;
         _unsignedGate = unsignedGate;
@@ -1034,13 +1035,13 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void AddGame()
+    private async Task AddGameAsync()
     {
         var existingIds = _index.Games
             .Select(g => g.GameId)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var result = _showAddGameDialog(existingIds, AvailableGitHubRepos);
+        var result = await _showAddGameDialog(existingIds, AvailableGitHubRepos);
         if (result == null) return;
 
         var game = result.ToGame();
@@ -1086,7 +1087,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         if (!TryBuildScripts(SelectedGame, out var scriptInputs))
             return;
 
-        var dialogResult = _showReleaseDialog(
+        var dialogResult = await _showReleaseDialog(
             SelectedGame.GameId,
             SelectedGame.DisplayName,
             _index.PluginId,
@@ -1139,7 +1140,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
         if (!TryBuildScripts(SelectedGame, out var scriptInputs))
             return;
 
-        var dialogResult = _showReleaseDialog(
+        var dialogResult = await _showReleaseDialog(
             SelectedGame.GameId,
             SelectedGame.DisplayName,
             _index.PluginId,
@@ -1211,12 +1212,12 @@ public sealed partial class IndexEditorViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void EditServerUploadSettings() => _showServerUploadSettingsDialog();
+    private Task EditServerUploadSettingsAsync() => _showServerUploadSettingsDialog();
 
     [RelayCommand]
-    private void EditAuthorInfo()
+    private async Task EditAuthorInfoAsync()
     {
-        var result = _showAuthorInfoDialog(_index.PluginId, _index.Author);
+        var result = await _showAuthorInfoDialog(_index.PluginId, _index.Author);
         if (result == null) return;
 
         _index = new PluginRepoIndex
@@ -1568,7 +1569,7 @@ public sealed partial class IndexEditorViewModel : ObservableObject
             trust = RegistryTrustState.Unreadable(ex.Message);
         }
 
-        _showClaimSigningDialog(_index.PluginId, trust);
+        await _showClaimSigningDialog(_index.PluginId, trust);
     }
 
     /// <summary>Shown when a second server operation is asked for while one is running.</summary>

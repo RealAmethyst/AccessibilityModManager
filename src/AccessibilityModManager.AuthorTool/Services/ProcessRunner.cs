@@ -20,7 +20,7 @@ internal static class ProcessRunner
     {
         var psi = new ProcessStartInfo
         {
-            FileName = fileName,
+            FileName = ResolveTool(fileName),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -93,7 +93,7 @@ internal static class ProcessRunner
     {
         var psi = new ProcessStartInfo
         {
-            FileName = fileName,
+            FileName = ResolveTool(fileName),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -139,5 +139,15 @@ internal static class ProcessRunner
         }
 
         return (process.ExitCode, buffer.ToArray(), stderr.TrimEnd('\r', '\n'));
+    }
+
+    private static string ResolveTool(string fileName)
+    {
+        if (OperatingSystem.IsLinux() && fileName == "gh")
+        {
+            var bundled = Path.Combine(AppContext.BaseDirectory, "tools", "gh");
+            if (File.Exists(bundled)) return bundled;
+        }
+        return fileName;
     }
 }

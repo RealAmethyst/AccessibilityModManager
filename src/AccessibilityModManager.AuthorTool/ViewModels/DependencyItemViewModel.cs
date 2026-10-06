@@ -22,6 +22,18 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     private bool _isGameInstaller;
 
     [ObservableProperty]
+    private bool _automaticPlatforms;
+
+    [ObservableProperty]
+    private bool _targetWindows;
+
+    [ObservableProperty]
+    private bool _targetProton;
+
+    [ObservableProperty]
+    private bool _targetLinux;
+
+    [ObservableProperty]
     private string? _minVersion;
 
     [ObservableProperty]
@@ -90,6 +102,10 @@ public sealed partial class DependencyItemViewModel : ObservableObject
         _type = dep.Type;
         _required = dep.Required;
         _isGameInstaller = dep.IsGameInstaller;
+        _automaticPlatforms = dep.TargetPlatforms is null;
+        _targetWindows = dep.TargetPlatforms?.Contains(ReleaseTarget.Windows) ?? true;
+        _targetProton = dep.TargetPlatforms?.Contains(ReleaseTarget.Proton) ?? false;
+        _targetLinux = dep.TargetPlatforms?.Contains(ReleaseTarget.Linux) ?? false;
         _minVersion = dep.MinVersion;
         _checkRegistryKey = dep.Check?.RegistryKey;
         _checkRegistryValue = dep.Check?.RegistryValue;
@@ -131,6 +147,10 @@ public sealed partial class DependencyItemViewModel : ObservableObject
     partial void OnTypeChanged(string value) => _parent.MarkParentDirty();
     partial void OnRequiredChanged(bool value) => _parent.MarkParentDirty();
     partial void OnIsGameInstallerChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnAutomaticPlatformsChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnTargetWindowsChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnTargetProtonChanged(bool value) => _parent.MarkParentDirty();
+    partial void OnTargetLinuxChanged(bool value) => _parent.MarkParentDirty();
     partial void OnMinVersionChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryKeyChanged(string? value) => _parent.MarkParentDirty();
     partial void OnCheckRegistryValueChanged(string? value) => _parent.MarkParentDirty();
@@ -180,12 +200,21 @@ public sealed partial class DependencyItemViewModel : ObservableObject
             || !string.IsNullOrWhiteSpace(FixBundledPath)
             || auto != null;
 
-        return new Dependency
+        var platforms = AutomaticPlatforms ? null : new List<string>();
+        if (platforms is not null)
+        {
+            if (TargetWindows) platforms.Add(ReleaseTarget.Windows);
+            if (TargetProton) platforms.Add(ReleaseTarget.Proton);
+            if (TargetLinux) platforms.Add(ReleaseTarget.Linux);
+        }
+
+        var dependency = new Dependency
         {
             Id = Id,
             Type = Type,
             Required = Required,
             IsGameInstaller = IsGameInstaller,
+            TargetPlatforms = platforms,
             MinVersion = string.IsNullOrWhiteSpace(MinVersion) ? null : MinVersion,
             Check = hasCheck ? new DependencyCheck
             {
@@ -202,6 +231,8 @@ public sealed partial class DependencyItemViewModel : ObservableObject
                 AutoInstall = auto
             } : null
         };
+        DependencyTargeting.Validate(dependency);
+        return dependency;
     }
 
     private DependencyAutoInstall? BuildAutoInstall()

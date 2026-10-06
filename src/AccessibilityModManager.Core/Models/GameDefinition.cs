@@ -11,7 +11,10 @@ public sealed class GameDefinition
     public string? Description { get; init; }
     public string? SteamAppId { get; init; }
     public string? ExeName { get; init; }
+    /// <summary>Native Linux executable, when the Steam game also has a Linux build.</summary>
+    public string? LinuxExeName { get; init; }
     public List<PathProbeRule> ProbeRules { get; init; } = [];
+    public List<PathProbeRule> LinuxProbeRules { get; init; } = [];
 
     /// <summary>
     /// Non-Steam detection: locate the install path by reading a Windows registry value. For

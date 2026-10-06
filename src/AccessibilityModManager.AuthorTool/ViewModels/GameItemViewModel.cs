@@ -27,6 +27,9 @@ public sealed partial class GameItemViewModel : ObservableObject
     private string? _exeName;
 
     [ObservableProperty]
+    private string? _linuxExeName;
+
+    [ObservableProperty]
     private string? _perGameSourceRepo;
 
     // Registry detection (non-Steam). All three must be filled for the probe to be emitted.
@@ -74,6 +77,7 @@ public sealed partial class GameItemViewModel : ObservableObject
         _description = def.Description;
         _steamAppId = def.SteamAppId;
         _exeName = def.ExeName;
+        _linuxExeName = def.LinuxExeName;
         _registryHive = def.RegistryProbe?.Hive;
         _registryKey = def.RegistryProbe?.Key;
         _registryValue = def.RegistryProbe?.Value;
@@ -165,6 +169,7 @@ public sealed partial class GameItemViewModel : ObservableObject
     partial void OnDescriptionChanged(string? value) => _parent.MarkDirty();
     partial void OnSteamAppIdChanged(string? value) => _parent.MarkDirty();
     partial void OnExeNameChanged(string? value) => _parent.MarkDirty();
+    partial void OnLinuxExeNameChanged(string? value) => _parent.MarkDirty();
     partial void OnPerGameSourceRepoChanged(string? value) => _parent.MarkDirty();
     partial void OnRegistryHiveChanged(string? value) => _parent.MarkDirty();
     partial void OnRegistryKeyChanged(string? value) => _parent.MarkDirty();
@@ -249,7 +254,9 @@ public sealed partial class GameItemViewModel : ObservableObject
             Description = string.IsNullOrWhiteSpace(Description) ? null : Description,
             SteamAppId = string.IsNullOrWhiteSpace(SteamAppId) ? null : SteamAppId,
             ExeName = string.IsNullOrWhiteSpace(ExeName) ? null : ExeName,
+            LinuxExeName = string.IsNullOrWhiteSpace(LinuxExeName) ? null : LinuxExeName,
             ProbeRules = def.ProbeRules,
+            LinuxProbeRules = def.LinuxProbeRules,
             RegistryProbe = BuildRegistryProbe(),
             AsciiPathShim = BuildAsciiPathShim(),
             Dependencies = Dependencies.Select(d => d.ToModel()).ToList(),

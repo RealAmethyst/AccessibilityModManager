@@ -1,5 +1,6 @@
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Security;
 using Microsoft.Win32;
 using Serilog;
 
@@ -9,11 +10,13 @@ public sealed class SteamDetector : ISteamDetector
 {
     private readonly IGameVerifier _gameVerifier;
     private readonly ILogger _logger;
+    private readonly string? _steamRootOverride;
 
-    public SteamDetector(IGameVerifier gameVerifier, ILogger logger)
+    public SteamDetector(IGameVerifier gameVerifier, ILogger logger, string? steamRootOverride = null)
     {
         _gameVerifier = gameVerifier;
         _logger = logger;
+        _steamRootOverride = steamRootOverride;
     }
 
     public Task<List<GameInstall>> DetectInstalledGamesAsync(
@@ -21,22 +24,29 @@ public sealed class SteamDetector : ISteamDetector
     {
         var results = new List<GameInstall>();
 
-        var steamPath = FindSteamPath();
-        if (steamPath == null)
+        var steamRoots = _steamRootOverride is not null
+            ? new List<string> { _steamRootOverride }
+            : FindSteamPaths();
+        if (steamRoots.Count == 0)
         {
             _logger.Warning("Steam installation not found");
             return Task.FromResult(results);
         }
 
-        _logger.Information("Found Steam at: {SteamPath}", steamPath);
+        _logger.Information("Found Steam roots: {SteamRoots}", steamRoots);
 
-        var libraryPaths = GetLibraryPaths(steamPath);
+        var libraryPaths = steamRoots.SelectMany(root =>
+                GetLibraryPaths(root).Select(library => (Library: library, SteamRoot: root)))
+            .GroupBy(pair => pair.Library,
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
         _logger.Information("Found {Count} Steam library folders", libraryPaths.Count);
 
         var gamesList = knownGames.ToList();
         var gamesWithSteamId = gamesList.Where(g => !string.IsNullOrEmpty(g.SteamAppId)).ToList();
 
-        foreach (var libraryPath in libraryPaths)
+        foreach (var (libraryPath, steamRoot) in libraryPaths)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -53,13 +63,19 @@ public sealed class SteamDetector : ISteamDetector
                 if (appManifests.TryGetValue(game.SteamAppId!, out var installDir))
                 {
                     var gamePath = Path.Combine(commonPath, installDir);
-                    if (Directory.Exists(gamePath) && _gameVerifier.VerifyInstallPath(game, gamePath))
+                    if (Directory.Exists(gamePath) && _gameVerifier.VerifyInstallPath(game, gamePath) &&
+                        !results.Any(result => result.Game.GameId == game.GameId))
                     {
+                        var prefixPath = Path.Combine(libraryPath, "steamapps", "compatdata",
+                            game.SteamAppId!, "pfx");
                         results.Add(new GameInstall
                         {
                             Game = game,
                             PluginId = pluginId,
                             InstallPath = gamePath,
+                            SteamLibraryPath = libraryPath,
+                            SteamRootPath = steamRoot,
+                            ProtonPrefixPath = Directory.Exists(prefixPath) ? prefixPath : null,
                             IsValid = true
                         });
                         _logger.Information("Detected {Game} at {Path}", game.DisplayName, gamePath);
@@ -71,15 +87,32 @@ public sealed class SteamDetector : ISteamDetector
         return Task.FromResult(results);
     }
 
-    private string? FindSteamPath()
+    private List<string> FindSteamPaths()
     {
+        if (OperatingSystem.IsLinux())
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrWhiteSpace(home)) return [];
+
+            string[] linuxPaths =
+            [
+                Path.Combine(home, ".local", "share", "Steam"),
+                Path.Combine(home, ".steam", "root"),
+                Path.Combine(home, ".steam", "steam"),
+                Path.Combine(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")
+            ];
+            return linuxPaths.Where(Directory.Exists).ToList();
+        }
+
+        if (!OperatingSystem.IsWindows()) return [];
+
         // Try registry first (most reliable on Windows)
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
             var path = key?.GetValue("SteamPath") as string;
             if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
-                return path;
+                return [path];
         }
         catch (Exception ex)
         {
@@ -91,7 +124,7 @@ public sealed class SteamDetector : ISteamDetector
             using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Valve\Steam");
             var path = key?.GetValue("InstallPath") as string;
             if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
-                return path;
+                return [path];
         }
         catch (Exception ex)
         {
@@ -109,10 +142,10 @@ public sealed class SteamDetector : ISteamDetector
         foreach (var path in commonPaths)
         {
             if (Directory.Exists(path))
-                return path;
+                return [path];
         }
 
-        return null;
+        return [];
     }
 
     private List<string> GetLibraryPaths(string steamPath)
@@ -122,7 +155,9 @@ public sealed class SteamDetector : ISteamDetector
         // backslashes ("C:\Program Files (x86)\Steam"). Without normalization the main library is
         // added twice and every game in it is detected twice.
         var paths = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
 
         void AddIfNew(string p)
         {
@@ -193,7 +228,16 @@ public sealed class SteamDetector : ISteamDetector
                 }
 
                 if (!string.IsNullOrEmpty(appId) && !string.IsNullOrEmpty(installDir))
-                    result[appId] = installDir;
+                {
+                    try
+                    {
+                        result[appId] = PathSafety.EnsureLeafFileName(installDir, "Steam install directory");
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        _logger.Warning(ex, "Skipping unsafe Steam manifest {AcfFile}", acfFile);
+                    }
+                }
             }
             catch (Exception ex)
             {

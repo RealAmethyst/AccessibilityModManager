@@ -50,7 +50,8 @@ public sealed class PatreonClient
     /// token, and fetch the user's identity to populate the <see cref="PatreonAccount"/>.
     /// Cancellation token aborts the wait without leaking the listener.
     /// </summary>
-    public async Task<PatreonAccount> SignInAsync(CancellationToken ct)
+    public async Task<PatreonAccount> SignInAsync(
+        CancellationToken ct, IProgress<string>? progress = null)
     {
         var (verifier, challenge) = GeneratePkcePair();
         var state = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
@@ -136,10 +137,10 @@ public sealed class PatreonClient
             }
 
             // The loop above already established this is our callback with our state, so the page
-            // the user is shown now matches what actually happened — no more telling a browser
-            // "Signed in." moments before the sign-in is rejected.
+            // the user is shown now matches what actually happened. The token exchange and local
+            // save still have to finish in the app.
             var responseHtml = error == null
-                ? "<html><body><h1>Signed in.</h1><p>You can close this tab and return to the app.</p></body></html>"
+                ? "<html><body><h1>Authorization received.</h1><p>Return to the app to finish signing in.</p></body></html>"
                 : $"<html><body><h1>Sign-in failed.</h1><p>{WebUtility.HtmlEncode(error)}</p></body></html>";
             var bytes = Encoding.UTF8.GetBytes(responseHtml);
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -152,6 +153,7 @@ public sealed class PatreonClient
             if (string.IsNullOrEmpty(code))
                 throw new InvalidOperationException("Patreon redirect did not include an authorization code.");
 
+            progress?.Report("Finishing Patreon sign-in...");
             // Exchange the code for tokens (PKCE: send the verifier as proof).
             var account = await ExchangeCodeForTokenAsync(code, verifier, ct);
 

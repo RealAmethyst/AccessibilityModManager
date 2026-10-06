@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Patreon;
@@ -10,10 +11,9 @@ namespace AccessibilityModManager.AuthorTool.Services;
 
 /// <summary>
 /// AuthorTool-side façade over <see cref="PatreonClient"/> using the AUTHOR client_id +
-/// scopes. Sign-in token is stored in a separate DPAPI blob (<c>patreon-author.dat</c>) so
-/// it can't get confused with a user-side manager session if both apps run on the same
-/// machine. Methods expose the author's own campaign + tier list so the per-release
-/// editor can render checkboxes.
+/// scopes. The author session is separate from the manager session: DPAPI protects it on
+/// Windows, and Secret Service protects it on Linux. Methods expose the author's own
+/// campaign and tier list for the per-release editor.
 /// </summary>
 public sealed class PatreonAuthorService
 {
@@ -31,6 +31,7 @@ public sealed class PatreonAuthorService
 
     private readonly PatreonClient _client;
     private readonly ILogger _logger;
+    private readonly SecretServicePatreonAccountStore _linuxStore = new("patreon-author");
 
     private PatreonAccount? _account;
     private PatreonOwnCampaign? _ownCampaign;
@@ -49,7 +50,9 @@ public sealed class PatreonAuthorService
 
     public async Task LoadAsync()
     {
-        _account = LoadFromDisk();
+        _account = OperatingSystem.IsLinux() ? await _linuxStore.LoadAsync() :
+            OperatingSystem.IsWindows() ? LoadFromDisk() :
+            throw new PlatformNotSupportedException();
         if (_account != null && _ownCampaign == null)
         {
             // Best-effort fetch on launch so the campaign + tiers are ready when the
@@ -63,7 +66,9 @@ public sealed class PatreonAuthorService
     {
         var account = await _client.SignInAsync(ct);
         _account = account;
-        SaveToDisk(account);
+        if (OperatingSystem.IsLinux()) await _linuxStore.SaveAsync(account);
+        else if (OperatingSystem.IsWindows()) SaveToDisk(account);
+        else throw new PlatformNotSupportedException();
         try { _ownCampaign = await _client.FetchOwnCampaignAsync(account, ct); }
         catch (Exception ex) { _logger.Warning(ex, "Sign-in succeeded but couldn't fetch own campaign"); }
         StateChanged?.Invoke();
@@ -73,7 +78,9 @@ public sealed class PatreonAuthorService
     {
         if (_account != null)
             await _client.RevokeAsync(_account, ct);
-        ClearTokenFile();
+        if (OperatingSystem.IsLinux()) await _linuxStore.ClearAsync();
+        else if (OperatingSystem.IsWindows()) ClearTokenFile();
+        else throw new PlatformNotSupportedException();
         _account = null;
         _ownCampaign = null;
         StateChanged?.Invoke();
@@ -160,6 +167,7 @@ public sealed class PatreonAuthorService
     /// <summary>Sign-out marker; see <see cref="ClearTokenFile"/>.</summary>
     private static string TombstoneFile => TokenFile + ".signedout";
 
+    [SupportedOSPlatform("windows")]
     private PatreonAccount? LoadFromDisk()
     {
         if (!File.Exists(TokenFile)) return null;
@@ -193,6 +201,7 @@ public sealed class PatreonAuthorService
     /// honours. A plain swallowed delete used to leave a working token behind when the file was
     /// locked, silently signing the author back in next launch (audit finding 36).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private void ClearTokenFile()
     {
         if (!File.Exists(TokenFile)) return;
@@ -236,6 +245,7 @@ public sealed class PatreonAuthorService
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private void SaveToDisk(PatreonAccount account)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(TokenFile)!);

@@ -11,8 +11,9 @@ namespace AccessibilityModManager.Infrastructure.Security;
 /// the content was written through, and then <c>File.Move</c> committed the rename through the
 /// ordinary cache. .NET's move calls <c>MoveFileEx</c> with <c>MOVEFILE_COPY_ALLOWED</c> and
 /// <c>MOVEFILE_REPLACE_EXISTING</c>, never <c>MOVEFILE_WRITE_THROUGH</c> — the flag Windows
-/// documents as "do not return until the move is on the disk". A perfectly flushed temporary file
-/// could still be followed by a lost rename.
+/// documents as "do not return until the move is on the disk". Linux requires an fsync of the
+/// parent directory after the rename. A perfectly flushed temporary file could still be followed
+/// by a lost rename without one of those steps.
 ///
 /// Used for every file whose disappearance would be a security problem rather than an
 /// inconvenience: on the publishing side the journal, the signing keys and the config that says
@@ -41,6 +42,27 @@ public static class DurableFile
 
     private static void Replace(string from, string to)
     {
+        if (OperatingSystem.IsLinux())
+        {
+            if (Rename(from, to) != 0)
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            var directory = Path.GetDirectoryName(Path.GetFullPath(to))!;
+            var descriptor = OpenDirectory(directory, LinuxOpenReadOnly | LinuxOpenDirectory | LinuxOpenCloseOnExec);
+            if (descriptor < 0)
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            try
+            {
+                if (Fsync(descriptor) != 0)
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            finally
+            {
+                Close(descriptor);
+            }
+            return;
+        }
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Durable file replacement requires Windows or Linux.");
         if (!MoveFileExW(Extended(from), Extended(to), MoveFileReplaceExisting | MoveFileWriteThrough))
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
@@ -61,6 +83,24 @@ public static class DurableFile
 
     private const uint MoveFileReplaceExisting = 0x1;
     private const uint MoveFileWriteThrough = 0x8;
+    private const int LinuxOpenReadOnly = 0;
+    private const int LinuxOpenDirectory = 0x10000;
+    private const int LinuxOpenCloseOnExec = 0x80000;
+
+    [DllImport("libc", EntryPoint = "rename", SetLastError = true)]
+    private static extern int Rename(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string from,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string to);
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenDirectory(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int Fsync(int descriptor);
+
+    [DllImport("libc", EntryPoint = "close", SetLastError = true)]
+    private static extern int Close(int descriptor);
 
     /// <summary>
     /// <c>DllImport</c> rather than <c>LibraryImport</c>: the source generator emits unsafe

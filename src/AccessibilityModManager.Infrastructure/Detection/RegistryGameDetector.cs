@@ -1,4 +1,5 @@
 using AccessibilityModManager.Core.Interfaces;
+using System.Runtime.Versioning;
 using AccessibilityModManager.Core.Models;
 using Microsoft.Win32;
 using Serilog;
@@ -11,6 +12,7 @@ namespace AccessibilityModManager.Infrastructure.Detection;
 /// <see cref="RegistryProbe.ProbeSubfolders"/> is set) the immediate child directories are
 /// probed for the one that actually verifies. See PTCGL_INSTALL_QUESTIONS.md §6.
 /// </summary>
+[SupportedOSPlatform("windows")]
 public sealed class RegistryGameDetector : IRegistryGameDetector
 {
     private readonly IGameVerifier _verifier;

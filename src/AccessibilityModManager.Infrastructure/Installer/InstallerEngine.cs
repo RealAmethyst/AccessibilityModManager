@@ -66,7 +66,7 @@ public sealed class InstallerEngine : IInstallerEngine
         "Another install, update, or uninstall for this game is already running. Let it finish, then try again.";
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InProcessGameLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+        new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     private static readonly string LocksRoot = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -118,7 +118,8 @@ public sealed class InstallerEngine : IInstallerEngine
         {
             lockTarget = lockTarget[4..];
         }
-        var key = Path.TrimEndingDirectorySeparator(Path.GetFullPath(lockTarget)).ToLowerInvariant();
+        var key = Path.TrimEndingDirectorySeparator(Path.GetFullPath(lockTarget));
+        if (OperatingSystem.IsWindows()) key = key.ToLowerInvariant();
         var semaphore = InProcessGameLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
         if (!semaphore.Wait(0))
             throw new InvalidOperationException(GameBusyMessage);
@@ -191,6 +192,20 @@ public sealed class InstallerEngine : IInstallerEngine
         }
     }
 
+    private static void EnsureLinuxInstallPrerequisites(GameInstall game, ModRelease release)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+
+        if (ReleaseTarget.Normalize(release.TargetPlatform) == ReleaseTarget.Proton &&
+            (string.IsNullOrWhiteSpace(game.ProtonPrefixPath) ||
+             !Directory.Exists(game.ProtonPrefixPath)))
+            throw new InvalidOperationException(
+                "This Proton game has no detected prefix yet. Launch it through Steam once " +
+                "before installing the mod.");
+
+        LinuxDependencySupport.EnsureSupported(game.Game, release.TargetPlatform!);
+    }
+
     // ---------------------------------------------------------------- public API
 
     public async Task<InstallReceipt> InstallAsync(
@@ -198,6 +213,8 @@ public sealed class InstallerEngine : IInstallerEngine
         IScriptHost? scriptHost = null, IDependencyHost? dependencyHost = null,
         CancellationToken ct = default)
     {
+        ReleaseTarget.EnsureSupportedHere(release.TargetPlatform);
+        EnsureLinuxInstallPrerequisites(game, release);
         using var gameLock = AcquireGameLock(game);
         _logger.Information("Starting install: {PluginId}/{GameId} v{Version}", release.PluginId, release.GameId, release.Version);
 
@@ -220,7 +237,8 @@ public sealed class InstallerEngine : IInstallerEngine
 
         // Q8 redesign: install missing required deps as a step in this flow. Every refcount bump
         // and fresh install is recorded so a downstream failure can release it again.
-        var acquisitions = await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+        var acquisitions = await ResolveDependenciesAsync(game, release.PluginId,
+            release.TargetPlatform, dependencyHost, ct);
 
         try
         {
@@ -247,6 +265,8 @@ public sealed class InstallerEngine : IInstallerEngine
         IScriptHost? scriptHost = null, IDependencyHost? dependencyHost = null,
         CancellationToken ct = default)
     {
+        ReleaseTarget.EnsureSupportedHere(release.TargetPlatform);
+        EnsureLinuxInstallPrerequisites(game, release);
         using var gameLock = AcquireGameLock(game);
         _logger.Information("Starting update: {PluginId}/{GameId} to v{Version}", release.PluginId, release.GameId, release.Version);
 
@@ -257,7 +277,8 @@ public sealed class InstallerEngine : IInstallerEngine
         if (oldReceipt == null)
         {
             // Nothing installed for this plugin yet — treat as a first install (warns about scripts).
-            var acquisitionsFresh = await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+            var acquisitionsFresh = await ResolveDependenciesAsync(game, release.PluginId,
+                release.TargetPlatform, dependencyHost, ct);
             try
             {
                 var freshOthers = (await _receiptStore.LoadAllForGameAsync(game.Game.GameId))
@@ -277,7 +298,8 @@ public sealed class InstallerEngine : IInstallerEngine
         // The plugin's mod stays installed whether this update succeeds or is rolled back, so
         // dependency refcounts acquired here are deliberately NOT released on failure — the
         // restored old version needs the same (per-game) dependencies.
-        await ResolveDependenciesAsync(game, release.PluginId, dependencyHost, ct);
+        await ResolveDependenciesAsync(game, release.PluginId,
+            release.TargetPlatform, dependencyHost, ct);
 
         // Atomic update: snapshot the old version's installed files AND its cached scripts, so if
         // the new install fails we can put everything back instead of leaving the user with
@@ -313,7 +335,8 @@ public sealed class InstallerEngine : IInstallerEngine
             TryDeleteBackupFolder(game, oldReceipt.BackupFolder);
             try
             {
-                await _depAutoInstaller.ReconcileDeclaredDependenciesAsync(game, release.PluginId, ct);
+                await _depAutoInstaller.ReconcileDeclaredDependenciesAsync(game,
+                    release.PluginId, release.TargetPlatform, ct);
             }
             catch (Exception ex)
             {
@@ -565,6 +588,18 @@ public sealed class InstallerEngine : IInstallerEngine
 
             var manifest = _manifestParser.ParseFile(manifestPath);
 
+            if (ReleaseTarget.Normalize(manifest.TargetPlatform) != ReleaseTarget.Normalize(release.TargetPlatform))
+                throw new InvalidOperationException(
+                    $"Package target '{ReleaseTarget.Normalize(manifest.TargetPlatform)}' does not match " +
+                    $"the selected release target '{ReleaseTarget.Normalize(release.TargetPlatform)}'.");
+
+            if (OperatingSystem.IsLinux() &&
+                (manifest.PreInstall is not null || manifest.PostInstall is not null ||
+                 manifest.PostUninstall is not null))
+                throw new PlatformNotSupportedException(
+                    "Linux lifecycle-script execution is not configured for this package. " +
+                    "The author must publish Linux-specific setup instructions and scripts.");
+
             if (manifest.GameId != game.Game.GameId)
                 throw new InvalidOperationException(
                     $"Manifest gameId '{manifest.GameId}' does not match target game '{game.Game.GameId}'");
@@ -659,6 +694,7 @@ public sealed class InstallerEngine : IInstallerEngine
                 GameId = game.Game.GameId,
                 PluginId = release.PluginId,
                 InstalledVersion = release.Version,
+                TargetPlatform = ReleaseTarget.Normalize(release.TargetPlatform),
                 InstalledAt = DateTime.UtcNow,
                 Changes = allChanges,
                 BackupFolder = backupFolder,
@@ -695,6 +731,7 @@ public sealed class InstallerEngine : IInstallerEngine
                     GameId = game.Game.GameId,
                     PluginId = release.PluginId,
                     InstalledVersion = release.Version,
+                    TargetPlatform = ReleaseTarget.Normalize(release.TargetPlatform),
                     InstalledAt = DateTime.UtcNow,
                     Changes = allChanges,
                     BackupFolder = backupFolder,
@@ -1466,11 +1503,13 @@ public sealed class InstallerEngine : IInstallerEngine
     /// can release them again.
     /// </summary>
     private async Task<List<DepAcquisition>> ResolveDependenciesAsync(
-        GameInstall game, string requestingPluginId, IDependencyHost? host, CancellationToken ct)
+        GameInstall game, string requestingPluginId, string? targetPlatform,
+        IDependencyHost? host, CancellationToken ct)
     {
         var acquisitions = new List<DepAcquisition>();
+        var dependencies = DependencyTargeting.ForTarget(game.Game.Dependencies, targetPlatform);
 
-        if (game.Game.Dependencies.Count == 0)
+        if (dependencies.Count == 0)
         {
             _logger.Information("Dep resolution for {GameId}/{PluginId}: game definition declares no dependencies — skipping",
                 game.Game.GameId, requestingPluginId);
@@ -1483,7 +1522,8 @@ public sealed class InstallerEngine : IInstallerEngine
         // release only has to cover failures after resolution returned successfully.
         try
         {
-            await ResolveDependenciesCoreAsync(game, requestingPluginId, host, acquisitions, ct);
+            await ResolveDependenciesCoreAsync(game, requestingPluginId, targetPlatform,
+                dependencies, host, acquisitions, ct);
             return acquisitions;
         }
         catch
@@ -1494,15 +1534,16 @@ public sealed class InstallerEngine : IInstallerEngine
     }
 
     private async Task ResolveDependenciesCoreAsync(
-        GameInstall game, string requestingPluginId, IDependencyHost? host,
+        GameInstall game, string requestingPluginId, string? targetPlatform,
+        List<Dependency> dependencies, IDependencyHost? host,
         List<DepAcquisition> acquisitions, CancellationToken ct)
     {
-        RequireDistinctDependencyIds(game);
+        RequireDistinctDependencyIds(dependencies);
 
         // Game-installer deps (IsGameInstaller) are handled by the manager's pre-install step
         // before detection — by the time we get here the game is already installed. Drop them so
         // they never appear in the dependency consent dialog or get re-run here.
-        var statuses = (await _dependencyChecker.CheckAsync(game, ct))
+        var statuses = (await _dependencyChecker.CheckAsync(game, ct, targetPlatform))
             .Where(s => !s.Dependency.IsGameInstaller)
             .ToList();
 
@@ -1541,7 +1582,7 @@ public sealed class InstallerEngine : IInstallerEngine
 
         // Preserve manifest order (F14=A): match each blocker back to its position in the
         // game's Dependencies list so author-controlled ordering survives.
-        blockers = game.Game.Dependencies
+        blockers = dependencies
             .Select(d => blockers.FirstOrDefault(b => b.Dependency.Id == d.Id))
             .Where(b => b is not null)
             .Cast<DependencyStatus>()
@@ -1608,7 +1649,7 @@ public sealed class InstallerEngine : IInstallerEngine
 
             // Recheck this single dep. Finding 26 (F5=B reversed): a required dep still missing
             // after its install aborts the flow — the caller releases this run's acquisitions.
-            var recheck = await _dependencyChecker.CheckAsync(game, ct);
+            var recheck = await _dependencyChecker.CheckAsync(game, ct, targetPlatform);
             var still = recheck.FirstOrDefault(s => s.Dependency.Id == dep.Id);
             if (still is { Status: not DependencyStatusKind.Installed })
             {
@@ -1654,9 +1695,9 @@ public sealed class InstallerEngine : IInstallerEngine
     /// <para>The fix is two ids, each with a check path matching where it installs. Refused rather
     /// than de-duplicated, because dropping one would silently discard an install the author needs.</para>
     /// </summary>
-    private static void RequireDistinctDependencyIds(GameInstall game)
+    private static void RequireDistinctDependencyIds(IEnumerable<Dependency> dependencies)
     {
-        var duplicates = game.Game.Dependencies
+        var duplicates = dependencies
             .GroupBy(d => d.Id, StringComparer.OrdinalIgnoreCase)
             .Where(g => g.Count() > 1)
             .Select(g => g.Key)

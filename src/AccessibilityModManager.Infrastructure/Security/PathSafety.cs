@@ -9,13 +9,17 @@ namespace AccessibilityModManager.Infrastructure.Security;
 /// index could choose values like <c>..\escape</c> or an absolute path and, without a containment
 /// check, redirect writes outside their intended root.
 ///
-/// All containment comparisons use Windows path semantics: case-insensitive, and immune to
+/// Containment comparisons use the host filesystem's path case semantics, and are immune to
 /// trailing-separator aliases ("C:\Games\" vs "C:\Games"). Building a prefix by blindly appending
 /// a separator produced doubled-separator prefixes that falsely rejected every legitimate child —
 /// the "extracting to D:\ fails as zip slip" class of bug.
 /// </summary>
 public static class PathSafety
 {
+    private static StringComparison PathComparison => OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
     /// <summary>
     /// Combines <paramref name="root"/> with <paramref name="segments"/> and returns the full path,
     /// throwing when the result escapes <paramref name="root"/> (a segment contained <c>..</c>, a
@@ -25,6 +29,16 @@ public static class PathSafety
     public static string CombineContained(string root, params string[] segments)
     {
         var rootFull = Path.GetFullPath(root);
+
+        foreach (var segment in segments)
+        {
+            if (string.IsNullOrEmpty(segment) || Path.IsPathRooted(segment) ||
+                segment.Contains(':') ||
+                (!OperatingSystem.IsWindows() && segment.Contains('\\')))
+            {
+                throw new InvalidOperationException($"Unsafe relative path segment '{segment}'.");
+            }
+        }
 
         var all = new string[segments.Length + 1];
         all[0] = rootFull;
@@ -43,7 +57,7 @@ public static class PathSafety
     /// <summary>
     /// True when <paramref name="candidateFullPath"/> is <paramref name="root"/> or lives beneath
     /// it. Both are normalized with <see cref="Path.GetFullPath(string)"/> first, so <c>..</c>
-    /// segments are resolved before the comparison. Case-insensitive, and correct for roots
+    /// segments are resolved before the comparison. Case-aware for the host OS, and correct for roots
     /// written with or without a trailing separator (including bare drive roots like "D:\").
     /// </summary>
     public static bool IsContained(string root, string candidateFullPath)
@@ -51,7 +65,7 @@ public static class PathSafety
         var rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidateFullPath));
 
-        if (string.Equals(candidate, rootFull, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(candidate, rootFull, PathComparison))
             return true;
 
         // TrimEndingDirectorySeparator leaves a bare drive root as "D:\", which already ends in a
@@ -60,7 +74,7 @@ public static class PathSafety
         var prefix = rootFull.EndsWith(Path.DirectorySeparatorChar)
             ? rootFull
             : rootFull + Path.DirectorySeparatorChar;
-        return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        return candidate.StartsWith(prefix, PathComparison);
     }
 
     /// <summary>
@@ -93,11 +107,12 @@ public static class PathSafety
         if (string.IsNullOrWhiteSpace(relativeDir))
             return string.Empty;
 
-        var value = relativeDir.Trim().Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var value = relativeDir.Trim().Replace('\\', Path.DirectorySeparatorChar)
+            .Replace('/', Path.DirectorySeparatorChar);
 
         // Check for absolute forms BEFORE trimming separators — "\\server\share" must not survive
         // as "server\share", and "C:\x" must not survive as "C:\x" minus nothing.
-        if (value.Contains(':') || value.StartsWith(@"\\", StringComparison.Ordinal))
+        if (value.Contains(':') || relativeDir.TrimStart().StartsWith(@"\\", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 $"{description} '{relativeDir}' must be a folder path relative to the game folder, not an absolute path.");
@@ -129,6 +144,8 @@ public static class PathSafety
     {
         var name = value?.Trim();
         if (string.IsNullOrEmpty(name) || name == "." || name == ".." ||
+            name.IndexOfAny("<>:\"/\\|?*".ToCharArray()) >= 0 ||
+            name.Any(char.IsControl) ||
             name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
             !string.Equals(Path.GetFileName(name), name, StringComparison.Ordinal))
         {
@@ -186,7 +203,7 @@ public static class PathSafety
         var rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidateFullPath));
 
-        if (string.Equals(candidate, rootFull, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(candidate, rootFull, PathComparison))
             return;
 
         if (!IsContained(rootFull, candidate))

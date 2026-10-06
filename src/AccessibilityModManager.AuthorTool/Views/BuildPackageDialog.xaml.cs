@@ -1,5 +1,5 @@
 using System.Windows;
-using AccessibilityModManager.AuthorTool.ViewModels;
+using AccessibilityModManager.Authoring.ViewModels;
 
 namespace AccessibilityModManager.AuthorTool.Views;
 

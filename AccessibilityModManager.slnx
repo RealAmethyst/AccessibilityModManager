@@ -1,11 +1,15 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/AccessibilityModManager.App/AccessibilityModManager.App.csproj" />
+    <Project Path="src/AccessibilityModManager.Authoring/AccessibilityModManager.Authoring.csproj" />
     <Project Path="src/AccessibilityModManager.AuthorTool/AccessibilityModManager.AuthorTool.csproj" />
     <Project Path="src/AccessibilityModManager.Core/AccessibilityModManager.Core.csproj" />
     <Project Path="src/AccessibilityModManager.Infrastructure/AccessibilityModManager.Infrastructure.csproj" />
+    <Project Path="src/AccessibilityModManager.LinuxApp/AccessibilityModManager.LinuxApp.csproj" />
+    <Project Path="src/AccessibilityModManager.LinuxAuthorTool/AccessibilityModManager.LinuxAuthorTool.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AccessibilityModManager.Tests/AccessibilityModManager.Tests.csproj" />
+    <Project Path="tests/AccessibilityModManager.PortableTests/AccessibilityModManager.PortableTests.csproj" />
   </Folder>
 </Solution>

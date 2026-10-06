@@ -18,7 +18,8 @@ public sealed class DependencyStatus
 
 public interface IDependencyChecker
 {
-    Task<List<DependencyStatus>> CheckAsync(GameInstall game, CancellationToken ct = default);
+    Task<List<DependencyStatus>> CheckAsync(GameInstall game, CancellationToken ct = default,
+        string? targetPlatform = null);
 
     /// <summary>
     /// Opens the dependency's manual download page. Returns false when nothing could be opened

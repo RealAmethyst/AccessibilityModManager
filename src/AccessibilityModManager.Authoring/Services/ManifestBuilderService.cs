@@ -3,9 +3,10 @@ using System.IO.Compression;
 using System.Text.Json;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Security;
+using AccessibilityModManager.Infrastructure.Services;
 using Serilog;
 
-namespace AccessibilityModManager.AuthorTool.Services;
+namespace AccessibilityModManager.Authoring.Services;
 
 public sealed record BuiltPackage(string ZipPath, int FileCount, long TotalBytes);
 
@@ -60,11 +61,16 @@ public sealed class ManifestBuilderService
         string version,
         IList<Dependency> dependencies,
         string outputZipPath,
+        string? targetPlatform = null,
+        ProtonLaunchConfig? protonLaunch = null,
         LifecycleScriptInputs? scripts = null,
         CancellationToken ct = default)
     {
         if (!Directory.Exists(sourceFolder))
             throw new DirectoryNotFoundException($"Source folder not found: {sourceFolder}");
+
+        foreach (var dependency in dependencies)
+            DependencyTargeting.Validate(dependency);
 
         sourceFolder = Path.GetFullPath(sourceFolder);
 
@@ -129,20 +135,49 @@ public sealed class ManifestBuilderService
         AppendInstallToGameFolderAction(actions, postInstall);
         AppendInstallToGameFolderAction(actions, postUninstall);
 
+        var verify = new List<VerifyRule>();
+        if (protonLaunch is not null)
+        {
+            if (protonLaunch.LauncherPath is not null)
+                verify.Add(new VerifyRule { Type = "fileExists", Path = protonLaunch.LauncherPath });
+            if (protonLaunch.BridgeDirectory is not null)
+                verify.Add(new VerifyRule { Type = "folderExists", Path = protonLaunch.BridgeDirectory });
+            if (protonLaunch.ReloadedRoot is not null)
+                verify.Add(new VerifyRule { Type = "folderExists", Path = protonLaunch.ReloadedRoot });
+            foreach (var rule in protonLaunch.WineDllOverrides)
+            {
+                var name = rule.Split('=', 2)[0];
+                var canonical = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                    ? name[..^4] : name;
+                var proxy = protonLaunch.WineDllProxyPaths
+                    .FirstOrDefault(pair => pair.Key.Equals(canonical, StringComparison.OrdinalIgnoreCase) ||
+                                            pair.Key.Equals(canonical + ".dll", StringComparison.OrdinalIgnoreCase)).Value
+                    ?? canonical + ".dll";
+                verify.Add(new VerifyRule
+                {
+                    Type = "fileExists",
+                    Path = proxy
+                });
+            }
+        }
+
         var manifest = new Manifest
         {
             GameId = gameId,
             PluginId = pluginId,
             ModVersion = version,
+            TargetPlatform = targetPlatform,
+            ProtonLaunch = protonLaunch,
             InstallActions = actions,
-            Dependencies = dependencies.ToList(),
-            Verify = [],
+            Dependencies = DependencyTargeting.ForTarget(dependencies, targetPlatform),
+            Verify = verify,
             PreInstall = preInstall,
             PostInstall = postInstall,
             PostUninstall = postUninstall
         };
 
         var manifestJson = JsonSerializer.Serialize(manifest, JsonOptions);
+        new ManifestParser(_logger).Parse(manifestJson);
 
         var outputDir = Path.GetDirectoryName(outputZipPath) ?? ".";
         Directory.CreateDirectory(outputDir);

@@ -88,7 +88,11 @@ public static class PluginIndexValidation
         {
             CollectIdError(trustErrors, game.GameId, $"plugin '{pluginId}' game id");
             foreach (var dep in game.Dependencies)
+            {
                 CollectIdError(trustErrors, dep.Id, $"plugin '{pluginId}' dependency id");
+                try { DependencyTargeting.Validate(dep); }
+                catch (InvalidOperationException ex) { authoring.Add(ex.Message); }
+            }
 
             // One id, one dependency. Installing the same thing into two places is legitimate —
             // Pokemon TCG Live needs MelonLoader beside both the game and its updater, which are
@@ -118,6 +122,18 @@ public static class PluginIndexValidation
             var dropped = new List<ModRelease>();
             foreach (var release in releases)
             {
+                try
+                {
+                    ReleaseTarget.Normalize(release.TargetPlatform);
+                }
+                catch (InvalidOperationException)
+                {
+                    unobtainable.Add(
+                        $"Release {pluginId}/{gameId}/{release.Version} has an unknown targetPlatform. " +
+                        "Use windows, proton, or linux.");
+                    dropped.Add(release);
+                    continue;
+                }
                 if (!string.Equals(release.PluginId, pluginId, StringComparison.Ordinal))
                 {
                     trustErrors.Add(

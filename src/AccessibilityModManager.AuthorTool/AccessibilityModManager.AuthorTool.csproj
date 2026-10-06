@@ -3,6 +3,12 @@
   <ItemGroup>
     <ProjectReference Include="..\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
     <ProjectReference Include="..\AccessibilityModManager.Infrastructure\AccessibilityModManager.Infrastructure.csproj" />
+    <ProjectReference Include="..\AccessibilityModManager.Authoring\AccessibilityModManager.Authoring.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Services/**/*.cs" />
+    <Compile Remove="ViewModels/**/*.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -10,7 +16,7 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.3" />
     <PackageReference Include="Serilog" Version="4.3.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
-    <PackageReference Include="SSH.NET" Version="2024.1.0" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
   <PropertyGroup>

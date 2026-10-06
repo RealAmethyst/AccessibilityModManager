@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using AccessibilityModManager.AuthorTool.Services;
 using AccessibilityModManager.Core.Models;
@@ -52,7 +53,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     private readonly Action<string, string> _showInfoDialog;
     private readonly Func<string, string, bool> _confirmDialog;
     private readonly Func<string, string, string?, string?> _browseForFile;
-    private readonly Func<string, string?> _showBuildPackageDialog;
+    private readonly Func<string, Task<string?>> _showBuildPackageDialog;
     private readonly string _pluginId;
     private readonly string _projectPath;
     private readonly string _gameId;
@@ -82,6 +83,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// keeping the old package is not a metadata edit — it's a broken release.
     /// </summary>
     private readonly string? _existingVersion;
+    private readonly string? _existingTargetPlatform;
 
     /// <summary>The gate this release opened with, so a tier-only change can be detected.</summary>
     private readonly PatreonGate? _existingGate;
@@ -143,7 +145,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     /// What was actually published, captured before the upload started. The saved release is
     /// built from this, never from form fields that could have changed underneath it.
     /// </summary>
-    private sealed record PublishedIdentity(string Version, string Sha256);
+    private sealed record PublishedIdentity(string Version, string Sha256, string TargetPlatform);
 
     private PublishedIdentity? _published;
 
@@ -373,7 +375,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         Action<string, string> showInfoDialog,
         Func<string, string, bool> confirmDialog,
         Func<string, string, string?, string?> browseForFile,
-        Func<string, string?> showBuildPackageDialog,
+        Func<string, Task<string?>> showBuildPackageDialog,
         ModRelease? existingRelease = null)
     {
         _gameId = gameId;
@@ -399,6 +401,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
         {
             IsEditingExistingRelease = true;
             _existingVersion = existingRelease.Version;
+            _existingTargetPlatform = existingRelease.TargetPlatform;
             _existingGate = existingRelease.Patreon;
             _version = existingRelease.Version;
             _channel = existingRelease.Channel;
@@ -671,7 +674,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
     private async Task BuildPackageAsync()
     {
         var version = string.IsNullOrWhiteSpace(Version) ? "" : Version!.Trim();
-        var resultPath = _showBuildPackageDialog(version);
+        var resultPath = await _showBuildPackageDialog(version);
         if (string.IsNullOrEmpty(resultPath)) return;
         await AdoptBuiltZipAsync(resultPath);
     }
@@ -873,12 +876,26 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
                 return false;
             }
 
+            staged.Stream.Position = 0;
+            string targetPlatform;
+            using (var archive = new ZipArchive(staged.Stream, ZipArchiveMode.Read, leaveOpen: true))
+            {
+                var manifestEntry = archive.GetEntry(PluginPackageValidation.ManifestEntryName)
+                    ?? throw new InvalidDataException("The wrapped ZIP has no manifest.json.");
+                if (manifestEntry.Length > 1024 * 1024)
+                    throw new InvalidDataException("The wrapped ZIP manifest is too large.");
+                using var reader = new StreamReader(manifestEntry.Open());
+                var manifest = new ManifestParser(_logger).Parse(await reader.ReadToEndAsync());
+                targetPlatform = ReleaseTarget.Normalize(manifest.TargetPlatform);
+            }
+            staged.Stream.Position = 0;
+
             // The authoritative identity: the hash comes off the held handle, after the manifest
             // check, right before the bytes are published — and it is recorded here so the saved
             // release describes THIS package even if the form is edited later.
             Sha256 = staged.Sha256;
             AssetFileName = staged.FileName;
-            _published = new PublishedIdentity(version, staged.Sha256);
+            _published = new PublishedIdentity(version, staged.Sha256, targetPlatform);
 
             var published = destination switch
             {
@@ -1439,6 +1456,7 @@ public sealed partial class ReleaseDialogViewModel : ObservableObject
             PluginId = _pluginId,
             Version = _published?.Version ?? Version!,
             Channel = Channel ?? "stable",
+            TargetPlatform = _published?.TargetPlatform ?? _existingTargetPlatform,
             // Patreon-gated releases don't carry a public URL — the manager resolves the
             // attachment URL via the Patreon API at install time.
             PackageUrl = gate is null ? new Uri(PackageUrl!) : null,

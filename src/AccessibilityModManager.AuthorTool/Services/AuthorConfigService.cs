@@ -71,10 +71,10 @@ public sealed class AuthorConfigService
             // The claim-signing passphrase has never existed unprotected, so there is no legacy
             // shape to tolerate here: a value without the flag was never written by this code and
             // is not treated as a passphrase.
-            foreach (var signing in _cached.ClaimSigningKeys.Values)
+            foreach (var (pluginId, signing) in _cached.ClaimSigningKeys)
             {
                 if (signing is not { Passphrase.Length: > 0, PassphraseProtected: true }) continue;
-                signing.Passphrase = UnprotectClaimSecret(signing.Passphrase);
+                signing.Passphrase = UnprotectClaimSecret(signing.Passphrase, pluginId);
                 signing.PassphraseProtected = false;
             }
 
@@ -121,7 +121,7 @@ public sealed class AuthorConfigService
             }
 
             plainClaimPassphrases[pluginId] = signing.Passphrase;
-            signing.Passphrase = ProtectClaimSecret(signing.Passphrase);
+            signing.Passphrase = ProtectClaimSecret(signing.Passphrase, pluginId);
             signing.PassphraseProtected = true;
         }
 
@@ -165,8 +165,15 @@ public sealed class AuthorConfigService
     /// </summary>
     private static readonly byte[] ClaimSigningEntropy = "AMM:Author:ClaimSigning:v1"u8.ToArray();
 
-    private static string ProtectClaimSecret(string plain)
+    private string ProtectClaimSecret(string plain, string pluginId)
     {
+        if (OperatingSystem.IsLinux())
+        {
+            var account = SecretAccount("claim-" + ShortHash(pluginId));
+            SecretServiceValueStore.Store(account, "Accessibility Mod Manager claim signing", plain);
+            return "secretservice:v1:" + account;
+        }
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var bytes = ProtectedData.Protect(
             Encoding.UTF8.GetBytes(plain), ClaimSigningEntropy, DataProtectionScope.CurrentUser);
         return Convert.ToBase64String(bytes);
@@ -177,10 +184,18 @@ public sealed class AuthorConfigService
     /// Windows account or another machine. Signing then fails loudly and the author imports their
     /// key backup, rather than the tool silently signing with something unexpected.
     /// </summary>
-    private string UnprotectClaimSecret(string stored)
+    private string UnprotectClaimSecret(string stored, string pluginId)
     {
         try
         {
+            if (OperatingSystem.IsLinux())
+            {
+                var account = SecretAccount("claim-" + ShortHash(pluginId));
+                return stored == "secretservice:v1:" + account
+                    ? SecretServiceValueStore.Lookup(account) ?? ""
+                    : "";
+            }
+            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
             var bytes = ProtectedData.Unprotect(
                 Convert.FromBase64String(stored), ClaimSigningEntropy, DataProtectionScope.CurrentUser);
             return Encoding.UTF8.GetString(bytes);
@@ -194,8 +209,15 @@ public sealed class AuthorConfigService
         }
     }
 
-    private static string ProtectSecret(string plain)
+    private string ProtectSecret(string plain)
     {
+        if (OperatingSystem.IsLinux())
+        {
+            var account = SecretAccount("ssh");
+            SecretServiceValueStore.Store(account, "Accessibility Mod Manager server upload", plain);
+            return "secretservice:v1:" + account;
+        }
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var bytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), PassphraseEntropy, DataProtectionScope.CurrentUser);
         return Convert.ToBase64String(bytes);
     }
@@ -205,6 +227,14 @@ public sealed class AuthorConfigService
     {
         try
         {
+            if (OperatingSystem.IsLinux())
+            {
+                var account = SecretAccount("ssh");
+                return stored == "secretservice:v1:" + account
+                    ? SecretServiceValueStore.Lookup(account) ?? ""
+                    : "";
+            }
+            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
             var bytes = ProtectedData.Unprotect(
                 Convert.FromBase64String(stored), PassphraseEntropy, DataProtectionScope.CurrentUser);
             return Encoding.UTF8.GetString(bytes);
@@ -224,6 +254,11 @@ public sealed class AuthorConfigService
     {
         if (!stored.StartsWith(LegacyDpapiPrefix, StringComparison.Ordinal))
             return stored;
+        if (!OperatingSystem.IsWindows())
+        {
+            _logger.Warning("A Windows-protected SSH passphrase cannot be read on Linux; enter it again here");
+            return "";
+        }
         try
         {
             var bytes = ProtectedData.Unprotect(
@@ -246,6 +281,12 @@ public sealed class AuthorConfigService
             return "";
         }
     }
+
+    private string SecretAccount(string slot) => "author-" + ShortHash(ConfigDirectory) + "-" + slot;
+
+    private static string ShortHash(string value) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(value)))[..16];
 
     public void RecordRecent(string projectPath, string? displayName = null, string? gitHubRepo = null)
     {

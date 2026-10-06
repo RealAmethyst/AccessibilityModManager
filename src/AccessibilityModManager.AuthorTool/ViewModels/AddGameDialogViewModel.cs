@@ -30,6 +30,9 @@ public sealed partial class AddGameDialogViewModel : ObservableObject
     private string? _exeName;
 
     [ObservableProperty]
+    private string? _linuxExeName;
+
+    [ObservableProperty]
     private string? _gitHubRepo;
 
     public ObservableCollection<string> AvailableGitHubRepos { get; }
@@ -126,6 +129,7 @@ public sealed partial class AddGameDialogViewModel : ObservableObject
         Description = string.IsNullOrWhiteSpace(Description) ? null : Description!.Trim(),
         SteamAppId = string.IsNullOrWhiteSpace(SteamAppId) ? null : SteamAppId!.Trim(),
         ExeName = string.IsNullOrWhiteSpace(ExeName) ? null : ExeName!.Trim(),
+        LinuxExeName = string.IsNullOrWhiteSpace(LinuxExeName) ? null : LinuxExeName!.Trim(),
         ProbeRules = [],
         Dependencies = [],
         Tags = TagSelections.Where(t => t.IsSelected).Select(t => t.Id).ToList(),

@@ -366,7 +366,7 @@ public partial class GamesListViewModel : ObservableObject
                     // Skip games the developer has declared but hasn't published any release for
                     // yet — there's no "mod" to install, so listing them would be confusing.
                     if (!index.ReleasesByGameId.TryGetValue(game.GameId, out var releases) ||
-                        releases.Count == 0)
+                        !releases.Any(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform)))
                     {
                         continue;
                     }
@@ -375,7 +375,8 @@ public partial class GamesListViewModel : ObservableObject
                     // user can't see any of them. Mods with at least one public (or
                     // entitled-Patreon) release stay visible — only fully-locked mods
                     // disappear from the catalog.
-                    if (!releases.Any(r => IsReleaseVisibleToUser(r)))
+                    if (!releases.Any(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform) &&
+                                           IsReleaseVisibleToUser(r)))
                     {
                         continue;
                     }
@@ -384,7 +385,8 @@ public partial class GamesListViewModel : ObservableObject
                     var receipt = await _receiptStore.LoadAsync(game.GameId, pluginId);
 
                     var latestVersion = releases
-                        .Where(r => r.Channel == config.DefaultChannel)
+                        .Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform) &&
+                                    r.Channel == config.DefaultChannel)
                         .OrderByDescending(r => r.Version, VersionComparer.Instance)
                         .FirstOrDefault()?.Version;
 
@@ -393,7 +395,7 @@ public partial class GamesListViewModel : ObservableObject
 
                     var modName = !string.IsNullOrWhiteSpace(game.ModName)
                         ? game.ModName!
-                        : DeriveModName(releases);
+                        : DeriveModName(releases.Where(r => ReleaseTarget.IsSupportedHere(r.TargetPlatform)).ToList());
 
                     rows.Add(new ModItemViewModel
                     {

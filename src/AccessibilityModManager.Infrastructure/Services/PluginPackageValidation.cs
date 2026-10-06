@@ -139,11 +139,61 @@ public static class PluginPackageValidation
                 archive.Entries.Select(e => Normalize(e.FullName)), StringComparer.OrdinalIgnoreCase);
 
             CheckActionSources(manifest, entryNames, errors);
+            CheckProtonLaunchAssets(manifest, entryNames, errors);
             CheckLifecycleScripts(manifest, entryNames, errors);
             CheckVerifyRules(manifest, errors);
         }
 
         return new PackageValidationReport(errors);
+    }
+
+    private static void CheckProtonLaunchAssets(
+        Manifest manifest, HashSet<string> entryNames, List<string> errors)
+    {
+        if (manifest.ProtonLaunch is not { } launch) return;
+        if (launch.LauncherPath is not null && !entryNames.Contains("files/" + launch.LauncherPath))
+            errors.Add($"The Proton launcher '{launch.LauncherPath}' is missing from files/.");
+        if (launch.BridgeDirectory is not null)
+        {
+            var bridgePrefix = "files/" + launch.BridgeDirectory.TrimEnd('/') + "/";
+            if (!entryNames.Any(name => name.StartsWith(bridgePrefix, StringComparison.OrdinalIgnoreCase) &&
+                                        name.EndsWith(".dll.so", StringComparison.OrdinalIgnoreCase)))
+                errors.Add($"The Proton bridge directory '{launch.BridgeDirectory}' contains no Wine host modules.");
+        }
+        foreach (var rule in launch.WineDllOverrides)
+        {
+            var name = rule.Split('=', 2)[0];
+            var canonical = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
+            var proxy = launch.WineDllProxyPaths
+                .FirstOrDefault(pair => pair.Key.Equals(canonical, StringComparison.OrdinalIgnoreCase) ||
+                                        pair.Key.Equals(canonical + ".dll", StringComparison.OrdinalIgnoreCase)).Value
+                ?? canonical + ".dll";
+            if (launch.UseInstalledWineDllProxy || launch.WineDllProxyFromDependency) continue;
+            if (!entryNames.Contains("files/" + proxy))
+                errors.Add($"The Wine DLL override '{rule}' needs its proxy '{proxy}' in files/.");
+            if (!manifest.InstallActions.Any(action => InstallsProxy(action, proxy, entryNames)))
+                errors.Add($"The Wine DLL proxy '{proxy}' needs an install action to that game-relative path.");
+        }
+    }
+
+    private static bool InstallsProxy(InstallAction action, string proxy, HashSet<string> entryNames)
+    {
+        switch (action)
+        {
+            case CopyFileAction copy:
+                return Normalize(copy.Target).Equals(proxy, StringComparison.OrdinalIgnoreCase) &&
+                       entryNames.Contains("files/" + Normalize(copy.Source));
+            case ReplaceFileAction replace:
+                return Normalize(replace.Target).Equals(proxy, StringComparison.OrdinalIgnoreCase) &&
+                       entryNames.Contains("files/" + Normalize(replace.Source));
+            case CopyFolderAction folder:
+                var targetPrefix = Normalize(folder.TargetDir).TrimEnd('/') + "/";
+                if (!proxy.StartsWith(targetPrefix, StringComparison.OrdinalIgnoreCase)) return false;
+                var source = Normalize(folder.SourceDir).TrimEnd('/') + "/" + proxy[targetPrefix.Length..];
+                return entryNames.Contains("files/" + source);
+            default:
+                return false;
+        }
     }
 
     /// <summary>

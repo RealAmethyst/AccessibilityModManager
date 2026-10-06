@@ -10,6 +10,8 @@ Grab the latest installer from the [Releases page](https://github.com/RealAmethy
 
 ## How it works
 
+The Linux manager and AuthorTool are packaged together with per-user GNOME launchers. The manager uses the signed catalog, user-added sources, Patreon through Secret Service, native Linux packages, and reversible Steam Proton setup. A verified Windows file-copy package can be adapted automatically when it uses a recognized BepInEx or MelonLoader proxy that is bundled, already installed, or supplied by a pinned ZIP dependency. An exact Prism 0.18.3 x64 build gains its matching verified Wine bridge automatically. The verified legacy Tolk build in the published Next Order and Master Duel packages is replaced in the temporary Proton package by Prism's official Tolk compatibility DLL and Orca bridge; other speech builds need a verified Proton path. Reloaded II needs explicit Proton launch assets. Windows elevation and lifecycle installers do not become Linux host privileges. The AuthorTool shares the Windows publishing services and package builder, and can build Windows, Proton, and native Linux releases. See [Linux port](LINUX_PORT.md) and [Steam Proton loader backend](PROTON_LOADER_BACKEND.md) for setup, checks, and compatibility limits.
+
 - **Browse mods** by game, language, or accessibility tag (screen-reader support, controller-only, completable, etc.)
 - **Detect installs** automatically through Steam — or browse to a folder if you installed elsewhere
 - **Install / update / uninstall** with one click. Files removed at uninstall come back from a per-install backup; replaced files are restored to their original bytes.
@@ -69,7 +71,15 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1            # manage
 powershell -ExecutionPolicy Bypass -File installer\build-author-tool.ps1 # AuthorTool single-file exe
 ```
 
-Targets `net10.0-windows`. Requires .NET 10 SDK and (for the installer) [Inno Setup 6](https://jrsoftware.org/isdl.php).
+The Windows applications target `net10.0-windows` and require the .NET 10 SDK; the installer also requires [Inno Setup 6](https://jrsoftware.org/isdl.php). On Linux, build the cross-platform projects and package both Linux applications with:
+
+```bash
+dotnet build AccessibilityModManager.slnx -p:EnableWindowsTargeting=true
+installer/linux/build-linux.sh
+installer/linux/install-user.sh
+```
+
+The Linux package is self-contained and installs for the current user. Building it needs the .NET 10 SDK, a C compiler, `curl`, `tar`, and `sha256sum`. The AuthorTool uses GNOME's `zenity` for file and confirmation dialogs. Its pinned GitHub CLI is bundled; sign in with the installed `tools/gh auth login` before GitHub publishing.
 
 ## License
 

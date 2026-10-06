@@ -59,6 +59,11 @@ public sealed class DependencyAutoInstaller
             throw new InvalidOperationException(
                 $"Dependency '{dependency.Id}' has no AutoInstall — caller should not have routed it here.");
 
+        if (OperatingSystem.IsLinux() && auto is RunInstallerAutoInstall)
+            throw new PlatformNotSupportedException(
+                $"Dependency '{dependency.Id}' uses a Windows installer that cannot run on Linux. " +
+                "Publish a bundled file, extractZip, or copyFile dependency for Linux.");
+
         var url = dependency.Fix?.DownloadUrl;
         if (string.IsNullOrWhiteSpace(url))
             throw new InvalidOperationException(
@@ -299,9 +304,10 @@ public sealed class DependencyAutoInstaller
     /// (audit finding 24: updates never reconciled removed dependencies). Called after a
     /// successful update. Zero-refcount removal follows the same keep-evidence-on-failure rule.
     /// </summary>
-    public async Task ReconcileDeclaredDependenciesAsync(GameInstall game, string pluginId, CancellationToken ct)
+    public async Task ReconcileDeclaredDependenciesAsync(
+        GameInstall game, string pluginId, string? targetPlatform, CancellationToken ct)
     {
-        var declared = game.Game.Dependencies
+        var declared = DependencyTargeting.ForTarget(game.Game.Dependencies, targetPlatform)
             .Where(d => !d.IsGameInstaller)
             .Select(d => d.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -411,6 +417,9 @@ public sealed class DependencyAutoInstaller
     public async Task RunGameInstallerAsync(Dependency dependency, IDependencyHost? host, CancellationToken ct,
         IProgress<ProgressInfo>? progress = null)
     {
+        if (OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException(
+                "Windows game installers cannot run directly on Linux. Install this game through Steam first.");
         if (dependency.Fix?.AutoInstall is not RunInstallerAutoInstall ri)
             throw new InvalidOperationException(
                 $"Game-installer dependency '{dependency.Id}' must use a runInstaller auto-install.");
@@ -584,12 +593,20 @@ public sealed class DependencyAutoInstaller
         var blocklist = action.Blocklist ?? new List<string>();
 
         using var archive = ZipFile.OpenRead(zipPath);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in archive.Entries)
         {
-            if (string.IsNullOrEmpty(entry.Name)) continue; // directory entry
-            if (IsBlocked(entry.FullName, blocklist)) continue;
+            var entryPath = entry.FullName.Replace('\\', '/');
+            if (entryPath.StartsWith('/') || entryPath.Contains(':') ||
+                entryPath.Split('/').Any(part => part == ".."))
+                throw new SecurityException($"Unsafe dependency ZIP entry: '{entry.FullName}'.");
+            if (entryPath.EndsWith('/')) continue; // directory entry
+            if (IsBlocked(entryPath, blocklist)) continue;
 
-            var destPath = Path.GetFullPath(Path.Combine(targetDir, entry.FullName));
+            var destPath = PathSafety.CombineContained(targetDir,
+                entryPath.Replace('/', Path.DirectorySeparatorChar));
+            if (!seen.Add(destPath))
+                throw new SecurityException($"Duplicate dependency ZIP entry: '{entry.FullName}'.");
             if (!PathSafety.IsContained(targetDir, destPath))
                 throw new SecurityException(
                     $"Zip slip detected in dependency: '{entry.FullName}' would extract outside '{targetDir}'.");

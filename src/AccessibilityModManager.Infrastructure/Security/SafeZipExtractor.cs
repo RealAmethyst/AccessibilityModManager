@@ -36,16 +36,28 @@ public sealed class SafeZipExtractor
         _logger.Information("Extracting {ZipPath} to {TargetDir}", sourceLabel, fullTargetPath);
 
         using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var entry in archive.Entries)
         {
             ct.ThrowIfCancellationRequested();
 
-            // Skip directory entries
-            if (string.IsNullOrEmpty(entry.Name))
+            var normalized = entry.FullName.Replace('\\', '/');
+            if (normalized.StartsWith('/') || normalized.Contains(':') ||
+                normalized.Split('/').Any(part => part == ".."))
+            {
+                throw new SecurityException($"ZIP entry '{entry.FullName}' has an unsafe path.");
+            }
+
+            // ZIP paths use forward slashes; treat a trailing backslash as a directory too.
+            if (normalized.EndsWith('/'))
                 continue;
 
-            var destinationPath = Path.GetFullPath(Path.Combine(fullTargetPath, entry.FullName));
+            var destinationPath = PathSafety.CombineContained(fullTargetPath,
+                normalized.Replace('/', Path.DirectorySeparatorChar));
+
+            if (!seen.Add(destinationPath))
+                throw new SecurityException($"ZIP entry '{entry.FullName}' is duplicated.");
 
             // Zip slip protection: ensure the resolved path stays inside the target. PathSafety
             // handles trailing-separator roots (extracting to "D:\" must not false-positive).

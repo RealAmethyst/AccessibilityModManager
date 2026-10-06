@@ -1,7 +1,7 @@
 <UserControl x:Class="AccessibilityModManager.AuthorTool.Views.IndexEditorView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels"
+             xmlns:vm="clr-namespace:AccessibilityModManager.AuthorTool.ViewModels;assembly=AccessibilityModManager.Authoring"
              xmlns:views="clr-namespace:AccessibilityModManager.AuthorTool.Views"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"

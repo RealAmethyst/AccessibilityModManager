@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
@@ -12,6 +13,7 @@ namespace AccessibilityModManager.Infrastructure.Patreon;
 /// current user's Windows credentials — copying the file to another machine or another
 /// Windows user yields garbage. Same security envelope a Windows password manager uses.
 /// </summary>
+[SupportedOSPlatform("windows")]
 public sealed class DpapiPatreonAccountStore : IPatreonAccountStore
 {
     private static readonly string FilePath = Path.Combine(
