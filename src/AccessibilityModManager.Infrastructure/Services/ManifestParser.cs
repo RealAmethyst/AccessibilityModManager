@@ -99,9 +99,7 @@ public sealed class ManifestParser
         foreach (var rule in launch.WineDllOverrides)
         {
             var parts = rule?.Split('=', 2);
-            var canonical = parts is { Length: 2 } &&
-                            parts[0].EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
-                ? parts[0][..^4] : parts?[0];
+            var canonical = parts is { Length: 2 } ? WineDllProxy.ModuleName(parts[0]) : null;
             if (parts is not { Length: 2 } || parts[0].Length == 0 ||
                 parts[0].Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-')) ||
                 parts[1] is not ("n" or "b" or "n,b" or "b,n") ||
@@ -114,7 +112,7 @@ public sealed class ManifestParser
         var proxyNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, path) in launch.WineDllProxyPaths)
         {
-            var canonical = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
+            var canonical = WineDllProxy.ModuleName(name);
             if (!overrideNames.Contains(canonical) || !proxyNames.Add(canonical))
                 throw new InvalidOperationException("protonLaunch.wineDllProxyPaths has an unknown or repeated DLL name.");
             RequirePortableRelativePath(path, "protonLaunch.wineDllProxyPaths");

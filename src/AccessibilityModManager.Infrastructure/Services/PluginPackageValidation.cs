@@ -162,12 +162,7 @@ public static class PluginPackageValidation
         }
         foreach (var rule in launch.WineDllOverrides)
         {
-            var name = rule.Split('=', 2)[0];
-            var canonical = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
-            var proxy = launch.WineDllProxyPaths
-                .FirstOrDefault(pair => pair.Key.Equals(canonical, StringComparison.OrdinalIgnoreCase) ||
-                                        pair.Key.Equals(canonical + ".dll", StringComparison.OrdinalIgnoreCase)).Value
-                ?? canonical + ".dll";
+            var proxy = WineDllProxy.PathFor(launch, rule);
             if (launch.UseInstalledWineDllProxy || launch.WineDllProxyFromDependency) continue;
             if (!entryNames.Contains("files/" + proxy))
                 errors.Add($"The Wine DLL override '{rule}' needs its proxy '{proxy}' in files/.");

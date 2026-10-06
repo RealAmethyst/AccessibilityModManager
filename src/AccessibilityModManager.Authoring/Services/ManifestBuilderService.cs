@@ -146,13 +146,7 @@ public sealed class ManifestBuilderService
                 verify.Add(new VerifyRule { Type = "folderExists", Path = protonLaunch.ReloadedRoot });
             foreach (var rule in protonLaunch.WineDllOverrides)
             {
-                var name = rule.Split('=', 2)[0];
-                var canonical = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
-                    ? name[..^4] : name;
-                var proxy = protonLaunch.WineDllProxyPaths
-                    .FirstOrDefault(pair => pair.Key.Equals(canonical, StringComparison.OrdinalIgnoreCase) ||
-                                            pair.Key.Equals(canonical + ".dll", StringComparison.OrdinalIgnoreCase)).Value
-                    ?? canonical + ".dll";
+                var proxy = WineDllProxy.PathFor(protonLaunch, rule);
                 verify.Add(new VerifyRule
                 {
                     Type = "fileExists",

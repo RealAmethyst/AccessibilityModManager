@@ -353,12 +353,20 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task PinnedMelonLoaderDependencySuppliesProxyAfterInstall(
-        bool declareDependencyInPackage)
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    public async Task KnownFrameworkProxyInstallsAndRestoresSteam(
+        bool declareDependencyInPackage, bool bepinex, bool preinstalled)
     {
         if (!OperatingSystem.IsLinux()) return;
+        var loaderId = bepinex ? "bepinex" : "melonloader";
+        var proxyFile = bepinex ? "winhttp.dll" : "version.dll";
+        var markerPath = bepinex ? "BepInEx/core/BepInEx.dll" : "MelonLoader/net6/MelonLoader.dll";
+        var modTarget = bepinex ? "BepInEx/plugins/mod.dll" : "Mods/mod.dll";
+        var overrideRule = bepinex ? "winhttp.dll=n,b" : "version=n,b";
         var gameDir = Path.Combine(root, "dependency-game");
         var prefix = Path.Combine(root, "dependency-prefix");
         var steamRoot = Path.Combine(root, "dependency-steam");
@@ -367,21 +375,27 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         Directory.CreateDirectory(steamRoot);
         var pe = File.ReadAllBytes(typeof(ProtonLoaderDetector).Assembly.Location);
         File.WriteAllBytes(Path.Combine(gameDir, "Game.exe"), pe);
+        if (preinstalled)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(gameDir, markerPath))!);
+            File.WriteAllBytes(Path.Combine(gameDir, proxyFile), pe);
+            File.WriteAllBytes(Path.Combine(gameDir, markerPath), pe);
+        }
 
-        var dependencyArchive = Path.Combine(root, "melonloader.zip");
+        var dependencyArchive = Path.Combine(root, "loader.zip");
         using (var zip = ZipFile.Open(dependencyArchive, ZipArchiveMode.Create))
         {
-            WriteBinary(zip, "version.dll", pe);
-            WriteBinary(zip, "MelonLoader/net6/MelonLoader.dll", pe);
+            WriteBinary(zip, proxyFile, pe);
+            WriteBinary(zip, markerPath, pe);
         }
         var dependencyBytes = File.ReadAllBytes(dependencyArchive);
         var dependency = new Dependency
         {
-            Id = "melonloader", Type = "framework",
-            Check = new DependencyCheck { FilePath = "version.dll" },
+            Id = loaderId, Type = "framework",
+            Check = new DependencyCheck { FilePath = proxyFile },
             Fix = new DependencyFix
             {
-                DownloadUrl = "https://example.test/MelonLoader.x64.zip",
+                DownloadUrl = "https://example.test/loader.zip",
                 AutoInstall = new ExtractZipAutoInstall
                 {
                     Sha256 = Convert.ToHexStringLower(SHA256.HashData(dependencyBytes))
@@ -394,16 +408,19 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
             var manifest = """
                 {"gameId":"game","pluginId":"author","modVersion":"1.0.0",
                  "dependencies":DEPENDENCIES_PLACEHOLDER,
-                 "installActions":[{"type":"copyFile","source":"mod.dll","target":"Mods/mod.dll"}]}
+                 "installActions":[{"type":"copyFile","source":"mod.dll","target":"MOD_TARGET"}]}
                 """;
             var dependencyJson = """
-                [{"id":"melonloader","type":"framework",
-                  "check":{"filePath":"version.dll"},
-                  "fix":{"downloadUrl":"https://example.test/MelonLoader.x64.zip",
+                [{"id":"LOADER_ID","type":"framework",
+                  "check":{"filePath":"PROXY_FILE"},
+                  "fix":{"downloadUrl":"https://example.test/loader.zip",
                     "autoInstall":{"kind":"extractZip","sha256":"SHA256_PLACEHOLDER"}}}]
-                """.Replace("SHA256_PLACEHOLDER", dependency.Fix.AutoInstall!.Sha256);
-            Write(zip, "manifest.json", manifest.Replace("DEPENDENCIES_PLACEHOLDER",
-                declareDependencyInPackage ? dependencyJson : "[]"));
+                """.Replace("LOADER_ID", loaderId)
+                    .Replace("PROXY_FILE", proxyFile)
+                    .Replace("SHA256_PLACEHOLDER", dependency.Fix.AutoInstall!.Sha256);
+            Write(zip, "manifest.json", manifest.Replace("MOD_TARGET", modTarget)
+                .Replace("DEPENDENCIES_PLACEHOLDER",
+                    declareDependencyInPackage ? dependencyJson : "[]"));
             Write(zip, "files/mod.dll", "mod");
         }
         var game = new GameInstall
@@ -426,8 +443,9 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         using var adapted = await new ProtonWindowsPackageAdapter(logger, client)
             .PrepareAsync(game, release, packagePath);
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
-        Assert.True(local.Manifest.ProtonLaunch!.WineDllProxyFromDependency);
-        Assert.Equal("version=n,b", Assert.Single(local.Manifest.ProtonLaunch.WineDllOverrides));
+        Assert.Equal(preinstalled, local.Manifest.ProtonLaunch!.UseInstalledWineDllProxy);
+        Assert.Equal(!preinstalled, local.Manifest.ProtonLaunch.WineDllProxyFromDependency);
+        Assert.Equal(overrideRule, Assert.Single(local.Manifest.ProtonLaunch.WineDllOverrides));
 
         var wrapper = Path.Combine(root, "dependency-wrapper");
         File.WriteAllText(wrapper, "wrapper");
@@ -453,11 +471,15 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
             wrapper, proton, logger);
         await coordinator.InstallAsync(game, adapted.Release, adapted.Path,
             dependencyHost: new AcceptDependencyHost());
-        Assert.True(File.Exists(Path.Combine(gameDir, "version.dll")));
-        Assert.Contains("version=n,b", SteamLocalConfigEditor.Read(File.ReadAllText(configPath), "123"));
+        Assert.True(File.Exists(Path.Combine(gameDir, proxyFile)));
+        Assert.True(File.Exists(Path.Combine(gameDir, markerPath)));
+        Assert.True(File.Exists(Path.Combine(gameDir, modTarget)));
+        Assert.Contains(overrideRule, SteamLocalConfigEditor.Read(File.ReadAllText(configPath), "123"));
 
         await coordinator.UninstallAsync(game, "author");
-        Assert.False(File.Exists(Path.Combine(gameDir, "version.dll")));
+        Assert.Equal(preinstalled, File.Exists(Path.Combine(gameDir, proxyFile)));
+        Assert.Equal(preinstalled, File.Exists(Path.Combine(gameDir, markerPath)));
+        Assert.False(File.Exists(Path.Combine(gameDir, modTarget)));
         Assert.Equal(config, File.ReadAllText(configPath));
     }
 

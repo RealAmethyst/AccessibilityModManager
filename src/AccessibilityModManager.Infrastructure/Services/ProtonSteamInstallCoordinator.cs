@@ -255,12 +255,10 @@ public sealed class ProtonSteamInstallCoordinator(
             game.Game.ExeName is null)
             throw new InvalidDataException("An installed Wine proxy needs one direct loader override.");
         var finding = ProtonLoaderDetector.Detect(game.InstallPath, game.Game.ExeName);
-        if (finding is null || finding.DllOverride != launch.WineDllOverrides[0])
+        if (finding is null || !WineDllProxy.SameOverride(finding.DllOverride, launch.WineDllOverrides[0]))
             throw new InvalidOperationException(
                 "The existing supported loader proxy is missing or no longer matches the game executable.");
-        var proxyName = finding.DllOverride.Split('=')[0];
-        var requestedProxy = launch.WineDllProxyPaths.TryGetValue(proxyName, out var mapped)
-            ? mapped : proxyName + ".dll";
+        var requestedProxy = WineDllProxy.PathFor(launch, launch.WineDllOverrides[0]);
         if (!requestedProxy.Equals(finding.ProxyPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The installed Wine proxy path differs from the recognized loader.");
     }

@@ -174,7 +174,7 @@ public sealed class ProtonWindowsPackageAdapter(
                             $"The Windows package already installs '{asset.Target}'. " +
                             "Publish an explicit Proton package for this Prism layout.");
 
-            var proxyName = finding.DllOverride.Split('=')[0];
+            var proxyName = WineDllProxy.ModuleName(finding.DllOverride);
             var launch = new ProtonLaunchConfig
             {
                 SteamAppId = game.Game.SteamAppId!,
@@ -186,7 +186,7 @@ public sealed class ProtonWindowsPackageAdapter(
                 WineDllOverrides = reloaded is null ? [finding.DllOverride] : [],
                 UseInstalledWineDllProxy = installedProxy,
                 WineDllProxyFromDependency = dependencyProxy,
-                WineDllProxyPaths = reloaded is not null || finding.ProxyPath.Equals(proxyName, StringComparison.OrdinalIgnoreCase)
+                WineDllProxyPaths = reloaded is not null || finding.ProxyPath.Equals(proxyName + ".dll", StringComparison.OrdinalIgnoreCase)
                     ? [] : new Dictionary<string, string> { [proxyName] = finding.ProxyPath },
                 WindowsDesktopRuntimeVersion = reloaded is null ? null : ProtonWindowsDesktopRuntime.Version,
                 ReloadedRoot = reloaded?.Root,
