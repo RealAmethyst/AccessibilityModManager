@@ -38,7 +38,7 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
         string? localPackagePath = null, IProgress<ProgressInfo>? progress = null,
         CancellationToken ct = default)
     {
-        var target = ReleaseTarget.Normalize(release.TargetPlatform);
+        var target = ReleaseTarget.ForRuntime(release.TargetPlatform);
         var game = target == ReleaseTarget.Linux ? RequireNativeGame(mod) : RequireProtonGameWithExecutable(mod);
         var packagePath = Path.Combine(Path.GetTempPath(),
             "amm-catalog-" + Guid.NewGuid().ToString("N") + ".zip");

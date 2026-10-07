@@ -405,7 +405,7 @@ public partial class GamesListViewModel : ObservableObject
                         PluginId = pluginId,
                         DeveloperName = ResolveDeveloperName(pluginId, index, impersonators),
                         IsDetected = install != null,
-                        HasGameInstaller = game.Dependencies.Any(d => d.IsGameInstaller),
+                        HasGameInstaller = DependencyTargeting.ForTarget(game.Dependencies, ReleaseTarget.Windows).Any(d => d.IsGameInstaller),
                         InstallPath = install?.InstallPath,
                         InstalledVersion = receipt?.InstalledVersion,
                         HasUpdate = hasUpdate,

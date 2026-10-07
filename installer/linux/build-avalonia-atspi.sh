@@ -14,7 +14,7 @@ if ! grep -Fq 'PackageReference Include="Avalonia" Version="12.1.3"' \
     exit 1
 fi
 
-source_tree=$(mktemp -d "$project_root/dist/linux/.avalonia-atspi-source-XXXXXXXX")
+source_tree=$(mktemp -d "${TMPDIR:-/tmp}/amm-avalonia-atspi-source-XXXXXXXX")
 trap 'rm -rf -- "$source_tree"' EXIT
 git clone --quiet --depth 1 --branch 12.1.3 --recurse-submodules \
     https://github.com/AvaloniaUI/Avalonia.git "$source_tree/avalonia"

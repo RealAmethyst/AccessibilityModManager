@@ -43,6 +43,10 @@ public sealed class ManifestParser
         ReleaseTarget.Normalize(manifest.TargetPlatform);
         ValidateProtonLaunch(manifest);
 
+        if (manifest.TargetPlatform == ReleaseTarget.WindowsLinux &&
+            (manifest.PreInstall is not null || manifest.PostInstall is not null || manifest.PostUninstall is not null))
+            throw new InvalidOperationException("Shared Windows/Linux packages cannot run platform-specific lifecycle scripts. Use a separate platform package for these scripts.");
+
         if (ReleaseTarget.Normalize(manifest.TargetPlatform) == ReleaseTarget.Proton &&
             (manifest.PreInstall is not null || manifest.PostInstall is not null ||
              manifest.PostUninstall is not null))

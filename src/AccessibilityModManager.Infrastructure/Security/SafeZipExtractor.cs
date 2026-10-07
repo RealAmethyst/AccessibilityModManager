@@ -17,10 +17,11 @@ public sealed class SafeZipExtractor
         _logger = logger;
     }
 
-    public async Task ExtractAsync(string zipPath, string targetDirectory, CancellationToken ct = default)
+    public async Task ExtractAsync(string zipPath, string targetDirectory, CancellationToken ct = default,
+        bool preserveExecutablePermissions = false)
     {
         await using var stream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        await ExtractAsync(stream, targetDirectory, ct, sourceLabel: zipPath);
+        await ExtractAsync(stream, targetDirectory, ct, sourceLabel: zipPath, preserveExecutablePermissions: preserveExecutablePermissions);
     }
 
     /// <summary>
@@ -28,7 +29,7 @@ public sealed class SafeZipExtractor
     /// EXACT bytes — re-opening by path after a hash check would allow a swap in between.
     /// </summary>
     public async Task ExtractAsync(Stream zipStream, string targetDirectory, CancellationToken ct = default,
-        string sourceLabel = "(stream)")
+        string sourceLabel = "(stream)", bool preserveExecutablePermissions = false)
     {
         var fullTargetPath = Path.GetFullPath(targetDirectory);
         Directory.CreateDirectory(fullTargetPath);
@@ -79,6 +80,12 @@ public sealed class SafeZipExtractor
             using var entryStream = entry.Open();
             using var fileStream = File.Create(destinationPath);
             await entryStream.CopyToAsync(fileStream, ct);
+
+            // Native portable apps can contain launchers and helper binaries. Retain only
+            // their owner's execute bit; never restore setuid/setgid or archive write modes.
+            if (preserveExecutablePermissions && OperatingSystem.IsLinux() &&
+                ((entry.ExternalAttributes >> 16) & 0x40) != 0)
+                File.SetUnixFileMode(destinationPath, File.GetUnixFileMode(destinationPath) | UnixFileMode.UserExecute);
 
             _logger.Debug("Extracted: {Entry}", entry.FullName);
         }

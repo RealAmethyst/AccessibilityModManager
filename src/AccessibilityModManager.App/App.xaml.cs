@@ -321,7 +321,8 @@ public partial class App : Application
             // The Developer button: swap this page for that developer's own, in one transition so
             // only one thing claims focus. Back from there returns to the mods list.
             owner => mainVm.SwitchFromGameDetailsToDeveloper(
-                CreateDeveloperDetailsViewModel(sp, mainVm, owner)));
+                CreateDeveloperDetailsViewModel(sp, mainVm, owner)),
+            registryClient: sp.GetRequiredService<IPluginRegistryClient>());
     }
 
     /// <summary>

@@ -130,7 +130,7 @@ public static class PluginIndexValidation
                 {
                     unobtainable.Add(
                         $"Release {pluginId}/{gameId}/{release.Version} has an unknown targetPlatform. " +
-                        "Use windows, proton, or linux.");
+                        "Use windows, proton, linux, or windows-linux.");
                     dropped.Add(release);
                     continue;
                 }

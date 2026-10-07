@@ -10,7 +10,7 @@ public sealed class ModRelease
     public required string Version { get; init; }
     public required string Channel { get; init; } // "stable" or "beta"
 
-    /// <summary>"windows", "proton", or "linux". Absent in older indexes means Windows.</summary>
+    /// <summary>"windows", "proton", "linux", or shared "windows-linux". Absent means Windows.</summary>
     public string? TargetPlatform { get; init; }
 
     /// <summary>

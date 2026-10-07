@@ -5,7 +5,9 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 dotnet_bin=${DOTNET_BIN:-dotnet}
 cc_bin=${CC_BIN:-cc}
 curl_bin=${CURL_BIN:-curl}
-output_root="$project_root/dist/linux"
+output_root="$project_root/publish/linux"
+dist_root="$project_root/dist"
+mkdir -p -- "$dist_root"
 mkdir -p -- "$output_root"
 final="$output_root/AccessibilityModManager-linux-x64"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/amm-linux-stage-XXXXXXXX")
@@ -31,7 +33,9 @@ chmod 755 "$stage/manager/AccessibilityModManager.LinuxApp" \
 
 # The author workflow uses gh for repository discovery and release publishing. Bundle the
 # official pinned CLI so a fresh desktop installation works without an administrator account.
-gh_archive="$output_root/gh_2.102.0_linux_amd64.tar.gz"
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/accessibility-mod-manager-build"
+mkdir -p -- "$cache_root"
+gh_archive="$cache_root/gh_2.102.0_linux_amd64.tar.gz"
 gh_hash=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
 if [[ ! -f "$gh_archive" ]] || ! printf '%s  %s\n' "$gh_hash" "$gh_archive" | sha256sum -c --status; then
     "$curl_bin" -fL --retry 2 -o "$gh_archive" \
@@ -58,3 +62,6 @@ fi
 rm -rf -- "$stage"
 trap - EXIT
 printf 'Linux manager and AuthorTool built: %s\n' "$final"
+
+# Keep dist limited to versioned downloads and their checksums. Build trees stay in publish.
+python3 "$project_root/installer/linux/package-release.py" "$project_root" "$final" "$dist_root"

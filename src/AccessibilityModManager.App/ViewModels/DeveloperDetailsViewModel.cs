@@ -216,7 +216,7 @@ public partial class DeveloperDetailsViewModel : ObservableObject
                     ModName = modName,
                     PluginId = _plugin.Id,
                     IsDetected = install != null,
-                    HasGameInstaller = game.Dependencies.Any(d => d.IsGameInstaller),
+                    HasGameInstaller = DependencyTargeting.ForTarget(game.Dependencies, ReleaseTarget.Windows).Any(d => d.IsGameInstaller),
                     InstalledVersion = receipt?.InstalledVersion,
                     HasUpdate = hasUpdate
                 });

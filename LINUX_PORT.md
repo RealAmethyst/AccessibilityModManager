@@ -16,6 +16,64 @@ For native Windows files inside a verified Proton package, the manager detects V
 
 The AuthorTool bundles a pinned GitHub CLI 2.102.0 binary with its license. GitHub publishing still requires the author to sign in using the bundled `tools/gh auth login`; no account was accessed during this port. Native file and confirmation dialogs use `zenity` on GNOME. The installed applications are self-contained and need no system .NET runtime.
 
+## Shared packages and native game dependencies
+
+Shared mod packages declare `targetPlatform: "windows-linux"`. The archive and
+signed release are shared; each dependency has its own `targetPlatforms` checkboxes.
+The installer resolves the package to Windows or native Linux and records that
+runtime in its receipt. Proton remains separate. Both platforms' dependencies are
+included in the manifest, but only matching entries are installed. Platform-specific
+lifecycle scripts require a separate package. Older managers skip this unfamiliar
+target, so distribute the updated manager before publishing shared releases.
+
+For a native game/emulator dependency, declare its Linux executable and a
+Linux-targeted `extractApp` ZIP or tar.gz with an HTTPS URL and SHA-256. The manager offers
+“Install game or emulator” when the game is missing. Installation stages and checks
+the archive, accepts a single wrapping directory, retains owner executable bits,
+and creates a new game-ID folder under the chosen parent without replacing existing
+files. It records the path for detection and reuse. No game is launched. Windows
+installers are not run on Linux. XIVLauncher's provider and Windows-specific mod
+scripts need separate Linux integration; TCG Live's special setup remains deferred.
+
+Manager 1.19.1 accepts gzip-compressed tar portable dependencies as well as ZIPs,
+identified from the verified download bytes. It rejects traversal, duplicate paths,
+links, special files and excessive archive sizes, and retains owner execute bits.
+The published BizHawk v1.2 Linux tar.gz passed a disposable installation and
+GameVerifier detection check with `linuxExeName: "EmuHawkMono.sh"`; all 490 files
+matched the archive afterward. No emulator or game was launched. Its SHA-256 is
+`45a211845351de4c1ad0311402951631c568708c24e0e374859a3a66e7d7e503`.
+Mono and native runtime libraries are system prerequisites, not installed by this
+portable-app extraction flow. Actual Pokémon play remains a manual check.
+
+The section tabs now use one selected header in the Tab order; arrows still change
+sections. Filter headers support Tab, Space/Enter, and Left/Right and expose their
+expand/collapse state. Headless UI tests exercise focus transitions and automation
+peers. Actual Orca speech remains a manual check.
+
+## Manager updates and release packaging
+
+Manager 1.19.0 checks the latest stable GitHub release at startup and from Settings.
+The Windows and Linux manager project versions stay synchronized. Each platform
+requires its exact versioned manager asset and matching SHA-256 file; no fallback
+to another platform or to the AuthorTool is allowed. The existing Windows updater's
+Setup.exe suffix already excluded Linux archives; the new selection also prevents
+mixing unrelated installers and checksum files from one release.
+
+After confirmation, Linux downloads and verifies the archive, rejects unsafe tar
+paths and links, and starts its installer from the extracted package. The helper
+waits for the old manager to exit, backs up and replaces the application, updates
+the menu entry, then restarts it. Failed replacements roll back. Settings, sign-ins,
+mod receipts and game folders remain outside the replaced directory. Portable
+copies need one install.sh installation before in-app updates can be applied.
+The AuthorTool has a separate manual installation archive.
+
+Offline checks cover mixed-platform releases, wrong or missing hashes, duplicate
+assets, download corruption, fresh installation, preserved data, backup and rollback,
+archive traversal and links, and the wait/install/relaunch handoff. Both actual
+release archives passed first-install and upgrade checks in isolated user directories;
+their desktop entries pass desktop-file-validate. Actual Orca announcements and the
+Windows installer/UI still need manual checks. See [release packaging](installer/README.md).
+
 ## Build and install on CachyOS GNOME
 
 A temporary SDK at `/tmp/amm-dotnet-sdk/dotnet` was used for this work. The local package database currently offers `extra/dotnet-sdk` 10.0.12, but the system SDK is not installed. For a durable development machine, run `sudo pacman -Syu dotnet-sdk gcc zenity curl tar git` in a terminal. This does the required full upgrade and installs the SDK and build tools; gcc, zenity, curl, tar and git are already present here. Steam and Proton are installed. The Linux build script downloads a pinned GitHub CLI archive and checks its SHA-256 before bundling it. After installing the SDK, omit `DOTNET_BIN=...` from the build command below.
@@ -25,13 +83,13 @@ DOTNET_BIN=/tmp/amm-dotnet-sdk/dotnet installer/linux/build-linux.sh
 installer/linux/install-user.sh
 ```
 
-The first command produces `dist/linux/AccessibilityModManager-linux-x64`, with `manager` and `author` applications. The second installs them under the current user's local data directory, backs up any installed build and shortcuts, and creates **Accessibility Mod Manager** and **Plugin Index Author** GNOME launchers. The previously installed Time Stranger Steam wrapper remains in its old directory because the existing Steam launch option points there.
+The first command produces separately installable manager and AuthorTool archives with SHA-256 files directly in `dist/`. The intermediate `manager` and `author` build trees are in `publish/linux/AccessibilityModManager-linux-x64`. Each archive includes `install.sh` for installation without the source checkout. The second installs them under the current user's local data directory, backs up any installed build and shortcuts, and creates **Accessibility Mod Manager** and **Plugin Index Author** GNOME launchers. The previously installed Time Stranger Steam wrapper remains in its old directory because the existing Steam launch option points there.
 
-Installed on this machine at `/home/amethyst/.local/share/AccessibilityModManager/linux-x64` and `/home/amethyst/.local/share/AccessibilityModManager-Author/linux-x64`. The exact installed hashes and backup stamp are in [todo.md](todo.md). The working Time Stranger wrapper hash remains `73753f60160aa48ff5222899e0de6d07fc074a8b5cf4e55f4e226aedd2437151`.
+Installed on this machine at `/home/amethyst/.local/share/AccessibilityModManager/linux-x64` and `/home/amethyst/.local/share/AccessibilityModManager-Author/linux-x64`. Each installed directory contains `release.json` with its product, version and architecture; previous builds are retained beside it with a timestamped backup name. The working Time Stranger wrapper hash remains `73753f60160aa48ff5222899e0de6d07fc074a8b5cf4e55f4e226aedd2437151`.
 
 ## Verification and limits
 
-- The Linux applications build with zero warnings; 85 portable tests pass. Offline tests cover native package install/uninstall, Windows package adaptation with bundled, already-installed and pinned dependency loaders, same-author Proton identity import, nested executable detection and DSCSModLoader's subfolder proxy, automatic matching Prism and Tolk shim bridge packaging and removal, Steam launch-option ownership and restoration, and Proton prefix setup. BepInEx's `winhttp.dll=n,b` rule and MelonLoader's `version=n,b` rule now pass complete disposable install and uninstall checks when the loader comes from either the package or a pinned catalog dependency; an already-installed BepInEx loader remains outside mod ownership. The exact Cyber Sleuth 1.0-beta24 ZIP was adapted and installed/uninstalled in a disposable game folder; the original `freetype.dll` and Steam launch option were restored. That ZIP is detected as needing x64 Visual C++ v14. Both pinned redistributables installed and passed version checks in a disposable Proton prefix. The updated adapter packages the verified Prism configuration compatibility DLL and Prism 0.18.3 core for that exact signed release. A separate fake-keyring check covered Patreon save timeout, session fallback, reload and sign-out. The wrapper binary is unchanged from the build Amethyst confirmed in Time Stranger.
+- The Linux applications build with zero warnings; 130 portable tests and 3 headless Linux UI tests pass. Offline tests cover native package install/uninstall, Windows package adaptation with bundled, already-installed and pinned dependency loaders, same-author Proton identity import, nested executable detection and DSCSModLoader's subfolder proxy, automatic matching Prism and Tolk shim bridge packaging and removal, Steam launch-option ownership and restoration, and Proton prefix setup. BepInEx's `winhttp.dll=n,b` rule and MelonLoader's `version=n,b` rule now pass complete disposable install and uninstall checks when the loader comes from either the package or a pinned catalog dependency; an already-installed BepInEx loader remains outside mod ownership. The exact Cyber Sleuth 1.0-beta24 ZIP was adapted and installed/uninstalled in a disposable game folder; the original `freetype.dll` and Steam launch option were restored. That ZIP is detected as needing x64 Visual C++ v14. Both pinned redistributables installed and passed version checks in a disposable Proton prefix. The updated adapter packages the verified Prism configuration compatibility DLL and Prism 0.18.3 core for that exact signed release. A separate fake-keyring check covered Patreon save timeout, session fallback, reload and sign-out. The wrapper binary is unchanged from the build Amethyst confirmed in Time Stranger.
 - AT-SPI in the GNOME session exposes the manager as Accessibility Mod Manager instead of the generic Avalonia Application, and the selected release name is accessible. The startup focus transition is tied to window activation and catalog readiness. Amethyst confirmed Orca focus and category navigation in the installed manager. The AuthorTool's project editor, release dialog, build dialog and validation dialog were opened against a disposable project in an earlier check.
 - Time Stranger has been confirmed by Amethyst to work as on Windows, including input, custom audio, speech and navigation. Cyber Sleuth's published 1.0-beta24 release has also been confirmed with speech, audio, navigation and controller input under Proton. No game was launched by Codex. Next Order, Survive, native Linux game packages and XIVLauncher still need Amethyst's in-game checks. XIVLauncher uses its own Wine route and needs an explicit release/provider; it is not an ordinary Steam Proton game.
 - This port cannot infer arbitrary Windows installer behavior or an unknown loader from a Windows release. The manager gives a specific refusal instead of claiming the mod loaded. Publishing a real release still needs author interaction.
@@ -111,3 +169,19 @@ The local `todo.md` is the current screen-reader-friendly checklist. It is ignor
 - [Reloaded shared hooks 1.16.3](https://github.com/Sewer56/Reloaded.SharedLib.Hooks.ReloadedII/releases/tag/1.16.3), [SDL3 3.4.0](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.0), and [Steam Audio 4.8.1](https://github.com/ValveSoftware/steam-audio/releases/tag/v4.8.1): pinned package inputs.
 
 Design answers are in `questions_linux_port.md` and `questions_linux_loader_backend.md`.
+
+## Dependency updates before launching
+
+Play refreshes the selected author's verified catalog with a five-second network deadline,
+then compares platform-specific dependency URLs and hashes with local installation records.
+It prompts before updating and launches only after a successful update. Cancellation or
+an update failure keeps the game closed. If the live catalog is unavailable, Play uses the
+existing installation and reports that dependency updates could not be checked.
+
+Portable ZIP and tar.gz updates stage and verify the archive, back up replaced files,
+and leave unrelated saves, ROMs and mod files untouched. Obsolete archive files are removed
+only if they still match the previously installed copy. Interrupted portable updates restore
+the prior files and receipt before launch. Loader updates retain a recovery record and backup;
+an interrupted loader transaction blocks launch until recovery. The Windows manager uses the
+same updater and comparison logic. Initial installs from older managers lack emulator download
+records and therefore need a one-time update to establish them.

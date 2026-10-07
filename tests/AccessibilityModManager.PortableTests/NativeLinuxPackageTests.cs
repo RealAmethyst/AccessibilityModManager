@@ -13,8 +13,10 @@ public sealed class NativeLinuxPackageTests : IDisposable
     private readonly string root = Path.Combine(Path.GetTempPath(), "amm-native-" + Guid.NewGuid().ToString("N"));
     private readonly ILogger logger = new LoggerConfiguration().CreateLogger();
 
-    [Fact]
-    public async Task BuiltNativePackageInstallsAndRestoresGameFiles()
+    [Theory]
+    [InlineData(ReleaseTarget.Linux)]
+    [InlineData(ReleaseTarget.WindowsLinux)]
+    public async Task BuiltNativePackageInstallsAndRestoresGameFiles(string target)
     {
         if (!OperatingSystem.IsLinux()) return;
         var source = Path.Combine(root, "source");
@@ -25,11 +27,11 @@ public sealed class NativeLinuxPackageTests : IDisposable
         File.WriteAllText(Path.Combine(source, "accessibility.dat"), "native mod");
         var package = Path.Combine(root, "native.zip");
         await new ManifestBuilderService(logger).BuildPackageAsync(source,
-            "native-game", "author", "1.0.0", [], package, targetPlatform: ReleaseTarget.Linux);
+            "native-game", "author", "1.0.0", [], package, targetPlatform: target);
         var release = new ModRelease
         {
             GameId = "native-game", PluginId = "author", Version = "1.0.0", Channel = "stable",
-            TargetPlatform = ReleaseTarget.Linux,
+            TargetPlatform = target,
             Sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(package)))
         };
         var game = new GameInstall

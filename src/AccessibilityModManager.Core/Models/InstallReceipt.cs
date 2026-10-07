@@ -104,6 +104,8 @@ public sealed class DependencyReceipt
 
     public required DateTime InstalledAt { get; init; }
     public required string Sha256 { get; init; }
+    public string? DownloadUrl { get; init; }
+    public string? InstallPath { get; init; }
 
     /// <summary>
     /// Files the auto-install added or replaced, mirroring <see cref="InstallReceipt.Changes"/>.

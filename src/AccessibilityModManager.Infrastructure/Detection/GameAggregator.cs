@@ -107,7 +107,8 @@ public sealed class GameAggregator
                 // is re-resolved through the wrapped-ZIP layout logic before verifying, mirroring
                 // the reuse path; only a location that VERIFIES is adopted, and the healed pair is
                 // reported so the caller persists it — the user never has to touch config by hand.
-                var isEmulatorGame = game.Dependencies.Any(d =>
+                var isEmulatorGame = DependencyTargeting.ForTarget(game.Dependencies,
+                    OperatingSystem.IsWindows() ? ReleaseTarget.Windows : ReleaseTarget.Linux).Any(d =>
                     d.IsGameInstaller && d.Fix?.AutoInstall is ExtractAppAutoInstall);
                 if (isEmulatorGame &&
                     !string.IsNullOrWhiteSpace(game.ExeName) &&

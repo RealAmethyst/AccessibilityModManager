@@ -1,20 +1,33 @@
 # Accessibility Mod Manager
 
-A Windows app that installs and updates accessibility mods for games. Pick a game, pick a mod, click Install — the manager downloads the package, verifies it, and applies it. One click to update; one click to uninstall (with full restore from backup).
+A Windows and Linux app that installs and updates accessibility mods for games. Pick a game, pick a mod, click Install — the manager downloads the package, verifies it, and applies it. One click to update; one click to uninstall (with full restore from backup).
 
 It's built around a community plugin system: each plugin author runs their own GitHub-hosted index of releases, and the manager talks to all of them through a signed, central registry of trusted plugins.
 
-## Install
+## Install on Windows
 
 Grab the latest installer from the [Releases page](https://github.com/RealAmethyst/AccessibilityModManager/releases) — `AccessibilityModManager-{version}-Setup.exe`. Requires Windows 10/11 and the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0/runtime) (the installer points you there if you don't have it). Auto-update is built in: when a new version ships, the manager prompts you on launch.
 
+## Install on Linux
+
+Extract `AccessibilityModManager-{version}-linux-x64.tar.gz`, then run `./install.sh`
+from the extracted folder without sudo. Open **Accessibility Mod Manager** from
+your application menu (Meta key). The x86-64 Linux package includes its .NET runtime.
+Updates are offered on startup and through **Settings, Check for manager updates**.
+Installing an update preserves your data, backs up the previous build and restarts
+the manager. Windows and Linux select only their own update package.
+
+The Linux AuthorTool is a separate `PluginIndexAuthor-{version}-linux-x64.tar.gz`
+download with its own `install.sh` and **Plugin Index Author** menu entry.
+
 ## How it works
 
-The Linux manager and AuthorTool are packaged together with per-user GNOME launchers. The manager uses the signed catalog, user-added sources, Patreon through Secret Service, native Linux packages, and reversible Steam Proton setup. A verified Windows file-copy package can be adapted automatically when it uses a recognized BepInEx or MelonLoader proxy that is bundled, already installed, or supplied by a pinned ZIP dependency. An exact Prism 0.18.3 x64 build gains its matching verified Wine bridge automatically. The verified legacy Tolk build in the published Next Order and Master Duel packages is replaced in the temporary Proton package by Prism's official Tolk compatibility DLL and Orca bridge; other speech builds need a verified Proton path. Reloaded II needs explicit Proton launch assets. Windows elevation and lifecycle installers do not become Linux host privileges. The AuthorTool shares the Windows publishing services and package builder, and can build Windows, Proton, and native Linux releases. See [Linux port](LINUX_PORT.md) and [Steam Proton loader backend](PROTON_LOADER_BACKEND.md) for setup, checks, and compatibility limits.
+The Linux manager and AuthorTool have separate self-contained downloads with per-user application-menu launchers. The manager uses the signed catalog, user-added sources, Patreon through Secret Service, native Linux packages, and reversible Steam Proton setup. A verified Windows file-copy package can be adapted automatically when it uses a recognized BepInEx or MelonLoader proxy that is bundled, already installed, or supplied by a pinned ZIP dependency. An exact Prism 0.18.3 x64 build gains its matching verified Wine bridge automatically. The verified legacy Tolk build in the published Next Order and Master Duel packages is replaced in the temporary Proton package by Prism's official Tolk compatibility DLL and Orca bridge; other speech builds need a verified Proton path. Reloaded II needs explicit Proton launch assets. Windows elevation and lifecycle installers do not become Linux host privileges. The AuthorTool shares the Windows publishing services and package builder, and can build Windows, Proton, and native Linux releases. See [Linux port](LINUX_PORT.md) and [Steam Proton loader backend](PROTON_LOADER_BACKEND.md) for setup, checks, and compatibility limits.
 
 - **Browse mods** by game, language, or accessibility tag (screen-reader support, controller-only, completable, etc.)
 - **Detect installs** automatically through Steam — or browse to a folder if you installed elsewhere
 - **Install / update / uninstall** with one click. Files removed at uninstall come back from a per-install backup; replaced files are restored to their original bytes.
+- **Dependency updates on Play**: Windows and Linux compare the published dependency URL and SHA-256 with the installed record and prompt before downloading an update, even if the mod version is unchanged. The network check has a five-second limit. Portable emulator updates preserve unrelated files and back up replacements. Older emulator installations need one update to establish their download record.
 - **Dependency checks** before install: the manager automatically installs dependencies when a mod needs MelonLoader, BepInEx ETC. Developers must specify this
 
 ---
@@ -43,7 +56,7 @@ The manager refuses to do anything that isn't verifiable end-to-end:
 
 ## The AuthorTool
 
-`PluginIndexAuthor-{version}.exe` (next to the manager installer on the [Releases page](https://github.com/RealAmethyst/AccessibilityModManager/releases)) is a small WPF app that handles the entire publishing workflow for you. It uses the `gh` CLI under the hood for all GitHub interaction; install [GitHub CLI](https://cli.github.com/) and run `gh auth login` once before using it. This now also supports placing tester builds behind your own Patreon community, meaning people will need to have access to your Patreon tier that you select before the mod release shows up in the manager for them.
+`PluginIndexAuthor-{version}.exe` or the runtime-bundled `PluginIndexAuthor-{version}-selfcontained.exe` (next to the manager installer on the [Releases page](https://github.com/RealAmethyst/AccessibilityModManager/releases)) is a small WPF app that handles the entire publishing workflow for you. It uses the `gh` CLI under the hood for all GitHub interaction; install [GitHub CLI](https://cli.github.com/) and run `gh auth login` once before using it. This now also supports placing tester builds behind your own Patreon community, meaning people will need to have access to your Patreon tier that you select before the mod release shows up in the manager for them.
 
 What the tool gives you:
 
@@ -79,7 +92,7 @@ installer/linux/build-linux.sh
 installer/linux/install-user.sh
 ```
 
-The Linux package is self-contained and installs for the current user. Building it needs the .NET 10 SDK, a C compiler, `curl`, `tar`, and `sha256sum`. The AuthorTool uses GNOME's `zenity` for file and confirmation dialogs. Its pinned GitHub CLI is bundled; sign in with the installed `tools/gh auth login` before GitHub publishing.
+Linux packages are self-contained and install for the current user. Building them needs the .NET 10 SDK, a C compiler, Python 3, Git, `curl`, `tar`, and `sha256sum`. See [release packaging](installer/README.md) for the `dist/` artifacts and platform-specific update naming. The AuthorTool uses GNOME's `zenity` for file and confirmation dialogs. Its pinned GitHub CLI is bundled; sign in with the installed `tools/gh auth login` before GitHub publishing.
 
 ## License
 

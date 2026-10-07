@@ -230,9 +230,11 @@ internal static class AuthorPages
             ("Auto install target filename", "AutoInstallTargetFileName") })
             root.Children.Add(Field(label, property));
         root.Children.Add(Check("Required", "Required"));
-        root.Children.Add(Check("Windows", "TargetWindows"));
-        root.Children.Add(Check("Proton", "TargetProton"));
-        root.Children.Add(Check("Linux", "TargetLinux"));
+        root.Children.Add(Check("Automatic legacy platform compatibility", "AutomaticPlatforms"));
+        root.Children.Add(new TextBlock { Text = "Legacy compatibility applies to Windows and Proton. Turn it off to choose platforms, including native Linux.", TextWrapping = TextWrapping.Wrap });
+        var platforms = Row(Check("Windows", "TargetWindows"), Check("Proton", "TargetProton"), Check("Native Linux", "TargetLinux"));
+        platforms.Bind(Control.IsEnabledProperty, new Binding("AutomaticPlatforms") { Converter = Avalonia.Data.Converters.BoolConverters.Not });
+        root.Children.Add(platforms);
         root.Children.Add(Check("Automatic installation", "AutoInstallEnabled"));
         root.Children.Add(Check("This dependency is the game", "IsGameInstaller"));
         return root;
@@ -293,7 +295,7 @@ internal static class AuthorPages
         root.Children.Add(ActionButton("Choose source folder", "PickSourceCommand"));
         root.Children.Add(Field("Version", "Version"));
         root.Children.Add(Choice("Target platform", "TargetPlatform", new[] {
-            ReleaseTarget.Windows, ReleaseTarget.Proton, ReleaseTarget.Linux }));
+            ReleaseTarget.Windows, ReleaseTarget.Proton, ReleaseTarget.Linux, ReleaseTarget.WindowsLinux }));
         var proton = Stack();
         foreach (var (label, property) in new[] {
             ("Steam App ID", "SteamAppId"), ("Game executable", "GameExecutable"),

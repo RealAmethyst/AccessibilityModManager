@@ -15,10 +15,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 
-# The version only ever names the dist file — the exe itself is stamped from the csproj. A
-# default of "0.1.0" therefore produced a file whose name contradicted the binary inside it.
-# Read the csproj instead, so the name always describes what was actually built (same fix as
-# audit finding 39 made to build.ps1).
+# Keep the published executable version and dist filename in sync. Without an override,
+# use the version from the AuthorTool project.
 $AuthorCsproj = Join-Path $Root "src\AccessibilityModManager.AuthorTool\AccessibilityModManager.AuthorTool.csproj"
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $csprojVersion = ([xml](Get-Content $AuthorCsproj)).Project.PropertyGroup.Version |
@@ -54,6 +52,7 @@ dotnet publish $AuthorProj `
     -c $Configuration `
     -r win-x64 `
     --self-contained $selfContainedFlag `
+    -p:Version=$Version `
     -p:PublishSingleFile=true `
     -p:DebugType=none `
     -p:DebugSymbols=false `
@@ -96,6 +95,7 @@ try {
 }
 
 $Sha = (Get-FileHash $DistPath -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -Path "$DistPath.sha256" -Value $Sha -Encoding utf8 -NoNewline
 Write-Host "SHA256: $Sha"
 
 Write-Host "`n=== Build complete ===" -ForegroundColor Cyan

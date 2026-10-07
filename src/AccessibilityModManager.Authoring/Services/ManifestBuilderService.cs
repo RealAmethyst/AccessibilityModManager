@@ -163,7 +163,7 @@ public sealed class ManifestBuilderService
             TargetPlatform = targetPlatform,
             ProtonLaunch = protonLaunch,
             InstallActions = actions,
-            Dependencies = DependencyTargeting.ForTarget(dependencies, targetPlatform),
+            Dependencies = DependencyTargeting.ForPackage(dependencies, targetPlatform),
             Verify = verify,
             PreInstall = preInstall,
             PostInstall = postInstall,

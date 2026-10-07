@@ -6,6 +6,7 @@ using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Installer;
 using AccessibilityModManager.Infrastructure.Patreon;
 using AccessibilityModManager.Infrastructure.Security;
+using AccessibilityModManager.Infrastructure.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Serilog;
@@ -15,6 +16,9 @@ namespace AccessibilityModManager.App.ViewModels;
 public partial class GameDetailsViewModel : ObservableObject
 {
     private readonly IPluginRepoClient _repoClient;
+    private readonly IPluginRegistryClient? _registryClient;
+    private string _dependencyCatalogNotice = "";
+    private bool _checkingBeforePlay;
     private readonly IInstallerEngine _installerEngine;
     private readonly IReceiptStore _receiptStore;
     private readonly IDependencyChecker _dependencyChecker;
@@ -161,10 +165,11 @@ public partial class GameDetailsViewModel : ObservableObject
         Action<string, string, string?, string?> showChangelog,
         Func<string, string, string?, string?> pickFile,
         Func<string, string?> pickFolder,
-        Action<PluginEntry>? navigateToDeveloper = null)
+        Action<PluginEntry>? navigateToDeveloper = null, IPluginRegistryClient? registryClient = null)
     {
         _navigateToDeveloper = navigateToDeveloper;
         _repoClient = repoClient;
+        _registryClient = registryClient;
         _installerEngine = installerEngine;
         _receiptStore = receiptStore;
         _dependencyChecker = dependencyChecker;
@@ -412,7 +417,7 @@ public partial class GameDetailsViewModel : ObservableObject
         var existing = _registryDetector.ResolveInstallPath(_gameDef);
         if (existing != null) { AdoptDetectedGame(existing); return true; }
 
-        var dep = _gameDef.Dependencies.FirstOrDefault(d => d.IsGameInstaller);
+        var dep = DependencyTargeting.ForTarget(_gameDef.Dependencies, ReleaseTarget.Windows).FirstOrDefault(d => d.IsGameInstaller);
 
         // Portable app / emulator: extract a ZIP into a folder the user picks (or reuse an existing
         // install of the same emulator). See EMULATOR_INSTALL_QUESTIONS.md.
@@ -565,7 +570,9 @@ public partial class GameDetailsViewModel : ObservableObject
                 "Install",
                 $"Installing {DisplayName}...",
                 progress,
-                (_, depHost, innerCt) => _depAutoInstaller.ExtractPortableAppAsync(dep, picked, depHost, innerCt, progress),
+                (_, depHost, innerCt) => new DependencyUpdates(_depAutoInstaller, _logger).UpdatePortableAsync(
+                    new GameInstall { Game = _gameDef!, PluginId = _pluginId, InstallPath = picked },
+                    dep, ReleaseTarget.Windows, depHost, progress, innerCt),
                 ct);
         }
         catch (OperationCanceledException)
@@ -819,7 +826,7 @@ public partial class GameDetailsViewModel : ObservableObject
 
     private async Task RunInstallOrUpdate(ModReleaseGroup? group, CancellationToken ct, bool isUpdate)
     {
-        if (group?.SelectedRelease == null) return;
+        if (_checkingBeforePlay || group?.SelectedRelease == null) return;
         var release = group.SelectedRelease;
         // A selected release older than the installed one is a DOWNGRADE, and every string in the
         // flow says so (finding 43) — the button quietly labelled "Update" while rolling backwards
@@ -1046,7 +1053,7 @@ public partial class GameDetailsViewModel : ObservableObject
     [RelayCommand]
     private async Task UninstallAsync(ModReleaseGroup? group, CancellationToken ct)
     {
-        if (group == null || _gameInstall == null) return;
+        if (_checkingBeforePlay || group == null || _gameInstall == null) return;
 
         // Confirm before doing anything destructive — uninstall removes installed files and
         // restores the originals from backup.
@@ -1099,15 +1106,17 @@ public partial class GameDetailsViewModel : ObservableObject
     /// neither is available.
     /// </summary>
     [RelayCommand]
-    private void Play()
+    private async Task PlayAsync(CancellationToken ct)
     {
-        if (_gameInstall == null) return;
+        if (_gameInstall == null || _checkingBeforePlay) return;
+        _checkingBeforePlay = true;
 
         var steamAppId = _gameInstall.Game.SteamAppId;
         var exeName = _gameInstall.Game.ExeName;
 
         try
         {
+            if (!await UpdateDependenciesBeforePlayAsync(ct)) return;
             if (!string.IsNullOrEmpty(steamAppId))
             {
                 Process.Start(new ProcessStartInfo
@@ -1115,7 +1124,7 @@ public partial class GameDetailsViewModel : ObservableObject
                     FileName = $"steam://run/{steamAppId}",
                     UseShellExecute = true
                 });
-                StatusMessage = $"Launching {DisplayName} via Steam...";
+                StatusMessage = _dependencyCatalogNotice + $"Launching {DisplayName} via Steam...";
                 return;
             }
 
@@ -1130,7 +1139,7 @@ public partial class GameDetailsViewModel : ObservableObject
                         UseShellExecute = true,
                         WorkingDirectory = InstallPath
                     });
-                    StatusMessage = $"Launching {DisplayName}...";
+                    StatusMessage = _dependencyCatalogNotice + $"Launching {DisplayName}...";
                     return;
                 }
                 StatusMessage = $"Cannot launch — {exeName} not found in {InstallPath}.";
@@ -1142,8 +1151,81 @@ public partial class GameDetailsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to launch {GameId}", GameId);
-            StatusMessage = "Couldn't launch the game. Check the log for details.";
+            StatusMessage = "The game was not started. " + ex.Message;
         }
+        finally { _checkingBeforePlay = false; }
+    }
+
+    private async Task<bool> UpdateDependenciesBeforePlayAsync(CancellationToken ct)
+    {
+        if (_gameInstall is null) return false;
+        _dependencyCatalogNotice = "";
+        var ids = ModGroups.Where(group => group.IsInstalled).Select(group => group.PluginId).ToArray();
+        if (!ids.Any(id => _activeIndexes.GetValueOrDefault(id)?.Games
+            .Any(game => game.GameId == GameId && game.Dependencies.Any(dep => dep.Fix?.AutoInstall is not null)) == true)) return true;
+        StatusMessage = "Checking for dependency updates...";
+        var plans = new List<(GameInstall Game, IReadOnlyList<DependencyUpdate> Updates)>();
+        var updater = new DependencyUpdates(_depAutoInstaller, _logger);
+        foreach (var id in ids)
+        {
+            var previous = _activeIndexes.GetValueOrDefault(id)?.Games.SingleOrDefault(game => game.GameId == GameId);
+            if (previous is not null)
+                await updater.EnsureReadyToLaunchAsync(new GameInstall { Game = previous, PluginId = id, InstallPath = _gameInstall.InstallPath }, ReleaseTarget.Windows);
+        }
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        try
+        {
+            var config = await _configService.LoadAsync();
+            var registry = _registryClient is null ? null : await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), deadline.Token);
+            var sources = CatalogSourceResolver.Resolve(registry?.Value.Plugins ?? (_ownerPlugin is null ? [] : [_ownerPlugin]),
+                UserPluginSourceValidation.Accept(config.UserPluginSources).Accepted).Sources;
+            var pins = new Dictionary<string, string>();
+            foreach (var id in ids)
+            {
+                var source = sources.SingleOrDefault(item => item.PluginId == id)
+                    ?? throw new InvalidOperationException("The installed mod's catalog source is unavailable. Refresh the Mods list before playing.");
+                var fetched = await _repoClient.FetchPluginIndexAsync(source, deadline.Token);
+                if (fetched.FromCache)
+                {
+                    _dependencyCatalogNotice = "Live dependency updates could not be checked. Using the installed files. ";
+                    continue;
+                }
+                var definition = fetched.Value.Games.SingleOrDefault(game => game.GameId == GameId)
+                    ?? throw new InvalidOperationException("This game is no longer in its author's catalog. Refresh the Mods list.");
+                foreach (var dependency in DependencyTargeting.ForTarget(definition.Dependencies, ReleaseTarget.Windows))
+                    if (dependency.Fix?.AutoInstall is { } automatic)
+                    {
+                        if (pins.TryGetValue(dependency.Id, out var hash) && !hash.Equals(automatic.Sha256, StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidOperationException("Installed mods request different versions of dependency " + dependency.Id + ". Resolve their requirements before updating.");
+                        pins[dependency.Id] = automatic.Sha256;
+                    }
+                var game = new GameInstall { Game = definition, PluginId = id, InstallPath = _gameInstall.InstallPath, IsValid = true };
+                plans.Add((game, await updater.FindAsync(game, ReleaseTarget.Windows, ct)));
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _dependencyCatalogNotice = "The dependency check timed out. Using the installed files. ";
+            return true;
+        }
+        var pending = plans.SelectMany(plan => plan.Updates).ToArray();
+        if (pending.Length == 0) return true;
+        var text = "Updated dependencies are available: " + string.Join(", ", pending.Select(update => update.Dependency.Id).Distinct()) +
+            ". Update them before starting " + DisplayName + "? Choose No to cancel launching. Close any other running copy first. " +
+            "Replaced emulator files will be backed up. Files outside the update are kept.";
+        if (pending.Any(update => update.PreviouslyUntracked))
+            text += " An older installation has no recorded download version; this one-time update will establish it.";
+        if (!_confirmDialog("Update dependencies before playing", text)) { StatusMessage = "Launch cancelled."; return false; }
+        var progress = new Progress<ProgressInfo>();
+        await _runWithProgress("Update dependencies", "Updating dependencies before launch...", progress,
+            async (_, host, innerCt) =>
+            {
+                foreach (var plan in plans)
+                    await updater.ApplyAsync(plan.Game, ReleaseTarget.Windows,
+                        await updater.FindAsync(plan.Game, ReleaseTarget.Windows, innerCt), host, progress, innerCt);
+            }, ct);
+        return true;
     }
 
     /// <summary>

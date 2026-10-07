@@ -83,11 +83,12 @@
             <TextBlock Text="Package platform:"/>
             <ComboBox SelectedItem="{Binding TargetPlatform}"
                       AutomationProperties.Name="Package platform"
-                      AutomationProperties.HelpText="Choose Proton for a Windows game played through Steam on Linux, or Linux for a native Linux game. Windows lifecycle scripts are included only in Windows packages."
+                      AutomationProperties.HelpText="Choose windows-linux for identical mod files on Windows and native Linux, with separate platform dependencies. Choose Proton for a Windows game played through Steam on Linux. Shared packages cannot run platform-specific lifecycle scripts."
                       Margin="0,3,0,0">
                 <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">windows</sys:String>
                 <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">proton</sys:String>
                 <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">linux</sys:String>
+                <sys:String xmlns:sys="clr-namespace:System;assembly=mscorlib">windows-linux</sys:String>
             </ComboBox>
         </StackPanel>
 

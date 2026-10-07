@@ -1,3 +1,4 @@
+using AccessibilityModManager.Infrastructure.Services;
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Themes.Fluent;
@@ -7,8 +8,11 @@ namespace AccessibilityModManager.LinuxAuthorTool;
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args) => AppBuilder.Configure<AuthorApp>()
-        .UsePlatformDetect().LogToTrace().StartWithClassicDesktopLifetime(args);
+    private static void Main(string[] args)
+    {
+        if (LinuxInstallCommand.TryRun(args, LinuxApplication.Author, out _)) return;
+        AppBuilder.Configure<AuthorApp>().UsePlatformDetect().LogToTrace().StartWithClassicDesktopLifetime(args);
+    }
 }
 
 internal sealed class AuthorApp : Application

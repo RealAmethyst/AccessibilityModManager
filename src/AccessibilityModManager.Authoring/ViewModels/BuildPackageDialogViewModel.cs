@@ -186,7 +186,7 @@ public sealed partial class BuildPackageDialogViewModel : ObservableObject
                 outputPath,
                 targetPlatform: TargetPlatform,
                 protonLaunch: protonLaunch,
-                scripts: TargetPlatform == ReleaseTarget.Windows ? _scripts : null);
+                scripts: TargetPlatform is ReleaseTarget.Windows or ReleaseTarget.WindowsLinux ? _scripts : null);
 
             ResultZipPath = result.ZipPath;
             StatusMessage = $"Built {result.FileCount} files. Returning to release dialog.";

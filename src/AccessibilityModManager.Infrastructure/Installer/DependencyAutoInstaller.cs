@@ -75,6 +75,7 @@ public sealed class DependencyAutoInstaller
         if (existing != null &&
             string.Equals(existing.Sha256, auto.Sha256, StringComparison.OrdinalIgnoreCase) &&
             existing.Kind == KindLabel(auto) &&
+            (existing.DownloadUrl is null || existing.DownloadUrl == url) &&
             DependencyFilesPresent(existing, game.InstallPath))
         {
             // Genuinely installed — same artifact, same kind, and its added files are still on
@@ -177,6 +178,8 @@ public sealed class DependencyAutoInstaller
                 Kind = kind,
                 InstalledAt = DateTime.UtcNow,
                 Sha256 = auto.Sha256,
+                DownloadUrl = url,
+                InstallPath = game.InstallPath,
                 Changes = changes,
                 BackupFolder = backupFolder,
                 DependentPluginIds = priorDependents.Contains(requestingPluginId)
@@ -415,7 +418,7 @@ public sealed class DependencyAutoInstaller
     /// a download / hash / non-zero-exit failure.
     /// </summary>
     public async Task RunGameInstallerAsync(Dependency dependency, IDependencyHost? host, CancellationToken ct,
-        IProgress<ProgressInfo>? progress = null)
+        IProgress<ProgressInfo>? progress = null, bool requireSuccess = false)
     {
         if (OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException(
@@ -438,7 +441,7 @@ public sealed class DependencyAutoInstaller
         {
             tempFile = await DownloadAsync(url, dependency.Id, ct, progress);
             await VerifySha256Async(tempFile, ri.Sha256, dependency.Id, ct);
-            await RunInstallerAsync(tempFile, ri, host, ct, throwOnNonZeroExit: false);
+            await RunInstallerAsync(tempFile, ri, host, ct, throwOnNonZeroExit: requireSuccess);
             host?.OnDependencyFinished(dependency.Id, succeeded: true);
         }
         catch
@@ -457,10 +460,9 @@ public sealed class DependencyAutoInstaller
 
     /// <summary>
     /// Installs a portable-app (emulator) game-installer dependency: download (HTTPS + mandatory
-    /// SHA256), then extract the ZIP into <paramref name="destinationFolder"/> with the same
-    /// zip-slip-safe extractor the mod install uses. Like <see cref="RunGameInstallerAsync"/> this
-    /// writes NO dependency receipt — the app is tracked by detection (a <c>KnownGameOverrides</c>
-    /// entry the caller writes), not a rolled-back change. Throws on a download / hash / extraction
+    /// SHA256), then safely extract a ZIP or gzip-compressed tar into <paramref name="destinationFolder"/>. Like <see cref="RunGameInstallerAsync"/> this
+    /// writes no receipt itself. The caller records the verified artifact separately from mod
+    /// ownership, so removing a mod never removes its game. Throws on a download / hash / extraction
     /// failure. See EMULATOR_INSTALL_QUESTIONS.md.
     /// </summary>
     public async Task ExtractPortableAppAsync(
@@ -484,12 +486,25 @@ public sealed class DependencyAutoInstaller
         try
         {
             tempFile = await DownloadAsync(url, dependency.Id, ct, progress);
-            await VerifySha256Async(tempFile, app.Sha256, dependency.Id, ct);
 
-            // Reuse the same zip-slip-safe extractor the main install uses (it only needs the
-            // logger). No FileChange tracking: a portable app isn't a rolled-back mod change.
-            var extractor = new SafeZipExtractor(_logger);
-            await extractor.ExtractAsync(tempFile, destinationFolder, ct);
+            // Verify and extract through one open handle. Detect format from the bytes, since
+            // download endpoints need not include a filename or a conventional extension.
+            await using var archive = new FileStream(tempFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var hash = Convert.ToHexString(await SHA256.HashDataAsync(archive, ct));
+            if (!hash.Equals(app.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The portable-app archive failed its SHA-256 check.");
+            archive.Position = 0;
+            var magic = new byte[4];
+            var read = await archive.ReadAtLeastAsync(magic, 4, throwOnEndOfStream: false, cancellationToken: ct);
+            archive.Position = 0;
+            if (read >= 2 && magic[0] == 0x1f && magic[1] == 0x8b)
+                await new SafeTarGZipExtractor().ExtractAsync(archive, destinationFolder, ct);
+            else if (read == 4 && magic[0] == 'P' && magic[1] == 'K' &&
+                     (magic[2] == 3 && magic[3] == 4 || magic[2] == 5 && magic[3] == 6))
+                await new SafeZipExtractor(_logger).ExtractAsync(archive, destinationFolder, ct,
+                    preserveExecutablePermissions: OperatingSystem.IsLinux());
+            else
+                throw new InvalidDataException("The portable game or emulator must be a ZIP or .tar.gz archive.");
 
             host?.OnDependencyFinished(dependency.Id, succeeded: true);
             _logger.Information("Portable app {DepId} extracted to {Dir}", dependency.Id, destinationFolder);

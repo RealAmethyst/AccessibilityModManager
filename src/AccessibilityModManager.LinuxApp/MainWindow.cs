@@ -10,6 +10,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Detection;
+using AccessibilityModManager.Infrastructure.Installer;
 using AccessibilityModManager.Infrastructure.Security;
 using AccessibilityModManager.Infrastructure.Services;
 using AccessibilityModManager.Infrastructure.Patreon;
@@ -24,7 +25,7 @@ internal sealed class MainWindow : Window
     private readonly SecretServicePatreonAccountStore patreonStore = new();
     private readonly PatreonService patreon;
     private readonly ContentControl page = new();
-    private readonly TabControl tabs = new();
+    private readonly TabControl tabs = new SectionTabs();
     private readonly ListBox modsList = new();
     private readonly ListBox authorsList = new();
     private readonly ListBox userSourcesList = new();
@@ -44,6 +45,9 @@ internal sealed class MainWindow : Window
     private LinuxAuthorEntry? currentAuthor;
     private TextBlock? activeDetailsStatus;
     private bool detailsFromAuthor;
+    private bool updateBusy;
+    private readonly Button checkUpdates = new() { Content = "Check for manager updates" };
+    private readonly TextBlock updateStatus = new() { Focusable = true };
     private bool busy;
     private bool sourceBusy;
     private bool patreonBusy;
@@ -53,7 +57,7 @@ internal sealed class MainWindow : Window
     private HashSet<string> selectedLanguages = [];
     private HashSet<string> selectedAuthors = [];
 
-    public MainWindow()
+    public MainWindow(string[]? arguments = null)
     {
         patreon = new PatreonService(
             new PatreonClient(httpClient, PatreonAppRegistry.Manager, logger),
@@ -66,13 +70,6 @@ internal sealed class MainWindow : Window
         MinHeight = 400;
         AutomationProperties.SetName(this, "Accessibility Mod Manager");
 
-        tabs.ItemsPanel = new FuncTemplate<Panel?>(() =>
-        {
-            var strip = new WrapPanel();
-            KeyboardNavigation.SetTabNavigation(strip, KeyboardNavigationMode.Continue);
-            return strip;
-        });
-        AutomationProperties.SetName(tabs, "Sections");
         tabs.Items.Add(new TabItem { Header = "Mods", Content = BuildModsPage() });
         tabs.Items.Add(new TabItem { Header = "Authors", Content = BuildAuthorsPage() });
         tabs.Items.Add(new TabItem { Header = "Settings", Content = BuildSettingsPage() });
@@ -107,6 +104,9 @@ internal sealed class MainWindow : Window
             }
             UpdatePatreonControls();
             await RefreshModsAsync(focusList: true);
+            if (arguments is ["--updated"])
+                await ShowTextDialogAsync("Manager updated", "The manager update is installed. Your settings and installed mods were kept.");
+            _ = CheckManagerUpdateAsync(false);
         };
         Closed += (_, _) => httpClient.Dispose();
     }
@@ -296,6 +296,11 @@ internal sealed class MainWindow : Window
         var root = new StackPanel { Spacing = 10, Margin = new Thickness(16, 12, 16, 16), MaxWidth = 600,
             HorizontalAlignment = HorizontalAlignment.Left };
         root.Children.Add(new TextBlock { Text = "Settings", FontSize = 24, FontWeight = Avalonia.Media.FontWeight.Bold });
+        root.Children.Add(new TextBlock { Text = "Manager version " + CurrentVersion.ToString(3) });
+        checkUpdates.Click += async (_, _) => await CheckManagerUpdateAsync(true);
+        root.Children.Add(checkUpdates);
+        AutomationProperties.SetLiveSetting(updateStatus, AutomationLiveSetting.Polite);
+        root.Children.Add(updateStatus);
         root.Children.Add(new TextBlock { Text = "Default channel" });
         defaultChannel.Items.Add("stable");
         defaultChannel.Items.Add("beta");
@@ -333,6 +338,38 @@ internal sealed class MainWindow : Window
         AutomationProperties.SetLiveSetting(settingsStatus, AutomationLiveSetting.Polite);
         root.Children.Add(settingsStatus);
         return new ScrollViewer { Content = root };
+    }
+
+    private static Version CurrentVersion => typeof(MainWindow).Assembly.GetName().Version!;
+
+    private async Task CheckManagerUpdateAsync(bool manual)
+    {
+        if (updateBusy) return;
+        updateBusy = true;
+        checkUpdates.IsEnabled = false;
+        try
+        {
+            var checker = new UpdateChecker(httpClient, logger);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var update = await checker.CheckForUpdateAsync(CurrentVersion, timeout.Token);
+            updateStatus.Text = checker.LastError is not null ? "Could not check for updates. Try again later."
+                : update is null ? "No newer Linux manager release is available."
+                : $"Manager version {update.Version} is available.";
+            if (update is not null && !busy && !sourceBusy && !patreonBusy)
+            {
+                startupFocusPending = false;
+                focusModsWhenReady = false;
+                await new ManagerUpdateDialog(checker, update, Close).ShowDialog(this);
+            }
+            else if (manual) updateStatus.Focus();
+        }
+        catch (Exception ex)
+        {
+            logger.Warning(ex, "Linux manager update check failed");
+            updateStatus.Text = "Could not check for updates. Try again later.";
+            if (manual) updateStatus.Focus();
+        }
+        finally { updateBusy = false; checkUpdates.IsEnabled = true; }
     }
 
     private async Task LoadSettingsAsync()
@@ -466,7 +503,6 @@ internal sealed class MainWindow : Window
     private void AddFilterGroup(string title, IEnumerable<string> values, HashSet<string> selected)
     {
         var group = new StackPanel { Spacing = 3, Margin = new Thickness(0, 8, 0, 0) };
-        group.Children.Add(new TextBlock { Text = title, FontSize = 16 });
         foreach (var value in values.Where(value => !string.IsNullOrWhiteSpace(value))
                      .Distinct(StringComparer.OrdinalIgnoreCase)
                      .OrderBy(value => value, StringComparer.CurrentCultureIgnoreCase))
@@ -481,7 +517,8 @@ internal sealed class MainWindow : Window
             };
             group.Children.Add(check);
         }
-        filters.Children.Add(group);
+        var expander = new FilterExpander(title, group);
+        filters.Children.Add(expander);
     }
 
     private async Task SaveFiltersAsync()
@@ -722,9 +759,9 @@ internal sealed class MainWindow : Window
             {
                 var play = new Button { Content = "Play" };
                 AutomationProperties.SetName(play, "Play " + mod.Game.DisplayName);
-                play.Click += (_, _) =>
+                play.Click += async (_, _) =>
                 {
-                    try { PlayGame(mod); }
+                    try { await PlayGameAsync(mod); }
                     catch (Exception ex) { ReportError(ex); }
                 };
                 gameActions.Children.Add(play);
@@ -733,10 +770,26 @@ internal sealed class MainWindow : Window
             folder.Click += (_, _) => OpenFolder(mod.Install.InstallPath);
             gameActions.Children.Add(folder);
         }
-        var browse = new Button { Content = "Browse for Folder" };
-        AutomationProperties.SetName(browse, "Browse for " + mod.Game.DisplayName + " folder");
-        browse.Click += async (_, _) => await BrowseForGameAsync(mod);
-        gameActions.Children.Add(browse);
+        if (mod.Install is null)
+        {
+            if (NativeGameInstaller.Available(mod.Game).Count > 0)
+            {
+                var installGame = new Button { Content = "Install game or emulator" };
+                AutomationProperties.SetName(installGame, "Install game or emulator for " + mod.Game.DisplayName);
+                installGame.Click += async (_, _) => await InstallGameAsync(mod);
+                gameActions.Children.Add(installGame);
+            }
+            else if (mod.Game.Dependencies.Any(dependency => dependency.IsGameInstaller))
+                root.Children.Add(new TextBlock
+                {
+                    Text = "The author has not provided a supported native Linux game or emulator installer. If you already installed it, choose its folder.",
+                    TextWrapping = Avalonia.Media.TextWrapping.Wrap
+                });
+            var browse = new Button { Content = "Browse for Folder" };
+            AutomationProperties.SetName(browse, "Browse for " + mod.Game.DisplayName + " folder");
+            browse.Click += async (_, _) => await BrowseForGameAsync(mod);
+            gameActions.Children.Add(browse);
+        }
         root.Children.Add(gameActions);
         var author = new Button { Content = "Developer" };
         AutomationProperties.SetName(author, "More from " + mod.Author.Author);
@@ -823,7 +876,7 @@ internal sealed class MainWindow : Window
             var chosenChannel = channelChoice.SelectedItem as string;
             var releases = mod.Releases.Where(release => release.Channel == chosenChannel)
                 .OrderByDescending(release => release.Version, VersionComparer.Instance)
-                .ThenBy(release => ReleaseTarget.Normalize(release.TargetPlatform) == ReleaseTarget.Proton ? 0 : 1)
+                .ThenBy(release => ReleaseTarget.ForRuntime(release.TargetPlatform) == ReleaseTarget.Proton ? 0 : 1)
                 .ToArray();
             versionChoice.ItemsSource = releases;
             versionChoice.SelectedIndex = releases.Length > 0 ? 0 : -1;
@@ -842,7 +895,7 @@ internal sealed class MainWindow : Window
                 VersionComparer.Instance.Compare(release.Version, mod.InstalledVersion) != 0;
             update.IsEnabled = update.IsVisible && reason is null &&
                 ReleaseTarget.Normalize(mod.InstalledTarget) ==
-                (ReleaseTarget.Normalize(release?.TargetPlatform) == ReleaseTarget.Linux
+                (ReleaseTarget.ForRuntime(release?.TargetPlatform) == ReleaseTarget.Linux
                     ? ReleaseTarget.Linux : ReleaseTarget.Proton) &&
                 (mod.InstalledTarget == ReleaseTarget.Linux || mod.OwnSetup is not null);
             update.Content = release is not null && mod.InstalledVersion is not null &&
@@ -885,7 +938,7 @@ internal sealed class MainWindow : Window
     private static string? InstallUnavailableReason(LinuxModEntry mod, ModRelease release)
     {
         if (mod.Install is null) return "Choose the game's installation folder first.";
-        var target = ReleaseTarget.Normalize(release.TargetPlatform);
+        var target = ReleaseTarget.ForRuntime(release.TargetPlatform);
         if (target == ReleaseTarget.Linux)
         {
             if (string.IsNullOrWhiteSpace(mod.Game.LinuxExeName))
@@ -907,7 +960,7 @@ internal sealed class MainWindow : Window
     }
 
     private static string FormatRelease(ModRelease release) =>
-        release.Version + ", " + ReleaseTarget.Normalize(release.TargetPlatform);
+        release.Version + ", " + ReleaseTarget.DisplayName(release.TargetPlatform);
 
     private void ShowAuthorDetails(LinuxAuthorEntry plugin)
     {
@@ -1009,7 +1062,7 @@ internal sealed class MainWindow : Window
             }
             SteamAccountConfig? account = null;
             string? proton = null;
-            if (ReleaseTarget.Normalize(release.TargetPlatform) != ReleaseTarget.Linux)
+            if (ReleaseTarget.ForRuntime(release.TargetPlatform) != ReleaseTarget.Linux)
             {
                 var selection = await ChooseSetupAsync(mod);
                 if (selection is null) return;
@@ -1171,6 +1224,59 @@ internal sealed class MainWindow : Window
         catch (Exception ex) { ReportError(ex); }
     }
 
+    private sealed record GameInstallerChoice(Dependency Dependency)
+    {
+        public override string ToString() => Dependency.Id;
+    }
+
+    private async Task InstallGameAsync(LinuxModEntry mod)
+    {
+        if (busy) return;
+        busy = true;
+        string? installedPath = null;
+        try
+        {
+            var choices = NativeGameInstaller.Available(mod.Game).Select(dependency => new GameInstallerChoice(dependency)).ToArray();
+            var selected = choices.Length == 1 ? choices[0] : await ChoiceDialog.ChooseAsync(this,
+                "Game or emulator installer", "Choose the Linux installer to use.", choices);
+            if (selected is null) return;
+            if (!await ConfirmationDialog.ShowAsync(this, "Install game or emulator",
+                    $"Download {selected.Dependency.Id} for {mod.Game.DisplayName} from {selected.Dependency.Fix?.DownloadUrl}? " +
+                    $"Choose a parent folder next. A new folder named {mod.Game.GameId} will be created there. Existing files will be kept.",
+                    "Choose installation location")) return;
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = "Choose where to install " + mod.Game.DisplayName, AllowMultiple = false
+            });
+            if (folders.Count == 0) return;
+            var parent = folders[0].TryGetLocalPath() ?? throw new InvalidOperationException("Choose a local folder.");
+            var status = activeDetailsStatus ?? modsStatus;
+            status.Text = "Downloading and verifying the Linux game or emulator.";
+            status.Focus();
+            var host = new DependencyDialogHost(this, message => status.Text = message, logger);
+            var dependencyInstaller = new DependencyAutoInstaller(httpClient, new DependencyReceiptStore(logger), logger);
+            installedPath = await new NativeGameInstaller(dependencyInstaller).InstallAsync(mod.Game,
+                selected.Dependency, parent, host);
+            await new ConfigService(logger).UpdateAsync(config =>
+            {
+                config.KnownGameOverrides[mod.Game.GameId] = installedPath;
+                config.InstalledEmulators["linux:" + mod.Game.LinuxExeName] = installedPath;
+            });
+        }
+        catch (Exception ex)
+        {
+            ReportError(installedPath is null ? ex : new InvalidOperationException(
+                $"The files were installed to {installedPath}, but saving their location failed. Use Browse for Folder to select that folder.", ex));
+            installedPath = null;
+        }
+        finally { busy = false; }
+        if (installedPath is null) return;
+        await RefreshModsAsync(focusList: false);
+        var updated = catalog?.Mods.FirstOrDefault(item => item.Author.Id == mod.Author.Id && item.Game.GameId == mod.Game.GameId);
+        if (updated is not null)
+            ShowModDetails(updated, detailsFromAuthor, "Game or emulator installed. You can now install a compatible mod release.");
+    }
+
     private async Task<(SteamAccountConfig Account, string Proton)?> ChooseSetupAsync(LinuxModEntry mod)
     {
         if (mod.Install is null)
@@ -1199,6 +1305,51 @@ internal sealed class MainWindow : Window
             proton = picked;
         }
         return (account, proton);
+    }
+
+    private async Task PlayGameAsync(LinuxModEntry mod)
+    {
+        if (busy || mod.Install is null) return;
+        busy = true;
+        try
+        {
+            var status = activeDetailsStatus ?? modsStatus;
+            var catalogNotice = "";
+            if (mod.Game.Dependencies.Any(dep => dep.Fix?.AutoInstall is not null))
+            {
+                status.Text = "Checking for dependency updates...";
+                var updater = new DependencyUpdates(new DependencyAutoInstaller(httpClient, new DependencyReceiptStore(logger), logger), logger);
+                await updater.EnsureReadyToLaunchAsync(mod.Install, mod.InstalledTarget == ReleaseTarget.Linux ? ReleaseTarget.Linux : ReleaseTarget.Proton);
+                var fetched = await new PluginRepoClient(httpClient, logger, responseDeadlineOverride: TimeSpan.FromSeconds(5)).FetchPluginIndexAsync(mod.Author.Source);
+                if (fetched.FromCache)
+                    catalogNotice = "Live dependency updates could not be checked. Using the installed files. ";
+                else
+                {
+                    var definition = fetched.Value.Games.SingleOrDefault(game => game.GameId == mod.Game.GameId)
+                        ?? throw new InvalidOperationException("This game is no longer in its author's catalog. Refresh Mods.");
+                    var game = new GameInstall { Game = definition, PluginId = mod.Author.Id,
+                        InstallPath = mod.Install.InstallPath, IsValid = true };
+                    var target = mod.InstalledTarget == ReleaseTarget.Linux ? ReleaseTarget.Linux : ReleaseTarget.Proton;
+                    var pending = await updater.FindAsync(game, target);
+                    if (pending.Count > 0)
+                    {
+                        var message = "Updated dependencies are available: " + string.Join(", ", pending.Select(update => update.Dependency.Id)) +
+                            ". Update before launching " + mod.Game.DisplayName + "? Close any other running copy first. " +
+                            "Replaced emulator files will be backed up. Files outside the update are kept.";
+                        if (pending.Any(update => update.PreviouslyUntracked))
+                            message += " An older installation has no recorded download version; this one-time update will establish it.";
+                        if (!await ConfirmationDialog.ShowAsync(this, "Update dependencies before playing", message, "Update and play"))
+                        { status.Text = "Launch cancelled."; return; }
+                        var host = new DependencyDialogHost(this, text => status.Text = text, logger);
+                        var progress = new Progress<ProgressInfo>(step => status.Text = step.StatusText);
+                        await updater.ApplyAsync(game, target, pending, host, progress, default);
+                    }
+                }
+            }
+            PlayGame(mod);
+            status.Text = catalogNotice + "Launching " + mod.Game.DisplayName + ".";
+        }
+        finally { busy = false; }
     }
 
     private static void PlayGame(LinuxModEntry mod)

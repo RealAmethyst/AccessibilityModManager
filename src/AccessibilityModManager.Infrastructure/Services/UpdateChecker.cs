@@ -1,5 +1,4 @@
-using System.IO;
-using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using AccessibilityModManager.Infrastructure.Security;
@@ -15,203 +14,152 @@ public sealed record UpdateInfo(
     Uri InstallerUrl,
     string Sha256,
     long? ContentLength,
-    Uri ReleasePageUrl);
+    Uri ReleasePageUrl,
+    string RuntimeIdentifier);
 
-/// <summary>
-/// Checks the GitHub Releases API for a newer manager build, downloads the installer with
-/// SHA256 verification, and hands it off to the OS to run. The running app exits so Inno's
-/// upgrade flow can replace files. Public-key trust comes from HTTPS to api.github.com.
-/// </summary>
+/// <summary>Discover an exact platform asset from the official release and verify its SHA-256 before use.</summary>
 public sealed class UpdateChecker
 {
-    private static readonly Uri ReleasesApiUrl =
-        new("https://api.github.com/repos/RealAmethyst/AccessibilityModManager/releases/latest");
+    private const string Repository = "RealAmethyst/AccessibilityModManager";
+    private static readonly Uri ReleasesApiUrl = new($"https://api.github.com/repos/{Repository}/releases/latest");
+    private readonly HttpClient httpClient;
+    private readonly ILogger logger;
+    private readonly string runtimeIdentifier;
+    public string? LastError { get; private set; }
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    public UpdateChecker(HttpClient httpClient, ILogger logger, string? runtimeIdentifier = null)
     {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-    };
-
-    private readonly HttpClient _httpClient;
-    private readonly ILogger _logger;
-
-    public UpdateChecker(HttpClient httpClient, ILogger logger)
-    {
-        _httpClient = httpClient;
-        _logger = logger;
+        this.httpClient = httpClient;
+        this.logger = logger;
+        this.runtimeIdentifier = runtimeIdentifier ?? CurrentRuntime;
     }
+
+    public static string CurrentRuntime => RuntimeInformation.ProcessArchitecture == Architecture.X64
+        ? OperatingSystem.IsWindows() ? "win-x64" : OperatingSystem.IsLinux() ? "linux-x64" : "unsupported"
+        : "unsupported";
+
+    public static string AssetName(Version version, string runtime) => runtime switch
+    {
+        "win-x64" => $"AccessibilityModManager-{version}-Setup.exe",
+        "linux-x64" => $"AccessibilityModManager-{version}-linux-x64.tar.gz",
+        _ => throw new PlatformNotSupportedException("No manager update package is available for this platform.")
+    };
 
     public async Task<UpdateInfo?> CheckForUpdateAsync(Version currentVersion, CancellationToken ct = default)
     {
+        LastError = null;
         try
         {
-            UrlValidator.RequireHttps(ReleasesApiUrl, "GitHub releases API");
-
-            using var req = new HttpRequestMessage(HttpMethod.Get, ReleasesApiUrl);
-            // GitHub API requires a User-Agent header.
-            req.Headers.UserAgent.ParseAdd("AccessibilityModManager-UpdateChecker");
-            req.Headers.Accept.ParseAdd("application/vnd.github+json");
-
-            using var resp = await _httpClient.SendAsync(req, ct);
+            _ = AssetName(currentVersion, runtimeIdentifier);
+            using var req = Request(ReleasesApiUrl);
+            using var resp = await httpClient.SendAsync(req, ct);
             resp.EnsureSuccessStatusCode();
-
-            var json = await resp.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(json);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
             var root = doc.RootElement;
+            if (root.TryGetProperty("draft", out var draft) && draft.GetBoolean() ||
+                root.TryGetProperty("prerelease", out var pre) && pre.GetBoolean()) return null;
+            var tag = root.GetProperty("tag_name").GetString() ?? "";
+            if (!Version.TryParse(tag.TrimStart('v', 'V'), out var version) || version.Build < 0)
+                throw new InvalidDataException("The release tag is not a stable manager version.");
+            if (Comparable(version) <= Comparable(currentVersion)) return null;
 
-            var tagName = root.GetProperty("tag_name").GetString() ?? "";
-            var releaseName = root.TryGetProperty("name", out var n) ? n.GetString() ?? tagName : tagName;
-            var body = root.TryGetProperty("body", out var b) ? b.GetString() : null;
-            var htmlUrl = root.TryGetProperty("html_url", out var h) ? h.GetString() : null;
-
-            if (!TryParseVersion(tagName, out var releaseVersion))
-            {
-                _logger.Warning("Could not parse release tag {Tag} as a version", tagName);
-                return null;
-            }
-
-            if (releaseVersion <= currentVersion)
-            {
-                _logger.Information("Manager is up to date (running {Current}, latest {Latest})",
-                    currentVersion, releaseVersion);
-                return null;
-            }
-
-            // Find the .exe asset and the .sha256 sibling.
-            string? exeUrl = null;
-            string? sha256Url = null;
-            long? exeSize = null;
-
-            if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var asset in assets.EnumerateArray())
-                {
-                    var name = asset.GetProperty("name").GetString() ?? "";
-                    var url = asset.GetProperty("browser_download_url").GetString();
-                    var size = asset.TryGetProperty("size", out var s) ? s.GetInt64() : 0;
-
-                    // Match the installer naming convention so we don't pick up other assets
-                    // shipped in the same release (e.g. the author tool exe).
-                    if (name.EndsWith("-Setup.exe", StringComparison.OrdinalIgnoreCase))
-                    {
-                        exeUrl = url;
-                        exeSize = size;
-                    }
-                    else if (name.EndsWith("-Setup.exe.sha256", StringComparison.OrdinalIgnoreCase))
-                    {
-                        sha256Url = url;
-                    }
-                }
-            }
-
-            if (string.IsNullOrEmpty(exeUrl) || string.IsNullOrEmpty(sha256Url))
-            {
-                _logger.Warning("Latest release {Tag} is missing an .exe asset or .sha256 sibling", tagName);
-                return null;
-            }
-
-            // These come from the GitHub API JSON; enforce https before we ever fetch/execute them,
-            // so the invariant is local and testable rather than relying on GitHub always returning https.
-            UrlValidator.RequireHttps(exeUrl, "manager installer asset");
-            UrlValidator.RequireHttps(sha256Url, "manager installer sha256 asset");
-
-            // Fetch the SHA256 hash text up front — small, lets us bail early if it's malformed.
-            using var hashReq = new HttpRequestMessage(HttpMethod.Get, sha256Url);
-            hashReq.Headers.UserAgent.ParseAdd("AccessibilityModManager-UpdateChecker");
-            using var hashResp = await _httpClient.SendAsync(hashReq, ct);
+            var name = AssetName(version, runtimeIdentifier);
+            var assets = root.GetProperty("assets").EnumerateArray().ToArray();
+            var installers = assets.Where(a => a.GetProperty("name").GetString() == name).ToArray();
+            var checksums = assets.Where(a => a.GetProperty("name").GetString() == name + ".sha256").ToArray();
+            // A release can contain one platform only. Never fall back to another platform or product.
+            if (installers.Length == 0 && checksums.Length == 0) return null;
+            if (installers.Length != 1 || checksums.Length != 1)
+                throw new InvalidDataException("The release must contain exactly one platform installer and its matching checksum.");
+            var url = AssetUri(installers[0], tag, name);
+            var hashUrl = AssetUri(checksums[0], tag, name + ".sha256");
+            using var hashReq = Request(hashUrl);
+            using var hashResp = await httpClient.SendAsync(hashReq, ct);
             hashResp.EnsureSuccessStatusCode();
-            var sha256Text = (await hashResp.Content.ReadAsStringAsync(ct)).Trim();
-            // Some publishers write "<hash>  filename"; take the first whitespace-delimited token.
-            var firstToken = sha256Text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .FirstOrDefault() ?? "";
-            if (firstToken.Length != 64 || !firstToken.All(IsHexDigit))
-            {
-                _logger.Warning("Release SHA256 file content does not parse as a 64-char hex hash: {Content}", sha256Text);
-                return null;
-            }
-
-            var info = new UpdateInfo(
-                Version: releaseVersion,
-                TagName: tagName,
-                ReleaseName: releaseName,
-                ReleaseNotes: body,
-                InstallerUrl: new Uri(exeUrl, UriKind.Absolute),
-                Sha256: firstToken.ToLowerInvariant(),
-                ContentLength: exeSize > 0 ? exeSize : null,
-                ReleasePageUrl: !string.IsNullOrEmpty(htmlUrl) ? new Uri(htmlUrl) : ReleasesApiUrl);
-
-            _logger.Information("Update available: {Current} -> {Latest} ({Url})",
-                currentVersion, info.Version, info.InstallerUrl);
-            return info;
+            var hashText = (await hashResp.Content.ReadAsStringAsync(ct)).Trim().TrimStart('\ufeff');
+            var tokens = hashText.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length is < 1 or > 2 || tokens[0].Length != 64 || !tokens[0].All(Uri.IsHexDigit) ||
+                tokens.Length == 2 && tokens[1].TrimStart('*') != name)
+                throw new InvalidDataException("The release checksum is malformed or names a different installer.");
+            var releasePage = new Uri($"https://github.com/{Repository}/releases/tag/{Uri.EscapeDataString(tag)}");
+            var size = installers[0].TryGetProperty("size", out var s) ? s.GetInt64() : 0;
+            return new UpdateInfo(version, tag,
+                root.TryGetProperty("name", out var n) ? n.GetString() ?? tag : tag,
+                root.TryGetProperty("body", out var b) ? b.GetString() : null,
+                url, tokens[0].ToLowerInvariant(), size > 0 ? size : null, releasePage, runtimeIdentifier);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Update check failed");
+            LastError = ex.Message;
+            logger.Warning(ex, "Manager update check failed");
             return null;
         }
     }
 
-    public async Task<string> DownloadAsync(
-        UpdateInfo info, IProgress<double>? progress, CancellationToken ct = default)
+    public async Task<string> DownloadAsync(UpdateInfo info, IProgress<double>? progress, CancellationToken ct = default)
     {
-        UrlValidator.RequireHttps(info.InstallerUrl, "manager installer");
-
-        var tempDir = Path.Combine(Path.GetTempPath(), "AccessibilityModManager-Update");
-        Directory.CreateDirectory(tempDir);
-        var fileName = Path.GetFileName(info.InstallerUrl.LocalPath);
-        if (string.IsNullOrEmpty(fileName) || !fileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-            fileName = $"AccessibilityModManager-{info.Version}-Setup.exe";
-        var targetPath = Path.Combine(tempDir, fileName);
-
-        if (File.Exists(targetPath)) File.Delete(targetPath);
-
-        using (var resp = await _httpClient.GetAsync(info.InstallerUrl, HttpCompletionOption.ResponseHeadersRead, ct))
+        if (info.RuntimeIdentifier != runtimeIdentifier)
+            throw new InvalidOperationException("The update is for a different operating system or architecture.");
+        var name = AssetName(info.Version, runtimeIdentifier);
+        RequireAssetUri(info.InstallerUrl, info.TagName, name);
+        var directory = Directory.CreateTempSubdirectory("amm-update-");
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory.FullName,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var target = Path.Combine(directory.FullName, name);
+        try
         {
+            using var resp = await httpClient.GetAsync(info.InstallerUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             resp.EnsureSuccessStatusCode();
             var total = info.ContentLength ?? resp.Content.Headers.ContentLength;
-
-            await using var http = await resp.Content.ReadAsStreamAsync(ct);
-            await using var file = File.Create(targetPath);
-            var buffer = new byte[81920];
-            long readSoFar = 0;
-            int read;
-            while ((read = await http.ReadAsync(buffer, ct)) > 0)
+            await using (var input = await resp.Content.ReadAsStreamAsync(ct))
+            await using (var file = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                await file.WriteAsync(buffer.AsMemory(0, read), ct);
-                readSoFar += read;
-                if (total is > 0)
-                    progress?.Report(Math.Min(1.0, (double)readSoFar / total.Value));
+                var buffer = new byte[81920];
+                long count = 0;
+                int read;
+                while ((read = await input.ReadAsync(buffer, ct)) > 0)
+                {
+                    count += read;
+                    if (count > 2L * 1024 * 1024 * 1024 || total is > 0 && count > total)
+                        throw new InvalidDataException("The update download exceeds its expected size.");
+                    await file.WriteAsync(buffer.AsMemory(0, read), ct);
+                    if (total is > 0) progress?.Report((double)count / total.Value);
+                }
+                if (total is > 0 && count != total)
+                    throw new InvalidDataException("The update download is incomplete.");
             }
+            await using var verify = File.OpenRead(target);
+            var actual = Convert.ToHexString(await SHA256.HashDataAsync(verify, ct));
+            if (!actual.Equals(info.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The downloaded update failed its SHA-256 check. It has not been installed.");
+            return target;
         }
-
-        // SHA256 verify before we trust the file. Mismatch = abort and surface to caller.
-        await using (var verify = File.OpenRead(targetPath))
-        {
-            var hash = await SHA256.HashDataAsync(verify, ct);
-            var actualHex = Convert.ToHexString(hash).ToLowerInvariant();
-            if (!string.Equals(actualHex, info.Sha256, StringComparison.OrdinalIgnoreCase))
-            {
-                File.Delete(targetPath);
-                throw new InvalidOperationException(
-                    $"Downloaded installer hash mismatch. Expected {info.Sha256}, got {actualHex}. " +
-                    "The download was deleted as a precaution.");
-            }
-        }
-
-        _logger.Information("Update installer ready at {Path}", targetPath);
-        return targetPath;
+        catch { directory.Delete(true); throw; }
     }
 
-    private static bool TryParseVersion(string tagName, out Version version)
+    private static Version Comparable(Version v) => new(v.Major, v.Minor, Math.Max(0, v.Build), Math.Max(0, v.Revision));
+
+    private static HttpRequestMessage Request(Uri url)
     {
-        // Accept "1.2.3", "v1.2.3", "v1.2.3-beta1" — strip leading 'v', drop pre-release suffix
-        // for the comparison since System.Version doesn't model it.
-        var s = tagName.TrimStart('v', 'V');
-        var dash = s.IndexOf('-');
-        if (dash >= 0) s = s[..dash];
-        return Version.TryParse(s, out version!);
+        UrlValidator.RequireHttps(url, "manager update");
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("AccessibilityModManager-UpdateChecker");
+        request.Headers.Accept.ParseAdd("application/vnd.github+json");
+        return request;
     }
 
-    private static bool IsHexDigit(char c)
-        => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    private static Uri AssetUri(JsonElement asset, string tag, string name)
+    {
+        var uri = new Uri(asset.GetProperty("browser_download_url").GetString()!, UriKind.Absolute);
+        RequireAssetUri(uri, tag, name);
+        return uri;
+    }
+
+    private static void RequireAssetUri(Uri uri, string tag, string name)
+    {
+        var expected = new Uri($"https://github.com/{Repository}/releases/download/{Uri.EscapeDataString(tag)}/{Uri.EscapeDataString(name)}");
+        if (uri != expected)
+            throw new InvalidDataException("The update asset does not belong to the expected official release and platform.");
+    }
 }

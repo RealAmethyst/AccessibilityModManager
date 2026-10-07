@@ -24,7 +24,7 @@ public static class DependencyPresets
         new DependencyPreset
         {
             DisplayName = "Emulator (portable app)",
-            Description = "The emulator itself, delivered as a portable ZIP. \"This dependency is the " +
+            Description = "The emulator itself, delivered as a portable ZIP or tar.gz archive. \"This dependency is the " +
                           "game itself\" is already ticked and the auto-install kind is set to extractApp. " +
                           "Set the game's Exe name (General tab) to the emulator's exe, then paste the " +
                           "ZIP's HTTPS URL below and click \"Fetch from URL\" for the SHA256.",

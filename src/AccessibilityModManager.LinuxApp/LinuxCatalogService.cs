@@ -1,5 +1,6 @@
 using AccessibilityModManager.Core.Models;
 using AccessibilityModManager.Infrastructure.Detection;
+using AccessibilityModManager.Infrastructure.Installer;
 using AccessibilityModManager.Infrastructure.Patreon;
 using AccessibilityModManager.Infrastructure.Security;
 using AccessibilityModManager.Infrastructure.Services;
@@ -103,7 +104,7 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
                              release.Patreon is { } gate && patreon is not null &&
                              (patreon.IsCampaignOwner(gate.CampaignId) || patreon.IsEntitled(gate))) &&
                             ReleaseTarget.Normalize(release.TargetPlatform) is
-                                ReleaseTarget.Windows or ReleaseTarget.Proton or ReleaseTarget.Linux)
+                                ReleaseTarget.Windows or ReleaseTarget.Proton or ReleaseTarget.Linux or ReleaseTarget.WindowsLinux)
                         .OrderByDescending(release => release.Version, VersionComparer.Instance)
                         .ToArray();
                     if (releases.Length == 0) continue;
@@ -115,6 +116,12 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
                             Game = game, PluginId = source.PluginId,
                             InstallPath = overridePath, IsValid = true
                         };
+                    if (install is null && game.LinuxExeName is { } nativeExe &&
+                        NativeGameInstaller.Available(game).Count > 0 &&
+                        config.InstalledEmulators.TryGetValue("linux:" + nativeExe, out var emulatorPath) &&
+                        File.Exists(PathSafety.CombineContained(emulatorPath, nativeExe)) &&
+                        new GameVerifier(logger).VerifyInstallPath(game, emulatorPath))
+                        install = new GameInstall { Game = game, PluginId = source.PluginId, InstallPath = emulatorPath, IsValid = true };
                     var receipt = await receipts.LoadAsync(game.GameId, source.PluginId);
                     var setups = install is null || string.IsNullOrWhiteSpace(game.SteamAppId)
                         ? [] : ProtonSteamSetupLookup.Find(setupRoot, game.SteamAppId, install.InstallPath);

@@ -11,5 +11,6 @@
   <Folder Name="/tests/">
     <Project Path="tests/AccessibilityModManager.Tests/AccessibilityModManager.Tests.csproj" />
     <Project Path="tests/AccessibilityModManager.PortableTests/AccessibilityModManager.PortableTests.csproj" />
+    <Project Path="tests/AccessibilityModManager.LinuxApp.Tests/AccessibilityModManager.LinuxApp.Tests.csproj" />
   </Folder>
 </Solution>
