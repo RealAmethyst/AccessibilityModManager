@@ -6,6 +6,28 @@ The Linux manager and AuthorTool use Avalonia 12.1.3 and share the portable .NET
 
 Avalonia 12.1.3's AT-SPI bridge drops a focus event if the newly focused peer is deeper than the root's immediate children and no accessibility client has traversed to it yet. The AT-SPI tree then shows the correct focused state without an event for Orca to announce. The pinned source patch at `installer/linux/patches/avalonia-atspi-focus.patch` attaches the peer's ancestor path before emitting that event. `build-avalonia-atspi.sh` builds the patched bridge from the exact Avalonia 12.1.3 Git commit and D-Bus submodule used by the package, then `build-linux.sh` installs it into both Linux applications with the Avalonia license and notice. The AT-SPI event monitor observed a focused event for the initially selected mod, Back on a newly opened details page, and the selected mod on return. Amethyst confirmed that the installed manager's focus and category tabs work with Orca.
 
+The 2.0 bridge patch also exposes a closed combo box's unrealized selection peer as
+an AT-SPI child, and invalidates that child list when selection or expansion changes.
+Previously `NSelectedChildren` was one while `GetSelectedChild` returned a null reference.
+Orca's combo-box value reader requires a child before it asks for the selection, so
+fixing only the accessible name does not repair the selection contract. The bridge
+build runs the Linux UI suite with `AtSpiBridgePath` set to the patched DLL, including
+regression checks for closed selection, empty selection, popup transitions and ordinary lists.
+
+Linux native dependency installation now uses the same `DependencyUpdates.UpdatePortableAsync`
+path as Windows. It installs directly into the selected folder, unwraps the archive's
+optional outer directory, verifies the executable, backs up replaced files and records
+only package-owned files. Existing game-ID subfolders are left in place; their recorded
+paths remain valid.
+
+Steam launch-option editing still requires Steam to close. Valve's open
+[programmatic launch-options request](https://github.com/ValveSoftware/steam-for-linux/issues/6443)
+records that the running client does not reread `localconfig.vdf`.
+The [documented Steamworks apps API](https://partner.steamgames.com/doc/api/ISteamApps)
+provides launch-option readers, but no supported setter for another game's saved options.
+No supported live-edit mechanism was found during the 2.0 investigation; the manager
+keeps its existing guarded, atomic edit and restore flow.
+
 Patreon OAuth uses a local loopback callback. Amethyst confirmed that sign-in now completes in the manager. `secret-tool` operations have a ten-second limit; if the login collection does not respond, the manager saves to the Secret Service session collection and says that the account lasts only until Linux logout. A nonsecret sign-out marker prevents an inaccessible older login item from restoring a signed-out account. The browser page says authorization was received and asks the user to return to the app to finish sign-in; it does not claim the token was saved yet.
 
 Proton is the default path for Windows game builds. A hash-verified Windows file-copy package is converted automatically when it uses a recognized BepInEx `winhttp.dll`, MelonLoader `version.dll`, or DSCSModLoader `freetype.dll` proxy, bundled, already present beside the game, or supplied with a matching loader DLL by a pinned ZIP dependency. Supported Prism 0.18.3 x64 builds gain their matching Wine bridges and placeholder DLLs automatically. The exact published Cyber Sleuth plugin uses Prism 0.17.3, whose Windows DLL omits Orca; its audited adapter preserves the older configuration ABI while loading pinned Prism 0.18.3 and its matching bridge. Other Prism 0.17.3 consumers fail closed. For the exact legacy Tolk x64 DLL verified in the published Next Order and Master Duel packages, the manager replaces that DLL in the temporary Proton package with Prism 0.18.3's official Tolk compatibility shim and adds the same Orca bridge. Other Tolk builds, direct NVDA-only speech, unknown loaders, Windows lifecycle scripts, Windows registry dependencies, and unsupported Prism builds require an explicit Proton package. Reloaded II packages need their loader, launcher and prefix setup declared. Native Linux releases use a declared Linux executable and Linux-targeted dependencies; the manager can detect them through Steam or a manually chosen game folder. Switching an installed mod between native and Proton targets requires uninstall first.
@@ -87,9 +109,46 @@ The first command produces separately installable manager and AuthorTool archive
 
 Installed on this machine at `/home/amethyst/.local/share/AccessibilityModManager/linux-x64` and `/home/amethyst/.local/share/AccessibilityModManager-Author/linux-x64`. Each installed directory contains `release.json` with its product, version and architecture; previous builds are retained beside it with a timestamped backup name. The working Time Stranger wrapper hash remains `73753f60160aa48ff5222899e0de6d07fc074a8b5cf4e55f4e226aedd2437151`.
 
+## Orca application recognition fix in 2.0.1
+
+The installed Orca rejected focus events from the manager because Avalonia's
+`ApplicationAccessibleHandler.Parent` always returned the null reference. Its
+`AtSpiServer.EmbedApplicationAsync` discarded the desktop reference returned by
+AT-SPI's `Socket.Embed`. Orca's `AXUtilitiesApplication.is_application_in_desktop`
+checks that parent against the accessibility desktop before accepting focus events.
+The old and new combo-box bridges both failed this check; no update dialog was open.
+
+The pinned bridge patch now saves the registry's actual Embed reply, exposes it as
+the application's parent and emits an `accessible-parent` property change so a
+client that queried during registration can refresh its cache. The live AT-SPI
+parent changed from null to the desktop, and the installed Orca's validation
+changed from false to true. Amethyst confirmed navigation speech was restored.
+Orca was not restarted. The stable/beta selection patch remains included.
+
+All 7 Linux UI tests passed against the packaged bridge, including the desktop-parent
+regression and a modal update offer that focuses its notes and restores the previous
+control after declining. Both 2.0.1 manager packages and checksums were built.
+The Linux archive is `AccessibilityModManager-2.0.1-linux-x64.tar.gz`, SHA-256
+`04b7889e52d026b7caa27235e33697f4920e9866b771b2dd785573f680ead220`.
+The installed 2.0.1 files were verified against the package tree and the running
+installed application passed Orca's desktop-parent validation. The prior installation
+is backed up at `~/.local/share/AccessibilityModManager/linux-x64.backup-20261008T145238Z-26242e13`.
+The Windows installer compiled successfully under Wine; Windows UI execution was not tested.
+
+The public 2.0.0 packages were released under `v2.0`. Existing updater clients
+require a three-component tag and reject that tag before opening an update dialog.
+Publish the corrected packages as a new release tagged `v2.0.1`; do not replace
+already published 2.0.0 downloads with different contents.
+
 ## Verification and limits
 
-- The Linux applications build with zero warnings; 130 portable tests and 3 headless Linux UI tests pass. Offline tests cover native package install/uninstall, Windows package adaptation with bundled, already-installed and pinned dependency loaders, same-author Proton identity import, nested executable detection and DSCSModLoader's subfolder proxy, automatic matching Prism and Tolk shim bridge packaging and removal, Steam launch-option ownership and restoration, and Proton prefix setup. BepInEx's `winhttp.dll=n,b` rule and MelonLoader's `version=n,b` rule now pass complete disposable install and uninstall checks when the loader comes from either the package or a pinned catalog dependency; an already-installed BepInEx loader remains outside mod ownership. The exact Cyber Sleuth 1.0-beta24 ZIP was adapted and installed/uninstalled in a disposable game folder; the original `freetype.dll` and Steam launch option were restored. That ZIP is detected as needing x64 Visual C++ v14. Both pinned redistributables installed and passed version checks in a disposable Proton prefix. The updated adapter packages the verified Prism configuration compatibility DLL and Prism 0.18.3 core for that exact signed release. A separate fake-keyring check covered Patreon save timeout, session fallback, reload and sign-out. The wrapper binary is unchanged from the build Amethyst confirmed in Time Stranger.
+The 2.0 dependency-path changes passed all 130 portable tests. The final 2.0.1
+bridge passed all 7 Linux UI tests and live Orca desktop-parent validation;
+Amethyst confirmed audible navigation. The selection regressions failed against
+the previous bridge and passed against the patched bridge. Linux and Windows
+manager builds completed without warnings. Windows UI execution remains untested.
+
+- The Linux applications build with zero warnings; 130 portable tests and 7 headless Linux UI tests pass. Offline tests cover native package install/uninstall, Windows package adaptation with bundled, already-installed and pinned dependency loaders, same-author Proton identity import, nested executable detection and DSCSModLoader's subfolder proxy, automatic matching Prism and Tolk shim bridge packaging and removal, Steam launch-option ownership and restoration, and Proton prefix setup. BepInEx's `winhttp.dll=n,b` rule and MelonLoader's `version=n,b` rule now pass complete disposable install and uninstall checks when the loader comes from either the package or a pinned catalog dependency; an already-installed BepInEx loader remains outside mod ownership. The exact Cyber Sleuth 1.0-beta24 ZIP was adapted and installed/uninstalled in a disposable game folder; the original `freetype.dll` and Steam launch option were restored. That ZIP is detected as needing x64 Visual C++ v14. Both pinned redistributables installed and passed version checks in a disposable Proton prefix. The updated adapter packages the verified Prism configuration compatibility DLL and Prism 0.18.3 core for that exact signed release. A separate fake-keyring check covered Patreon save timeout, session fallback, reload and sign-out. The wrapper binary is unchanged from the build Amethyst confirmed in Time Stranger.
 - AT-SPI in the GNOME session exposes the manager as Accessibility Mod Manager instead of the generic Avalonia Application, and the selected release name is accessible. The startup focus transition is tied to window activation and catalog readiness. Amethyst confirmed Orca focus and category navigation in the installed manager. The AuthorTool's project editor, release dialog, build dialog and validation dialog were opened against a disposable project in an earlier check.
 - Time Stranger has been confirmed by Amethyst to work as on Windows, including input, custom audio, speech and navigation. Cyber Sleuth's published 1.0-beta24 release has also been confirmed with speech, audio, navigation and controller input under Proton. No game was launched by Codex. Next Order, Survive, native Linux game packages and XIVLauncher still need Amethyst's in-game checks. XIVLauncher uses its own Wine route and needs an explicit release/provider; it is not an ordinary Steam Proton game.
 - This port cannot infer arbitrary Windows installer behavior or an unknown loader from a Windows release. The manager gives a specific refusal instead of claiming the mod loaded. Publishing a real release still needs author interaction.

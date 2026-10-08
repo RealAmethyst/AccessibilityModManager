@@ -27,6 +27,8 @@ public sealed class PortableTarTests : IDisposable
         var dependency = Dependency(bytes, badHash);
         var game = Game(dependency);
         Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "save.dat"), "keep my save");
+        File.WriteAllText(Path.Combine(root, "data.txt"), "previous emulator file");
         using var http = new HttpClient(new Download(bytes));
         var installer = new NativeGameInstaller(new DependencyAutoInstaller(http,
             new DependencyReceiptStore(logger, Path.Combine(root, "receipts")), logger),
@@ -35,20 +37,31 @@ public sealed class PortableTarTests : IDisposable
         {
             await Assert.ThrowsAsync<InvalidDataException>(() => installer.InstallAsync(game, dependency, root, null));
             Assert.False(Directory.Exists(Path.Combine(root, "pokemon")));
+            Assert.Equal("previous emulator file", File.ReadAllText(Path.Combine(root, "data.txt")));
+            Assert.False(File.Exists(Path.Combine(root, "EmuHawkMono.sh")));
         }
         else
         {
             var installed = await installer.InstallAsync(game, dependency, root, null);
-            Assert.Equal(Path.Combine(root, "pokemon", wrapper ? "BizHawk" : "" ).TrimEnd(Path.DirectorySeparatorChar), installed);
+            Assert.Equal(root, installed);
+            Assert.False(Directory.Exists(Path.Combine(root, "pokemon")));
+            Assert.False(Directory.Exists(Path.Combine(root, "BizHawk")));
             Assert.True(new GameVerifier(logger).VerifyInstallPath(game, installed));
             var mode = File.GetUnixFileMode(Path.Combine(installed, "EmuHawkMono.sh"));
             Assert.True(mode.HasFlag(UnixFileMode.UserExecute));
             Assert.Equal((UnixFileMode)0, mode & (UnixFileMode.SetUser | UnixFileMode.SetGroup | UnixFileMode.StickyBit));
             Assert.True(File.GetUnixFileMode(Path.Combine(installed, "helper")).HasFlag(UnixFileMode.UserExecute));
             Assert.False(File.GetUnixFileMode(Path.Combine(installed, "data.txt")).HasFlag(UnixFileMode.UserExecute));
-            await Assert.ThrowsAsync<InvalidOperationException>(() => installer.InstallAsync(game, dependency, root, null));
+            var record = await new GameDependencyReceiptStore(Path.Combine(root, "game-receipts"))
+                .LoadAsync(root, dependency.Id);
+            Assert.NotNull(record);
+            Assert.DoesNotContain("save.dat", record.Files.Keys);
+            Assert.Contains(Directory.GetFiles(Path.Combine(root, "game-receipts"), "data.txt", SearchOption.AllDirectories),
+                file => File.ReadAllText(file) == "previous emulator file");
+            await installer.InstallAsync(game, dependency, root, null);
         }
-        Assert.Empty(Directory.GetDirectories(root, ".amm-install-*"));
+        Assert.Equal("keep my save", File.ReadAllText(Path.Combine(root, "save.dat")));
+        Assert.Empty(Directory.GetDirectories(root, "staging-*", SearchOption.AllDirectories));
     }
 
     [Theory]

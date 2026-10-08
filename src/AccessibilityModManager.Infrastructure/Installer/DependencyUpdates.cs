@@ -136,17 +136,6 @@ public sealed class DependencyUpdates(DependencyAutoInstaller installer, ILogger
         }
     }
 
-    public async Task RecordPortableAsync(string installPath, Dependency dep, CancellationToken ct = default)
-    {
-        var files = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var file in Directory.EnumerateFiles(installPath, "*", SearchOption.AllDirectories))
-        {
-            PathSafety.EnsureNoReparseTraversal(installPath, file, "emulator file");
-            files.Add(Path.GetRelativePath(installPath, file).Replace('\\', '/'), await HashAsync(file, ct));
-        }
-        await records.SaveAsync(new(installPath, dep.Id, dep.Fix!.DownloadUrl!, dep.Fix.AutoInstall!.Sha256.ToLowerInvariant(), files));
-    }
-
     public async Task UpdatePortableAsync(GameInstall game, Dependency dep, string target,
         IDependencyHost? host, IProgress<ProgressInfo>? progress, CancellationToken ct)
     {

@@ -13,4 +13,10 @@
     <PackageReference Include="Avalonia.Headless.XUnit" Version="12.1.3" />
     <ProjectReference Include="../../src/AccessibilityModManager.LinuxApp/AccessibilityModManager.LinuxApp.csproj" />
   </ItemGroup>
+  <PropertyGroup Condition="'$(AtSpiBridgePath)' != ''">
+    <DefineConstants>$(DefineConstants);PATCHED_ATSPI</DefineConstants>
+  </PropertyGroup>
+  <Target Name="CopyPatchedAtSpiBridge" AfterTargets="Build" Condition="'$(AtSpiBridgePath)' != ''">
+    <Copy SourceFiles="$(AtSpiBridgePath)" DestinationFolder="$(OutDir)" />
+  </Target>
 </Project>

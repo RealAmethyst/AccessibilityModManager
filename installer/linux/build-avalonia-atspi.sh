@@ -30,6 +30,10 @@ git -C "$source_tree/avalonia" apply "$patch"
     "$source_tree/avalonia/src/Avalonia.FreeDesktop.AtSpi/Avalonia.FreeDesktop.AtSpi.csproj" \
     --configuration Release --framework net10.0 --verbosity quiet
 
+"$dotnet_bin" test "$project_root/tests/AccessibilityModManager.LinuxApp.Tests" \
+    --configuration Release --verbosity quiet \
+    -p:AtSpiBridgePath="$source_tree/avalonia/src/Avalonia.FreeDesktop.AtSpi/bin/Release/net10.0/Avalonia.FreeDesktop.AtSpi.dll"
+
 cp -- "$source_tree/avalonia/src/Avalonia.FreeDesktop.AtSpi/bin/Release/net10.0/Avalonia.FreeDesktop.AtSpi.dll" \
     "$destination/Avalonia.FreeDesktop.AtSpi.dll"
 mkdir -p -- "$destination/third-party"

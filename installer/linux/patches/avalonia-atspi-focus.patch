@@ -1,3 +1,95 @@
+diff --git a/src/Avalonia.FreeDesktop.AtSpi/ApplicationAccessibleHandler.cs b/src/Avalonia.FreeDesktop.AtSpi/ApplicationAccessibleHandler.cs
+index d5a16c4..a883928 100644
+--- a/src/Avalonia.FreeDesktop.AtSpi/ApplicationAccessibleHandler.cs
++++ b/src/Avalonia.FreeDesktop.AtSpi/ApplicationAccessibleHandler.cs
+@@ -22,8 +22,7 @@ internal sealed class ApplicationAccessibleHandler(AtSpiServer server, Applicati
+     public string Name => appNode.Name;
+     public string Description => string.Empty;
+
+-    public AtSpiObjectReference Parent =>
+-        new(string.Empty, new DBusObjectPath(AtSpiConstants.NullPath));
++    public AtSpiObjectReference Parent => server.GetDesktopReference();
+
+     public int ChildCount => appNode.WindowChildren.Count;
+     public string Locale => AtSpiConstants.ResolveLocale();
+diff --git a/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs b/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs
+index 09fec39..34811b6 100644
+--- a/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs
++++ b/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs
+@@ -168,9 +168,15 @@ internal void Attach(AtSpiNode? parent)
+         // AT-SPI children so SelectChild-by-index and parent lookups work.
+         private IReadOnlyList<AutomationPeer> GetChildPeers()
+         {
+-            if (Peer.GetProvider<ISelectionProvider>() is null)
++            if (Peer.GetProvider<ISelectionProvider>() is not { } selection)
+                 return Peer.GetChildren();
+
++            // A closed ComboBox has no realized item containers. Its selection peer still
++            // needs a child node so AT-SPI GetSelectedChild can return it to screen readers.
++            if (Peer.GetAutomationControlType() == AutomationControlType.ComboBox &&
++                Peer.GetProvider<IExpandCollapseProvider>()?.ExpandCollapseState == ExpandCollapseState.Collapsed)
++                return selection.GetSelection();
++
+             var items = new List<AutomationPeer>();
+             CollectSelectionItemPeers(Peer.GetChildren(), items);
+             return items.Count > 0 ? items : Peer.GetChildren();
+@@ -330,6 +336,14 @@ private void OnPeerChildrenChanged(object? sender, EventArgs e)
+
+         private void OnPeerPropertyChanged(object? sender, AutomationPropertyChangedEventArgs e)
+         {
++            if (Peer.GetAutomationControlType() == AutomationControlType.ComboBox &&
++                (e.Property == SelectionPatternIdentifiers.SelectionProperty ||
++                 e.Property == ExpandCollapsePatternIdentifiers.ExpandCollapseStateProperty))
++            {
++                _childrenDirty = true;
++                OnPeerChildrenChanged(sender, EventArgs.Empty);
++            }
++
+             if (Server.A11yConnection is null || !Server.HasEventListeners)
+                 return;
+
+diff --git a/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs b/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs
+index 06b9b7a..eb4acf0 100644
+--- a/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs
++++ b/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs
+@@ -25,6 +25,7 @@ internal sealed class AtSpiServer : IAsyncDisposable
+         private int _nextNodeId;
+         private DBusConnection? _a11yConnection;
+         private string _uniqueName = string.Empty;
++        private AtSpiObjectReference? _desktopReference;
+         private SynchronizationContext? _syncContext;
+         private ApplicationAtSpiNode? _appRoot;
+         private AtSpiCacheHandler? _cacheHandler;
+@@ -61,6 +62,7 @@ public async Task StartAsync()
+                 _isEmbedded = false;
+             }
+
++            _desktopReference = null;
+             _syncContext = new AvaloniaSynchronizationContext(Dispatcher.UIThread, DispatcherPriority.Default);
+
+             var address = await GetAccessibilityBusAddressAsync();
+@@ -262,6 +264,8 @@ internal AtSpiObjectReference GetNullReference()
+             return new AtSpiObjectReference(string.Empty, new DBusObjectPath(NullPath));
+         }
+
++        internal AtSpiObjectReference GetDesktopReference() => _desktopReference ?? GetNullReference();
++
+         internal AtSpiObjectReference GetRootReference()
+         {
+             return new AtSpiObjectReference(_uniqueName, new DBusObjectPath(RootPath));
+@@ -443,7 +447,11 @@ private async Task EmbedApplicationAsync()
+                 return;
+
+             var proxy = new OrgA11yAtspiSocketProxy(_a11yConnection, BusNameRegistry, new DBusObjectPath(RootPath));
+-            await proxy.EmbedAsync(new AtSpiObjectReference(_uniqueName, new DBusObjectPath(RootPath)));
++            // The registry returns the desktop accessible which owns this application.
++            // Screen readers use that parent link to validate incoming focus events.
++            var desktop = await proxy.EmbedAsync(new AtSpiObjectReference(_uniqueName, new DBusObjectPath(RootPath)));
++            _desktopReference = desktop;
++            _appRootEventHandler?.EmitPropertyChangeSignal("accessible-parent", new DBusVariant(desktop.ToDbusStruct()));
+         }
+
+         private static async Task InitializeRegistryTrackerAsync(AtSpiRegistryEventTracker tracker)
 diff --git a/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs b/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs
 index 0a013db..92a4903 100644
 --- a/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs
@@ -52,5 +144,5 @@ index 0a013db..92a4903 100644
 +
 +            return node;
          }
- 
+
          private void OnWindowActivated()

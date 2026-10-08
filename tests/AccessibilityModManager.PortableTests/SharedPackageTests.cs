@@ -102,9 +102,11 @@ public sealed class SharedPackageTests : IDisposable
         else
         {
             var installed = await installer.InstallAsync(game, dependency, root, null);
-            Assert.Equal(Path.Combine(root, "pokemon", "BizHawk"), installed);
+            Assert.Equal(root, installed);
+            Assert.False(Directory.Exists(Path.Combine(root, "pokemon")));
+            Assert.False(Directory.Exists(Path.Combine(root, "BizHawk")));
             Assert.True(File.GetUnixFileMode(Path.Combine(installed, "helper")).HasFlag(UnixFileMode.UserExecute));
-            await Assert.ThrowsAsync<InvalidOperationException>(() => installer.InstallAsync(game, dependency, root, null));
+            await installer.InstallAsync(game, dependency, root, null);
             Assert.True(File.Exists(Path.Combine(installed, "EmuHawk")));
         }
         Assert.Empty(Directory.GetDirectories(root, ".amm-install-*"));

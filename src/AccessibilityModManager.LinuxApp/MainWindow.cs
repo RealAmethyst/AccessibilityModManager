@@ -836,14 +836,6 @@ internal sealed class MainWindow : Window
         card.Children.Add(new TextBlock { Text = "Version" });
         var versionChoice = new ComboBox { MinWidth = 150 };
         AutomationProperties.SetName(versionChoice, "Version");
-        versionChoice.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<ModRelease>((release, _) =>
-            new TextBlock { Text = release is null ? "" : FormatRelease(release) });
-        versionChoice.ContainerPrepared += (_, e) =>
-        {
-            if (e.Index >= 0 && e.Index < versionChoice.ItemCount &&
-                versionChoice.Items[e.Index] is ModRelease item)
-                AutomationProperties.SetName(e.Container, FormatRelease(item));
-        };
         card.Children.Add(versionChoice);
         var availability = new TextBlock { TextWrapping = Avalonia.Media.TextWrapping.Wrap };
         AutomationProperties.SetLiveSetting(availability, AutomationLiveSetting.Polite);
@@ -878,12 +870,12 @@ internal sealed class MainWindow : Window
                 .OrderByDescending(release => release.Version, VersionComparer.Instance)
                 .ThenBy(release => ReleaseTarget.ForRuntime(release.TargetPlatform) == ReleaseTarget.Proton ? 0 : 1)
                 .ToArray();
-            versionChoice.ItemsSource = releases;
+            versionChoice.ItemsSource = releases.Select(release => new ReleaseChoice(release)).ToArray();
             versionChoice.SelectedIndex = releases.Length > 0 ? 0 : -1;
         }
         void UpdateActions()
         {
-            var release = versionChoice.SelectedItem as ModRelease;
+            var release = (versionChoice.SelectedItem as ReleaseChoice)?.Release;
             var reason = release is null ? "Choose a release." : InstallUnavailableReason(mod, release);
             availability.Text = reason ?? "";
             install.IsVisible = mod.InstalledVersion is null;
@@ -906,20 +898,15 @@ internal sealed class MainWindow : Window
                 (!string.IsNullOrWhiteSpace(release.Notes) || release.ChangelogUrl is not null);
         }
         channelChoice.SelectionChanged += (_, _) => UpdateReleases();
-        versionChoice.SelectionChanged += (_, _) =>
-        {
-            AutomationProperties.SetName(versionChoice, versionChoice.SelectedItem is ModRelease selected
-                ? "Version, " + FormatRelease(selected) : "Version");
-            UpdateActions();
-        };
-        install.Click += async (_, _) => await ApplyReleaseAsync(mod, versionChoice.SelectedItem as ModRelease,
+        versionChoice.SelectionChanged += (_, _) => UpdateActions();
+        install.Click += async (_, _) => await ApplyReleaseAsync(mod, (versionChoice.SelectedItem as ReleaseChoice)?.Release,
             update: false, detailsStatus, downloadProgress);
-        update.Click += async (_, _) => await ApplyReleaseAsync(mod, versionChoice.SelectedItem as ModRelease,
+        update.Click += async (_, _) => await ApplyReleaseAsync(mod, (versionChoice.SelectedItem as ReleaseChoice)?.Release,
             update: true, detailsStatus, downloadProgress);
         uninstall.Click += async (_, _) => await UninstallAsync(mod, detailsStatus);
         changelog.Click += async (_, _) =>
         {
-            if (versionChoice.SelectedItem is ModRelease release)
+            if (versionChoice.SelectedItem is ReleaseChoice { Release: var release })
                 await ShowTextDialogAsync("Changelog", release.Notes ??
                     "The author provided a changelog link: " + release.ChangelogUrl);
         };
@@ -957,6 +944,11 @@ internal sealed class MainWindow : Window
                   "Keep using Steam Play; its ownership must be migrated before an update."
                 : "Another author owns this game's Steam mod setup.";
         return null;
+    }
+
+    private sealed record ReleaseChoice(ModRelease Release)
+    {
+        public override string ToString() => FormatRelease(Release);
     }
 
     private static string FormatRelease(ModRelease release) =>
@@ -1242,21 +1234,22 @@ internal sealed class MainWindow : Window
             if (selected is null) return;
             if (!await ConfirmationDialog.ShowAsync(this, "Install game or emulator",
                     $"Download {selected.Dependency.Id} for {mod.Game.DisplayName} from {selected.Dependency.Fix?.DownloadUrl}? " +
-                    $"Choose a parent folder next. A new folder named {mod.Game.GameId} will be created there. Existing files will be kept.",
+                    "Choose the installation folder next. Files will be extracted directly there. " +
+                    "Any replaced files will be backed up; other files will be kept.",
                     "Choose installation location")) return;
             var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
             {
                 Title = "Choose where to install " + mod.Game.DisplayName, AllowMultiple = false
             });
             if (folders.Count == 0) return;
-            var parent = folders[0].TryGetLocalPath() ?? throw new InvalidOperationException("Choose a local folder.");
+            var destination = folders[0].TryGetLocalPath() ?? throw new InvalidOperationException("Choose a local folder.");
             var status = activeDetailsStatus ?? modsStatus;
             status.Text = "Downloading and verifying the Linux game or emulator.";
             status.Focus();
             var host = new DependencyDialogHost(this, message => status.Text = message, logger);
             var dependencyInstaller = new DependencyAutoInstaller(httpClient, new DependencyReceiptStore(logger), logger);
             installedPath = await new NativeGameInstaller(dependencyInstaller).InstallAsync(mod.Game,
-                selected.Dependency, parent, host);
+                selected.Dependency, destination, host);
             await new ConfigService(logger).UpdateAsync(config =>
             {
                 config.KnownGameOverrides[mod.Game.GameId] = installedPath;
