@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace AccessibilityModManager.Core.Models;
 
 /// <summary>
@@ -10,6 +12,12 @@ public sealed class GameDefinition
     public string? ModName { get; init; }
     public string? Description { get; init; }
     public string? SteamAppId { get; init; }
+    /// <summary>Linux-only override for Steam detection and launching; Windows ignores it.</summary>
+    public string? LinuxSteamAppId { get; init; }
+    [JsonIgnore]
+    public string? EffectiveSteamAppId => GetSteamAppId(OperatingSystem.IsLinux());
+    public string? GetSteamAppId(bool linux) => linux && !string.IsNullOrWhiteSpace(LinuxSteamAppId)
+        ? LinuxSteamAppId : SteamAppId;
     public string? ExeName { get; init; }
     /// <summary>Native Linux executable, when the Steam game also has a Linux build.</summary>
     public string? LinuxExeName { get; init; }

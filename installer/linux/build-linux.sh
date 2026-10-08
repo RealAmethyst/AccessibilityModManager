@@ -22,6 +22,7 @@ trap 'rm -rf -- "$stage"' EXIT
     --configuration Release --runtime linux-x64 --self-contained true \
     --output "$stage/author" --verbosity quiet
 DOTNET_BIN="$dotnet_bin" "$project_root/installer/linux/build-avalonia-atspi.sh" "$stage/manager"
+DOTNET_BIN="$dotnet_bin" bash "$project_root/installer/linux/build-xivlauncher.sh" "$stage/manager"
 cp -- "$stage/manager/Avalonia.FreeDesktop.AtSpi.dll" "$stage/author/Avalonia.FreeDesktop.AtSpi.dll"
 cp -a -- "$stage/manager/third-party" "$stage/author/third-party"
 "$cc_bin" -std=c11 -O2 -Wall -Wextra -Werror \

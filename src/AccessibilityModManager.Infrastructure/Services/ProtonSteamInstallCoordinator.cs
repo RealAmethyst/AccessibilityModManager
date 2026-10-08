@@ -62,23 +62,23 @@ public sealed class ProtonSteamInstallCoordinator(
         if (!File.Exists(protonExecutable))
             throw new InvalidOperationException("The selected Proton executable is missing.");
         // Parse the account settings before installing any Windows runtime in the prefix.
-        await steamConfig.ReadLaunchOptionsAsync(game.Game.SteamAppId!, ct);
+        await steamConfig.ReadLaunchOptionsAsync(game.Game.EffectiveSteamAppId!, ct);
         using var gameLock = LockGame(game, release.PluginId);
         var setupPath = SetupPath(game.Game.GameId, release.PluginId);
         if (File.Exists(setupPath))
             throw new InvalidOperationException("A Proton setup record already exists. Complete or uninstall it before another install.");
-        var otherOwner = ProtonSteamSetupLookup.Find(setupRoot, game.Game.SteamAppId!, game.InstallPath)
+        var otherOwner = ProtonSteamSetupLookup.Find(setupRoot, game.Game.EffectiveSteamAppId!, game.InstallPath)
             .FirstOrDefault(state => state.GameId != game.Game.GameId || state.PluginId != release.PluginId);
         if (otherOwner is not null)
             throw new InvalidOperationException(
-                $"Steam game {game.Game.SteamAppId} already has a mod launch setup owned by " +
+                $"Steam game {game.Game.EffectiveSteamAppId} already has a mod launch setup owned by " +
                 $"{otherOwner.PluginId}/{otherOwner.GameId}. Resolve that installation before adding another setup.");
         if (await receipts.LoadAsync(game.Game.GameId, release.PluginId) is not null)
             throw new InvalidOperationException("This mod already has an install receipt. Use update or uninstall.");
 
         using var package = await packageInspector.PrepareAsync(packagePath, release, ct);
         var launch = package.Manifest.ProtonLaunch!;
-        if (launch.SteamAppId != game.Game.SteamAppId ||
+        if (launch.SteamAppId != game.Game.EffectiveSteamAppId ||
             launch.GameExecutable != game.Game.ExeName!.Replace('\\', '/'))
             throw new InvalidDataException("The package's Steam App ID or game executable differs from the detected game.");
         if (!launch.WineDllProxyFromDependency) VerifyInstalledProxy(game, launch);
@@ -86,14 +86,14 @@ public sealed class ProtonSteamInstallCoordinator(
         {
             var compatPath = Path.GetDirectoryName(game.ProtonPrefixPath!)!;
             await runtime.EnsureAsync(new ProtonContext(protonExecutable, game.SteamRootPath!,
-                compatPath, game.Game.SteamAppId!), requiredVersion,
+                compatPath, game.Game.EffectiveSteamAppId!), requiredVersion,
                 launch.WindowsDesktopRuntimeSha512 ?? ProtonWindowsDesktopRuntime.InstallerSha512, ct);
         }
         if (package.RequiredVisualCppRuntimes != VisualCppArchitecture.None)
         {
             var compatPath = Path.GetDirectoryName(game.ProtonPrefixPath!)!;
             await visualCppRuntime.EnsureAsync(new ProtonContext(protonExecutable, game.SteamRootPath!,
-                compatPath, game.Game.SteamAppId!), package.RequiredVisualCppRuntimes, ct);
+                compatPath, game.Game.EffectiveSteamAppId!), package.RequiredVisualCppRuntimes, ct);
         }
 
         var installed = false;
@@ -105,17 +105,17 @@ public sealed class ProtonSteamInstallCoordinator(
             if (launch.WineDllProxyFromDependency) VerifyInstalledProxy(game, launch);
 
             var gameExe = PathSafety.CombineContained(game.InstallPath, game.Game.ExeName!.Replace('\\', '/'));
-            var plan = await steamConfig.PlanAsync(game.Game.SteamAppId!, wrapperPath,
+            var plan = await steamConfig.PlanAsync(game.Game.EffectiveSteamAppId!, wrapperPath,
                 gameExe, game.InstallPath, launch, ct);
             var reloadedFiles = launch.ReloadedRoot is null
                 ? new List<OwnedProtonConfigFile>()
                 : ProtonReloadedConfig.Plan(game, launch).ToList();
             var state = new ProtonSteamSetupState(
                 game.Game.GameId, release.PluginId, release.Version, game.InstallPath,
-                game.Game.SteamAppId!, game.ProtonPrefixPath!, plan, reloadedFiles);
+                game.Game.EffectiveSteamAppId!, game.ProtonPrefixPath!, plan, reloadedFiles);
             await SaveStateAsync(setupPath, state);
             ProtonReloadedConfig.Apply(game, state.ReloadedFiles);
-            await steamConfig.InstallAsync(game.Game.SteamAppId!, plan, ct);
+            await steamConfig.InstallAsync(game.Game.EffectiveSteamAppId!, plan, ct);
             logger.Information("Proton Steam setup complete for {PluginId}/{GameId}",
                 release.PluginId, game.Game.GameId);
         }
@@ -239,7 +239,7 @@ public sealed class ProtonSteamInstallCoordinator(
     {
         if (!OperatingSystem.IsLinux() || ReleaseTarget.Normalize(release.TargetPlatform) != ReleaseTarget.Proton ||
             game.Game.GameId != release.GameId || game.PluginId != release.PluginId ||
-            string.IsNullOrWhiteSpace(game.Game.SteamAppId) || !game.Game.SteamAppId.All(char.IsAsciiDigit) ||
+            string.IsNullOrWhiteSpace(game.Game.EffectiveSteamAppId) || !game.Game.EffectiveSteamAppId.All(char.IsAsciiDigit) ||
             string.IsNullOrWhiteSpace(game.Game.ExeName) ||
             string.IsNullOrWhiteSpace(game.SteamRootPath) || !Directory.Exists(game.SteamRootPath) ||
             string.IsNullOrWhiteSpace(game.ProtonPrefixPath) || !Directory.Exists(game.ProtonPrefixPath))
@@ -307,7 +307,7 @@ public sealed class ProtonSteamInstallCoordinator(
         var state = JsonSerializer.Deserialize<ProtonSteamSetupState>(wrapped.Payload, JsonOptions)
             ?? throw new InvalidDataException("Proton setup record has no data.");
         if (state.GameId != game.Game.GameId || state.PluginId != pluginId ||
-            state.SteamAppId != game.Game.SteamAppId || state.InstallPath != game.InstallPath ||
+            state.SteamAppId != game.Game.EffectiveSteamAppId || state.InstallPath != game.InstallPath ||
             state.ProtonPrefixPath != game.ProtonPrefixPath)
             throw new InvalidDataException("Proton setup record belongs to a different game installation.");
         return state;

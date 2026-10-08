@@ -57,7 +57,7 @@ internal sealed class MainWindow : Window
     private HashSet<string> selectedLanguages = [];
     private HashSet<string> selectedAuthors = [];
 
-    public MainWindow(string[]? arguments = null)
+    public MainWindow()
     {
         patreon = new PatreonService(
             new PatreonClient(httpClient, PatreonAppRegistry.Manager, logger),
@@ -104,8 +104,6 @@ internal sealed class MainWindow : Window
             }
             UpdatePatreonControls();
             await RefreshModsAsync(focusList: true);
-            if (arguments is ["--updated"])
-                await ShowTextDialogAsync("Manager updated", "The manager update is installed. Your settings and installed mods were kept.");
             _ = CheckManagerUpdateAsync(false);
         };
         Closed += (_, _) => httpClient.Dispose();
@@ -754,7 +752,7 @@ internal sealed class MainWindow : Window
             root.Children.Add(new TextBlock { Text = "Install path: " + mod.Install.InstallPath,
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap });
             if ((mod.InstalledVersion is not null || mod.OtherSetup is not null) &&
-                (!string.IsNullOrWhiteSpace(mod.Game.SteamAppId) ||
+                (!string.IsNullOrWhiteSpace(mod.Game.EffectiveSteamAppId) ||
                  mod.InstalledTarget == ReleaseTarget.Linux))
             {
                 var play = new Button { Content = "Play" };
@@ -863,6 +861,32 @@ internal sealed class MainWindow : Window
         activeDetailsStatus = detailsStatus;
         root.Children.Add(detailsStatus);
 
+        if (mod.InstalledTarget == ReleaseTarget.XivLauncher && mod.Install?.SteamRootPath is { } xivSteam)
+        {
+            var loginSettings = new Button { Content = "XIVLauncher login settings" };
+            loginSettings.Click += async (_, _) =>
+            {
+                if (busy) return;
+                busy = true;
+                loginSettings.IsEnabled = false;
+                try
+                {
+                    detailsStatus.Text = "Preparing the accessible XIVLauncher.";
+                    await Task.Run(() => new LinuxModInstaller(httpClient, logger).CreateXivLauncherSetup().EnsureReadyAsync(mod.Install));
+                    var executable = Path.Combine(XlmInstaller.ToolDirectory(xivSteam), "xlcore", "XIVLauncher.Core");
+                    Process.Start(new ProcessStartInfo(executable)
+                    {
+                        UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(executable)!,
+                        ArgumentList = { "--login-settings" }
+                    });
+                    detailsStatus.Text = "XIVLauncher login settings opened. Play the game from Steam after saving.";
+                }
+                catch (Exception ex) { detailsStatus.Text = ex.Message; }
+                finally { busy = false; loginSettings.IsEnabled = true; }
+            };
+            gameActions.Children.Insert(Math.Min(1, gameActions.Children.Count), loginSettings);
+        }
+
         void UpdateReleases()
         {
             var chosenChannel = channelChoice.SelectedItem as string;
@@ -882,14 +906,14 @@ internal sealed class MainWindow : Window
             install.IsEnabled = release is not null && reason is null && mod.InstalledVersion is null;
             uninstall.IsVisible = mod.InstalledVersion is not null;
             uninstall.IsEnabled = mod.InstalledVersion is not null &&
-                (mod.InstalledTarget == ReleaseTarget.Linux || mod.OwnSetup is not null);
+                (mod.InstalledTarget is ReleaseTarget.Linux or ReleaseTarget.XivLauncher || mod.OwnSetup is not null);
             update.IsVisible = mod.InstalledVersion is not null && release is not null &&
                 VersionComparer.Instance.Compare(release.Version, mod.InstalledVersion) != 0;
             update.IsEnabled = update.IsVisible && reason is null &&
                 ReleaseTarget.Normalize(mod.InstalledTarget) ==
-                (ReleaseTarget.ForRuntime(release?.TargetPlatform) == ReleaseTarget.Linux
-                    ? ReleaseTarget.Linux : ReleaseTarget.Proton) &&
-                (mod.InstalledTarget == ReleaseTarget.Linux || mod.OwnSetup is not null);
+                (ReleaseTarget.ForRuntime(release?.TargetPlatform) is ReleaseTarget.Linux or ReleaseTarget.XivLauncher
+                    ? ReleaseTarget.ForRuntime(release?.TargetPlatform) : ReleaseTarget.Proton) &&
+                (mod.InstalledTarget is ReleaseTarget.Linux or ReleaseTarget.XivLauncher || mod.OwnSetup is not null);
             update.Content = release is not null && mod.InstalledVersion is not null &&
                 VersionComparer.Instance.Compare(release.Version, mod.InstalledVersion) < 0
                     ? "Downgrade" : "Update";
@@ -926,6 +950,17 @@ internal sealed class MainWindow : Window
     {
         if (mod.Install is null) return "Choose the game's installation folder first.";
         var target = ReleaseTarget.ForRuntime(release.TargetPlatform);
+        if (target == ReleaseTarget.XivLauncher)
+        {
+            if (mod.OwnSetup is not null || mod.OtherSetup is not null)
+                return "Remove the existing Proton launch setup before installing XIVLauncher.";
+            if (!mod.Game.Dependencies.Any(d => d.Fix?.Xlm is not null))
+                return "The author needs to add the XIVLauncher on Linux (XLM) dependency.";
+            try { _ = XivLauncherPaths.Resolve(mod.Install); return null; }
+            catch (Exception ex) when (ex is InvalidOperationException or PlatformNotSupportedException) { return ex.Message; }
+        }
+        if (target == ReleaseTarget.Windows && mod.Game.Dependencies.Any(d => d.Fix?.Xlm is not null))
+            return "Choose an XIVLauncher on Linux release. This Windows package uses a different launcher setup.";
         if (target == ReleaseTarget.Linux)
         {
             if (string.IsNullOrWhiteSpace(mod.Game.LinuxExeName))
@@ -934,7 +969,7 @@ internal sealed class MainWindow : Window
                 mod.Game.LinuxExeName.Replace('\\', '/'));
             return File.Exists(executable) ? null : "The native Linux executable is missing from this game folder.";
         }
-        if (string.IsNullOrWhiteSpace(mod.Game.SteamAppId) || mod.Install.SteamRootPath is null)
+        if (string.IsNullOrWhiteSpace(mod.Game.EffectiveSteamAppId) || mod.Install.SteamRootPath is null)
             return "This Windows release needs a game detected through Steam for Proton setup.";
         if (mod.Install.ProtonPrefixPath is null)
             return "Launch the game once through Steam with Proton, then refresh Mods.";
@@ -1054,7 +1089,17 @@ internal sealed class MainWindow : Window
             }
             SteamAccountConfig? account = null;
             string? proton = null;
-            if (ReleaseTarget.ForRuntime(release.TargetPlatform) != ReleaseTarget.Linux)
+            if (release.TargetPlatform == ReleaseTarget.XivLauncher)
+            {
+                account = await ChooseXivAccountAsync(mod);
+                if (account is null) return;
+                if (!await ConfirmationDialog.ShowAsync(this, "Set up XIVLauncher",
+                        "Install this plugin and XIVLauncher's Steam compatibility tool? The manager will select XLCore [XLM], " +
+                        "replace this game's Steam launch options with its speech setup, and register the plugin in XIVLauncher. " +
+                        "Your previous Steam settings will be saved for uninstall. XLM is shared and will remain installed after removing the mod.", "Install and configure")) return;
+                if (!await EnsureSteamClosedAsync(mod)) return;
+            }
+            else if (ReleaseTarget.ForRuntime(release.TargetPlatform) != ReleaseTarget.Linux)
             {
                 var selection = await ChooseSetupAsync(mod);
                 if (selection is null) return;
@@ -1069,7 +1114,7 @@ internal sealed class MainWindow : Window
             var progress = new Progress<ProgressInfo>(step =>
             {
                 downloadProgress.Value = step.Percentage;
-                if (step.StatusText.StartsWith("Preparing the verified", StringComparison.Ordinal))
+                if (release.TargetPlatform == ReleaseTarget.XivLauncher || step.StatusText.StartsWith("Preparing the verified", StringComparison.Ordinal))
                 {
                     detailsStatus.Text = step.StatusText;
                     return;
@@ -1084,7 +1129,9 @@ internal sealed class MainWindow : Window
                 account, proton, update, host,
                 patreon, localPackagePath, progress);
             downloadProgress.IsVisible = false;
-            var playInstruction = mod.Game.SteamAppId is not null
+            var playInstruction = release.TargetPlatform == ReleaseTarget.XivLauncher
+                ? "Reopen Steam and press Play for FINAL FANTASY XIV Online. XIVLauncher will complete its first-time setup."
+                : mod.Game.EffectiveSteamAppId is not null
                 ? "Press Play in Steam to check this mod."
                 : "Launch the native game to check this mod.";
             await UpdateInstalledStateAsync(mod, update
@@ -1103,7 +1150,11 @@ internal sealed class MainWindow : Window
         {
             SteamAccountConfig? account = null;
             string? proton = null;
-            if (mod.InstalledTarget != ReleaseTarget.Linux)
+            if (mod.InstalledTarget == ReleaseTarget.XivLauncher)
+            {
+                if (!await EnsureSteamClosedAsync(mod)) return;
+            }
+            else if (mod.InstalledTarget != ReleaseTarget.Linux)
             {
                 var selection = await ChooseSetupAsync(mod);
                 if (selection is null) return;
@@ -1126,7 +1177,7 @@ internal sealed class MainWindow : Window
     {
         if (!SteamShutdownService.IsSteamRunning()) return true;
         if (!await ConfirmationDialog.ShowAsync(this, "Close Steam?",
-                "The manager needs Steam closed while it changes this game's launch options. " +
+                "The manager needs Steam closed while it changes this game's launch settings. " +
                 "Close any running Steam game first. Should the manager ask Steam to close, " +
                 "then continue automatically? You can reopen Steam when the operation finishes.",
                 "Close Steam and continue")) return false;
@@ -1172,11 +1223,11 @@ internal sealed class MainWindow : Window
     {
         if (catalog is null) return;
         var receipt = await new ReceiptStore(logger).LoadAsync(mod.Game.GameId, mod.Author.Id);
-        var setups = mod.Install is null || string.IsNullOrWhiteSpace(mod.Game.SteamAppId)
+        var setups = mod.Install is null || string.IsNullOrWhiteSpace(mod.Game.EffectiveSteamAppId)
             ? [] : ProtonSteamSetupLookup.Find(Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "AccessibilityModManager", "proton-setups"),
-                mod.Game.SteamAppId, mod.Install.InstallPath);
+                mod.Game.EffectiveSteamAppId, mod.Install.InstallPath);
         var ownSetup = setups.FirstOrDefault(state =>
             state.GameId == mod.Game.GameId && state.PluginId == mod.Author.Id);
         var updated = mod with
@@ -1270,6 +1321,16 @@ internal sealed class MainWindow : Window
             ShowModDetails(updated, detailsFromAuthor, "Game or emulator installed. You can now install a compatible mod release.");
     }
 
+    private async Task<SteamAccountConfig?> ChooseXivAccountAsync(LinuxModEntry mod)
+    {
+        if (mod.Install is null) throw new InvalidOperationException("Install FINAL FANTASY XIV Online through Steam first.");
+        _ = XivLauncherPaths.Resolve(mod.Install);
+        var accounts = LinuxModInstaller.FindAccounts(mod.Install);
+        if (accounts.Count == 0) throw new InvalidOperationException("No Steam account settings were found. Open Steam once first.");
+        return accounts.Count == 1 ? accounts[0] : await ChoiceDialog.ChooseAsync(this,
+            "Steam account", "Choose the Steam account you use for XIV.", accounts);
+    }
+
     private async Task<(SteamAccountConfig Account, string Proton)?> ChooseSetupAsync(LinuxModEntry mod)
     {
         if (mod.Install is null)
@@ -1308,7 +1369,9 @@ internal sealed class MainWindow : Window
         {
             var status = activeDetailsStatus ?? modsStatus;
             var catalogNotice = "";
-            if (mod.Game.Dependencies.Any(dep => dep.Fix?.AutoInstall is not null))
+            if (mod.InstalledTarget == ReleaseTarget.XivLauncher)
+                await new LinuxModInstaller(httpClient, logger).CreateXivLauncherSetup().EnsureReadyAsync(mod.Install);
+            else if (mod.Game.Dependencies.Any(dep => dep.Fix?.AutoInstall is not null))
             {
                 status.Text = "Checking for dependency updates...";
                 var updater = new DependencyUpdates(new DependencyAutoInstaller(httpClient, new DependencyReceiptStore(logger), logger), logger);
@@ -1347,7 +1410,7 @@ internal sealed class MainWindow : Window
 
     private static void PlayGame(LinuxModEntry mod)
     {
-        if (mod.Game.SteamAppId is { } appId && appId.All(char.IsAsciiDigit))
+        if (mod.Game.EffectiveSteamAppId is { } appId && appId.All(char.IsAsciiDigit))
         {
             Process.Start(new ProcessStartInfo("xdg-open", $"steam://rungameid/{appId}")
                 { UseShellExecute = false });

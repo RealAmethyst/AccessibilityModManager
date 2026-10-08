@@ -22,6 +22,16 @@ public sealed class GameVerifier : IGameVerifier
             return false;
         }
 
+        // Steam initially installs XIV's boot launcher and game directory. XIVLauncher
+        // downloads the game client later, so ffxiv_dx11.exe is not a setup prerequisite.
+        if (OperatingSystem.IsLinux() && game.Dependencies.Any(d => d.Fix?.Xlm is not null))
+        {
+            var verified = SafeFolderExists(path, "game") && SafeFileExists(path, "boot/ffxivboot.exe");
+            if (!verified)
+                _logger.Debug("{Game}: XIV's boot launcher or game directory is missing at {Path}", game.DisplayName, path);
+            return verified;
+        }
+
         // A Steam game may have both Windows and native Linux depots. Either executable can
         // establish the install directory; the chosen release is checked again before install.
         var executableNames = OperatingSystem.IsLinux()

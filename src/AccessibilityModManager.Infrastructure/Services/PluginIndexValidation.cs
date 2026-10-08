@@ -87,6 +87,9 @@ public static class PluginIndexValidation
         foreach (var game in index.Games)
         {
             CollectIdError(trustErrors, game.GameId, $"plugin '{pluginId}' game id");
+            if (game.LinuxSteamAppId is { } linuxSteamId &&
+                (string.IsNullOrWhiteSpace(linuxSteamId) || !linuxSteamId.All(char.IsAsciiDigit)))
+                authoring.Add($"Game '{game.GameId}' has an invalid Linux Steam App ID. Use digits only or leave it empty.");
             foreach (var dep in game.Dependencies)
             {
                 CollectIdError(trustErrors, dep.Id, $"plugin '{pluginId}' dependency id");
@@ -125,12 +128,12 @@ public static class PluginIndexValidation
                 try
                 {
                     ReleaseTarget.Normalize(release.TargetPlatform);
+                    ReleasePackages.Validate(release);
                 }
-                catch (InvalidOperationException)
+                catch (InvalidOperationException ex)
                 {
                     unobtainable.Add(
-                        $"Release {pluginId}/{gameId}/{release.Version} has an unknown targetPlatform. " +
-                        "Use windows, proton, linux, or windows-linux.");
+                        $"Release {pluginId}/{gameId}/{release.Version} has invalid package settings: {ex.Message}");
                     dropped.Add(release);
                     continue;
                 }

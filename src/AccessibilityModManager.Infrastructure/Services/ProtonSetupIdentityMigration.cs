@@ -21,7 +21,7 @@ public sealed class ProtonSetupIdentityMigration(string setupRoot, ReceiptStore 
         var pluginId = game.PluginId;
         var newId = game.Game.GameId;
         if (existing.GameId == newId || existing.PluginId != pluginId ||
-            existing.SteamAppId != game.Game.SteamAppId ||
+            existing.SteamAppId != game.Game.EffectiveSteamAppId ||
             existing.InstallPath != game.InstallPath ||
             existing.ProtonPrefixPath != game.ProtonPrefixPath)
             throw new InvalidOperationException("The existing setup does not match this author and Steam installation.");

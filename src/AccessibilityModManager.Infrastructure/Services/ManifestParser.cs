@@ -42,6 +42,7 @@ public sealed class ManifestParser
 
         ReleaseTarget.Normalize(manifest.TargetPlatform);
         ValidateProtonLaunch(manifest);
+        ValidateXivLauncher(manifest);
 
         if (manifest.TargetPlatform == ReleaseTarget.WindowsLinux &&
             (manifest.PreInstall is not null || manifest.PostInstall is not null || manifest.PostUninstall is not null))
@@ -63,6 +64,27 @@ public sealed class ManifestParser
             manifest.PluginId, manifest.GameId, manifest.ModVersion);
 
         return manifest;
+    }
+
+    private static void ValidateXivLauncher(Manifest manifest)
+    {
+        if (ReleaseTarget.Normalize(manifest.TargetPlatform) != ReleaseTarget.XivLauncher)
+        {
+            if (manifest.XivLauncher is not null)
+                throw new InvalidOperationException("xivLauncher requires targetPlatform 'xivlauncher'.");
+            return;
+        }
+        var launch = manifest.XivLauncher ?? throw new InvalidOperationException("An XIVLauncher package needs xivLauncher metadata.");
+        RequirePortableRelativePath(launch.PluginAssembly, "xivLauncher.pluginAssembly");
+        if (!launch.PluginAssembly.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(launch.InternalName) ||
+            launch.InternalName.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '_' or '-')) ||
+            !Guid.TryParse(launch.WorkingPluginId, out var id) || id == Guid.Empty)
+            throw new InvalidOperationException("XIVLauncher needs a plugin DLL, internal name, and non-empty stable plugin GUID.");
+        if (launch.BridgeDirectory is not null)
+            RequirePortableRelativePath(launch.BridgeDirectory, "xivLauncher.bridgeDirectory");
+        if (manifest.PreInstall is not null || manifest.PostInstall is not null || manifest.PostUninstall is not null)
+            throw new InvalidOperationException("XIVLauncher packages use managed plugin registration, without lifecycle scripts.");
     }
 
     private static void ValidateProtonLaunch(Manifest manifest)

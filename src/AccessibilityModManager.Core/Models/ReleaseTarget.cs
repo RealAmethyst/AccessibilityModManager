@@ -10,6 +10,7 @@ public static class ReleaseTarget
     public const string Windows = "windows";
     public const string Proton = "proton";
     public const string Linux = "linux";
+    public const string XivLauncher = "xivlauncher";
     public const string WindowsLinux = "windows-linux";
 
     public static string Normalize(string? target)
@@ -17,7 +18,7 @@ public static class ReleaseTarget
         if (target is null) return Windows;
         return target switch
         {
-            Windows or Proton or Linux or WindowsLinux => target,
+            Windows or Proton or Linux or WindowsLinux or XivLauncher => target,
             _ => throw new InvalidOperationException($"Unknown release target '{target}'.")
         };
     }
@@ -34,6 +35,7 @@ public static class ReleaseTarget
 
     public static string DisplayName(string? target) => Normalize(target) switch
     {
+        XivLauncher => "XIVLauncher on Linux",
         WindowsLinux => "Windows and native Linux",
         Windows => "Windows",
         Linux => "Native Linux",
@@ -52,6 +54,6 @@ public static class ReleaseTarget
     {
         var normalized = Normalize(target);
         return OperatingSystem.IsWindows() && normalized is Windows or WindowsLinux ||
-               OperatingSystem.IsLinux() && normalized is Proton or Linux or WindowsLinux;
+               OperatingSystem.IsLinux() && normalized is Proton or Linux or WindowsLinux or XivLauncher;
     }
 }

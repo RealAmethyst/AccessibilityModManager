@@ -38,7 +38,7 @@ internal static class Program
                     close.Click += (_, _) => window.Close();
                     window.Opened += (_, _) => body.Focus();
                 }
-                else window = new MainWindow(args);
+                else window = new MainWindow();
                 window.Show();
                 app.Run(window);
             }, args);

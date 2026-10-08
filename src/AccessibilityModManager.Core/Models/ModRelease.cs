@@ -13,6 +13,9 @@ public sealed class ModRelease
     /// <summary>"windows", "proton", "linux", or shared "windows-linux". Absent means Windows.</summary>
     public string? TargetPlatform { get; init; }
 
+    /// <summary>Optional distinct Linux payload for this same version, notes and audience.</summary>
+    public ReleasePackage? LinuxPackage { get; init; }
+
     /// <summary>
     /// Public HTTPS URL for the wrapped ZIP. Set on every public release. <c>null</c> when
     /// <see cref="Patreon"/> is set instead — the manager fetches the asset from Patreon's
@@ -43,6 +46,14 @@ public sealed class ModRelease
     // Used by the Version ComboBox's SelectedItem announcement and anywhere else that falls back
     // to ToString. Without this override the screen reader would say the type's full name.
     public override string ToString() => Version;
+}
+
+public sealed class ReleasePackage
+{
+    public required string TargetPlatform { get; init; }
+    /// <summary>Download location; access is inherited from the containing release's Patreon gate.</summary>
+    public required Uri PackageUrl { get; init; }
+    public required string Sha256 { get; init; }
 }
 
 public sealed class CompatibilityInfo

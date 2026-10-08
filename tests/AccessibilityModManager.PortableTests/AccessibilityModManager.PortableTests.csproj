@@ -16,5 +16,6 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <Content Include="Fixtures/prism-0.18.3.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

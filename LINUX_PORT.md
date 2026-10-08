@@ -74,8 +74,8 @@ peers. Actual Orca speech remains a manual check.
 
 ## Manager updates and release packaging
 
-Manager 1.19.0 checks the latest stable GitHub release at startup and from Settings.
-The Windows and Linux manager project versions stay synchronized. Each platform
+The manager checks the latest stable GitHub release at startup and from Settings.
+Each platform's project version identifies its packaged build. Each platform
 requires its exact versioned manager asset and matching SHA-256 file; no fallback
 to another platform or to the AuthorTool is allowed. The existing Windows updater's
 Setup.exe suffix already excluded Linux archives; the new selection also prevents
@@ -84,7 +84,8 @@ mixing unrelated installers and checksum files from one release.
 After confirmation, Linux downloads and verifies the archive, rejects unsafe tar
 paths and links, and starts its installer from the extracted package. The helper
 waits for the old manager to exit, backs up and replaces the application, updates
-the menu entry, then restarts it. Failed replacements roll back. Settings, sign-ins,
+the menu entry, then restarts it without a success popup. Failed replacements roll back
+and report an error. Settings, sign-ins,
 mod receipts and game folders remain outside the replaced directory. Portable
 copies need one install.sh installation before in-app updates can be applied.
 The AuthorTool has a separate manual installation archive.
@@ -94,7 +95,9 @@ assets, download corruption, fresh installation, preserved data, backup and roll
 archive traversal and links, and the wait/install/relaunch handoff. Both actual
 release archives passed first-install and upgrade checks in isolated user directories;
 their desktop entries pass desktop-file-validate. Actual Orca announcements and the
-Windows installer/UI still need manual checks. See [release packaging](installer/README.md).
+Windows installer/UI still need manual checks. Amethyst confirmed the Linux auto-update
+to 2.0.2 on 2026-10-08; the popup removal in 2.0.3 still needs her UI check.
+See [release packaging](installer/README.md).
 
 ## Build and install on CachyOS GNOME
 
@@ -202,7 +205,7 @@ The local `todo.md` is the current screen-reader-friendly checklist. It is ignor
 
 - Test the published Time Stranger 1.1 release in game; its DLL differs from the working pilot. Check the published Next Order and Master Duel releases in their real games, and check Survive's installed release in game and on uninstall.
 - Check Cyber Sleuth's original `freetype.dll`, Steam option and unmodded launch after a later live removal. The disposable uninstall passed, and the installed published mod is confirmed working.
-- Support and test a real native Linux package, XIVLauncher's separate Wine route, and a reversible Proton equivalent of Final Fantasy X's Windows title chooser and Large Address Aware installer.
+- Test a real native Linux package and XIVLauncher's separate Wine route, and support a reversible Proton equivalent of Final Fantasy X's Windows title chooser and Large Address Aware installer.
 - With Orca, check first-focus speech for the mod detail controls and closed version selector, the Authors page and a user-added source, and the Linux AuthorTool's editing and package-building controls. Test another entitled release. With NVDA, check the changed Windows UIs before a public cross-platform manager release.
 - When ready to publish a real release, exercise Linux GitHub sign-in, AuthorTool upload, index publication and post-publish download checks. Evaluate the download server's signed-catalog refresh delay without weakening signature verification.
 - For each new Windows loader, lifecycle script or Prism DLL, verify its actual behavior and add a targeted Proton adapter or explicit package. Unknown setup behavior must continue to fail closed. Dynamically loaded Visual C++ dependencies need an explicit prerequisite because PE import inspection cannot find them.
@@ -244,3 +247,237 @@ the prior files and receipt before launch. Loader updates retain a recovery reco
 an interrupted loader transaction blocks launch until recovery. The Windows manager uses the
 same updater and comparison logic. Initial installs from older managers lack emulator download
 records and therefore need a one-time update to establish them.
+
+
+## XIVLauncher through native Steam
+
+The `xivlauncher` release target uses XLM rather than the ordinary Proton launch wrapper.
+It currently supports native Steam on Linux x64, with the full game (39210) or free trial
+(312060). Flatpak Steam is refused explicitly until its sandbox paths and speech access
+have been verified. Installing this setup never starts the launcher or game.
+
+The game's optional `linuxSteamAppId` overrides `steamAppId` for Linux detection and
+Play. Windows ignores it. Set 39210 for Amethyst's full-game entry, keeping the Windows
+XIVLauncher executable and registry detection. Add the **XIVLauncher on Linux (XLM)**
+dependency preset. Its executable is pinned to XLM 0.4.0, SHA-256
+`b839f633b5ae4cea65346e51a0d89d5c2cf6e93e3fc1f46de75d3e3081628691`.
+The manager runs the documented `install-steam-tool` command with captured output,
+checks its result, and displays ordinary progress messages and errors. A complete existing
+XLM installation is reused. XLM's shared installation remains after removing the mod.
+
+Detection accepts Steam's initial launcher installation: `boot/ffxivboot.exe` and the
+`game` directory must exist, but `game/ffxiv_dx11.exe` is downloaded later by XIVLauncher
+and is not required to configure the mod. Steam's installed-state check still applies.
+
+While Steam and XIVLauncher are closed, setup records the selected account's prior launch
+options and the game's prior `CompatToolMapping` entry, then selects `xlm`. It installs
+the plugin under `~/.xlcore/devPlugins/amm/<author>/<game>` and registers its Windows
+path in Dalamud's dev-plugin locations, settings, and default profile. Existing unrelated
+settings are preserved. A new launcher profile receives the required typed JSON sections;
+an existing profile with an unsupported layout is refused. Existing Wine prefixes must
+have a verified Z-drive mapping to `/`. Steam launch options supply the package's Wine
+bridge directory while preserving any inherited `WINEDLLPATH`.
+
+A checksummed recovery journal is written before installation. Updates retain the same
+plugin identity and paths. Uninstall removes only the managed registration, restores the
+previous Steam choices, and uses the normal file receipt to remove or restore the payload.
+Concurrent settings edits are refused; backup files and interrupted-operation records are
+kept for recovery. Another managed owner of the same Steam app is refused.
+
+### Authoring an XIVLauncher package
+
+Use the built **plugin payload folder**, such as the `XivAccess` folder inside its normal
+release archive, rather than the folder containing the Windows installer. In the web dashboard
+at `https://accessibilitymods.com/owner/`, open the game, set its Linux Steam app ID and add
+the XLM dependency using its preset link. Edit the existing release, keep its Windows
+package, and enable **Use a separate Linux package for this version**. Choose
+**XIVLauncher on Linux (Steam)** as the Linux installation type and upload the plugin
+folder (or a ZIP with those files at its root) in the Linux package section. The XivAccess defaults are `XivAccess.dll`, internal name `XivAccess`,
+and stable plugin GUID `507b48de-3362-4471-86f4-baa7e56d9387`. The builder excludes the
+Windows lifecycle-script defaults for this target. The dashboard builds
+and hashes the package during Save draft; review and publish through the normal workflow.
+The Windows and Linux packages share one version/channel, release notes and Patreon
+audience. Existing Windows files stay unchanged when only the Linux upload is edited.
+A prepared ZIP must match the catalog game ID, author ID, and release version.
+
+Prism detection is automatic. A package with the verified original 0.17.3 DLL gets the
+existing version-three ABI compatibility DLL plus pinned Prism 0.18.3 and its Wine bridges.
+A package already using the verified 0.18.3 DLL gets the matching bridges without that
+adapter. The original source folder is unchanged. Other DLL builds fail with an explicit
+compatibility error rather than receiving a guessed bridge. Updating the mod itself does
+not require a new manager version; moving between these two supported Prism builds is
+also automatic. A future Prism ABI still needs compatibility verification.
+
+New manifest metadata is `xivLauncher` with `pluginAssembly`, `internalName`,
+`workingPluginId`, and optional `bridgeDirectory`. These paths are relative to the managed
+plugin payload, not the game depot. The XLM editor action is saved as optional `fix.xlm` metadata, with a known Linux-only
+dependency target. Older Windows readers ignore this metadata and continue installing the
+Windows releases. Updated managers apply it only to the `xivlauncher` workflow. An updated
+web dashboard build is needed to build and publish the new release target. The actual
+pre-change manager assemblies accepted a prospective catalog with this metadata, retained
+the Windows releases, and excluded XLM from Windows dependencies.
+
+### Source evidence and verification
+
+- [XLM 0.4.0 installer implementation](https://github.com/Blooym/xlm/blob/v0.4.0/src/commands/install_steam_tool.rs): tool files, `xlm` identity, installer flags and launch environment.
+- [XIVLauncher.Core Program](https://github.com/goatcorp/XIVLauncher.Core/blob/43529419497f9ce640669271a8b65b44501d1315/src/XIVLauncher.Core/Program.cs): `xlcore` storage, Steam game IDs, and separate `wineprefix`.
+- [UnixDalamudRunner](https://github.com/goatcorp/XIVLauncher.Core/blob/43529419497f9ce640669271a8b65b44501d1315/src/XIVLauncher.Common.Unix/UnixDalamudRunner.cs): converts configuration and plugin paths for the launcher-owned Wine prefix.
+- [Dalamud configuration](https://github.com/goatcorp/Dalamud/blob/67e514cac8e0861522acc4853f087024fd6d5d0e/Dalamud/Configuration/Internal/DalamudConfiguration.cs), dev-plugin settings and profile models were checked for the JSON registration fields and type names.
+- XivAccess `Speech/ScreenReader.cs` constructs a zeroed 256-byte configuration with version byte 3. `Speech/PrismInterop.cs` imports only entry points exported by the existing compatibility DLL. Its distribution setup defines the stable plugin GUID above.
+
+`XivLauncherTests` covers platform ID selection, Steam detection, typed registration,
+settings ownership, package integrity, automatic Prism recognition, install/update/removal,
+and interrupted setup recovery. Real game loading, controller behavior, audio, and speech
+through Steam remain manual tests; offline success does not establish those behaviors.
+
+
+The actual web folder-upload service built and validated a package from the existing XivAccess 0.258.0.0 release payload for
+catalog identity `amethyst/ffxiv`, with no mod-source or original-payload changes:
+`dist/xivlauncher/ffxiv-v0.258.0.0-xivlauncher-amm.zip`, SHA-256
+`c974074a2c5dff347bfa2800f09d72b0b862f21511a6fb31b417eb049db892d2`.
+A disposable Wine probe loaded that package's actual adapter and bridge using the
+XivAccess version-three configuration layout. It selected Orca; initialization returned
+`AlreadyInitialized` (15), an accepted success result in XivAccess's `SelectBackend`.
+The probe emitted no speech and did not start XIVLauncher or FFXIV. XLM 0.4.0's actual
+pinned executable also generated its four expected tool files in a temporary folder
+with exit code zero. Steam launch and in-game behavior remain untested.
+
+### Separate platform packages in one release
+
+`ModRelease.linuxPackage` optionally holds a Linux target, HTTPS download URL and SHA-256.
+The primary package remains readable by old Windows managers. `ReleasePackages.ForPlatform`
+selects the Linux payload before the Linux catalog presents versions; it carries over the
+same release identity, notes and access, and converts the Linux URL to a gated server URL
+when the parent is Patreon-restricted. It never exposes a public URL for a gated selection.
+The signed release claim includes both payloads under one version/channel identity.
+
+The dashboard edits the Linux payload independently, and the publisher/backup service
+iterate both physical packages. The download server lists only their exact signed URLs,
+inherits the common access, and renders Windows/Linux links under the same release.
+Removing the optional Linux package leaves the primary release intact and makes the old
+Linux URL unlisted. Existing `windows-linux` packages with identical files retain their
+single-package behavior. Adding a distinct Linux package requires the updated Linux manager;
+pre-change Windows assemblies verified a disposable signed two-package release and retained
+the original Windows URL/hash/version. Browser tests cover keyboard selection, independent
+uploads and notes-only saves; publishing tests cover signed identity, backup and shared gates.
+
+### Accessible XIVLauncher frontend
+
+Linux manager 2.0.4 bundles an Avalonia frontend for XIVLauncher.Core 1.4.0,
+pinned to `06c32980a75447fe0f15cdac30f8931f70d687e9` and shared-launcher commit
+`40ed6e93e7eb73e1c18f4d4871e05f32ab5fd2c6`. The original login, patching, Wine,
+Dalamud and game-lifetime controller remains in use. The ImGui window is replaced,
+not launched alongside it. Account metadata and automatic-login preferences use
+the native account/configuration files; remembered passwords use the native desktop
+keyring. There is no manager credential copy or end-of-session settings restoration.
+The frontend refuses a concurrent launcher/game session and holds a session lock.
+
+`installer/linux/build-xivlauncher.sh` builds and tests the pinned sources, includes
+corresponding source and notices, and reuses the manager's patched AT-SPI bridge.
+The bundle includes XLM's pinned aria2c downloader. Installation verifies each file,
+preserves the previous `xlcore` directory under XLM's `amm-backups`, and installs an
+owned prelaunch hook. The hook disables upstream frontend replacement; frontend
+updates arrive with manager builds. Native game, Wine and Dalamud updating remains
+enabled. XLM 0.4.0 still requests release metadata even with its update bypass set.
+
+Steam Play opens the accessible form, or skips it for remembered automatic login.
+One-time passwords use an accessible dialog. The manager's **XIVLauncher login settings**
+button opens settings without authenticating or starting the game. Dalamud readiness
+is required before game launch because the accessibility plugin needs it.
+
+The original bundled SDL 3.2.12 failed to create a Wayland Vulkan swapchain on this
+machine (`VK_ERROR_SURFACE_LOST_KHR`). An isolated graphics probe reproduced this
+with the bundled library and passed with X11. Amethyst confirmed `SDL_VIDEO_DRIVER=x11`
+restored the original launcher window. Manager 2.0.5 removes this workaround from
+the owned hook because the accessible frontend uses Avalonia rather than SDL.
+Offline tests cover credentials, automatic login, labeled controls, OTP, bundle
+integrity and rollback. Real Orca interaction, authentication and in-game loading
+still require Amethyst's testing.
+
+### XIV Linux speech and password corrections (2.0.5)
+
+Amethyst confirmed native account login and game downloading work. The first game
+session loaded XivAccess 0.258.0.0 successfully, but its journal selected UIA rather
+than Orca. Dalamud's developer-plugin registration was valid. Wine-XIV 10.8 hides
+Wine exports by default (`make-HideWineExports-opt-out.mypatch`), whereas Prism
+0.18.3 requires `ntdll!wine_get_version` before enabling Linux speech bridges.
+
+An isolated PE probe using the installed DLLs and the actual managed Wine build
+failed to find a speech backend with its defaults. Setting `HideWineExports` to
+REG_SZ `N` at `HKCU\Software\Wine` in the disposable prefix made the same probe
+select Orca without emitting speech. Wine-staging 10.8 initializes this option
+using ntdll's filename, so the per-game AppDefaults key does not solve it. The
+2.0.5 frontend backed up that Wine registry key and applied this setting in
+XIVLauncher's own prefix. This workaround is superseded by the 2.0.6 correction
+below because exposing the version can affect the game's platform detection.
+
+The password textbox was visually masked, but Avalonia's AT-SPI bridge exposed its
+unmasked IValueProvider value and reported a normal entry role. The patched bridge
+now reports PasswordText and masks both text queries and accessible-value signals.
+A regression test covers the role, text, individual characters and changed values.
+This bridge is shared by the manager and accessible launcher (frontend revision 2).
+
+Source anchors: Wine-XIV repository commit
+`ae094d7ebe4088bcb3bc376504ad085ba0bee61e`,
+`wine-tkg-git/wine-tkg-userpatches/make-HideWineExports-opt-out.mypatch`;
+Wine-staging tag `v10.8`,
+`patches/ntdll-Hide_Wine_Exports/0001-ntdll-Add-support-for-hiding-wine-version-informatio.patch`;
+Prism tag `v0.18.3` commit `94329ebeccbaee7f70b3494a290c9dfaac0184ee`,
+`source/winelib_bridge.h` and `source/backends/orca.cpp`.
+
+### Platform-license regression investigation after 2.0.5
+
+Amethyst confirmed speech now works, but the game reports error 3109 at data-centre
+selection. Mog Station shows Standard (Steam), an active recurring subscription
+through October 26, 2026, for FINAL FANTASY XIV 1. Login logs show Steam app 39210,
+Steam service account true, fresh authentication (cache false), and playable true.
+Do not treat this as an expired subscription or require re-registering Steam keys.
+
+The 2.0.5 speech workaround sets HideWineExports=N. This is a strong regression
+candidate: Wine-XIV intentionally defaults to hiding exports, and historical FFXIV
+reports connect exposed Wine identity to Mac-platform detection and license errors.
+The isolated speech probe verified Orca discovery only; it did not verify game
+platform detection. The subsequent 2.0.6 test below confirmed the correction resolved this error.
+The correction should retain hidden Wine exports for the game and teach the speech
+integration to detect Wine without requiring the hidden version export. Simply
+reverting the registry setting would restore the original speech failure.
+
+Primary reports:
+https://github.com/ValveSoftware/Proton/issues/580#issuecomment-486224443
+https://github.com/ValveSoftware/Proton/issues/580#issuecomment-2007540163
+The 2024 official-launcher incident was later reported fixed upstream; these are
+historical evidence for the mechanism, not proof of a current upstream outage.
+Research compared the unmodified XLM launch environment and the original
+XIVLauncher Steam initialization/login flow; no omitted Steam initialization step
+was found. No live configuration was changed during this investigation.
+
+### Hidden Wine exports with working speech (2.0.6)
+
+The manager supplies a patched Prism 0.18.3 core that recognizes Wine through
+`kernel32!wine_get_unix_file_name` when `ntdll!wine_get_version` is hidden. The
+Wine-staging hiding patch filters only wine_get_version, wine_get_build_id and
+wine_get_host_version. Orca now uses the same detection as the other bridges.
+The pinned source, patch, licenses, build recipe and binary live under
+`Infrastructure/Assets/PrismWine`; corresponding source ships in third-party/prism-wine.
+The DLL uses statically linked C++ runtime support and only Linux speech backends.
+Windows suspend/resume callbacks are disabled in this Wine-only build.
+
+An isolated PE test against the actual Wine-XIV 10.8 and existing 0.17.3 adapter
+verified that wine_get_version is unavailable, wine_get_unix_file_name is available,
+and the patched core still selects Orca, without starting the game or emitting speech.
+Amethyst confirmed the installed 2.0.6 build works in-game without issues: speech
+remains functional and error 3109 is resolved. No mod release was republished.
+
+XivLauncherSpeechRepair updates only the known stock 0.18.3 core (standalone or
+behind the manager's exact 0.17.3 adapter), requires receipt ownership, rejects
+symlinks/unknown builds/running launchers, backs up the previous file, and replaces
+it atomically. It runs after mod installation/update and before Play or account
+settings. It does not require republishing an existing mod release. Frontend
+1.4.0-amm3 backs up Wine settings and sets HideWineExports=Y before game launch.
+The login-settings button follows Play immediately in the game-actions panel.
+
+The tested release is `dist/AccessibilityModManager-2.0.6-linux-x64.tar.gz`, SHA-256
+`6093597e1f807c6ffef6561d84bb0c31f10bde390963b97f4f552e9ea065dd9e`.
+Automated validation passed 166 portable, 8 Linux UI/AT-SPI, and 15 launcher tests.
+The installed frontend is 1.4.0-amm3; the previous manager, frontend and Prism core
+were retained in local backups.

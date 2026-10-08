@@ -15,7 +15,7 @@ public static class SteamGameExecutableResolver
     {
         if (!OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(install.Game.ExeName))
             return install;
-        if (string.IsNullOrWhiteSpace(install.Game.SteamAppId))
+        if (string.IsNullOrWhiteSpace(install.Game.EffectiveSteamAppId))
             throw new InvalidOperationException("This catalog game has no Steam App ID.");
 
         var directories = new[] { install.InstallPath }
@@ -43,7 +43,8 @@ public static class SteamGameExecutableResolver
         {
             GameId = original.GameId, DisplayName = original.DisplayName,
             ModName = original.ModName, Description = original.Description,
-            SteamAppId = original.SteamAppId,
+            SteamAppId = original.SteamAppId, LinuxSteamAppId = original.LinuxSteamAppId,
+            LinuxExeName = original.LinuxExeName, LinuxProbeRules = original.LinuxProbeRules,
             ExeName = Path.GetRelativePath(install.InstallPath, chosen).Replace('\\', '/'),
             ProbeRules = original.ProbeRules, RegistryProbe = original.RegistryProbe,
             AsciiPathShim = original.AsciiPathShim, Dependencies = original.Dependencies,

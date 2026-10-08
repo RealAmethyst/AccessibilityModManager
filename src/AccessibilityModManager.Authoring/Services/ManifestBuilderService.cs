@@ -64,7 +64,8 @@ public sealed class ManifestBuilderService
         string? targetPlatform = null,
         ProtonLaunchConfig? protonLaunch = null,
         LifecycleScriptInputs? scripts = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        XivLauncherConfig? xivLauncher = null)
     {
         if (!Directory.Exists(sourceFolder))
             throw new DirectoryNotFoundException($"Source folder not found: {sourceFolder}");
@@ -155,6 +156,14 @@ public sealed class ManifestBuilderService
             }
         }
 
+        if (xivLauncher is not null)
+        {
+            verify.Add(new VerifyRule { Type = "fileExists", Path = xivLauncher.PluginAssembly });
+            verify.Add(new VerifyRule { Type = "fileExists", Path = Path.ChangeExtension(xivLauncher.PluginAssembly, ".json") });
+            if (xivLauncher.BridgeDirectory is not null)
+                verify.Add(new VerifyRule { Type = "folderExists", Path = xivLauncher.BridgeDirectory });
+        }
+
         var manifest = new Manifest
         {
             GameId = gameId,
@@ -162,6 +171,7 @@ public sealed class ManifestBuilderService
             ModVersion = version,
             TargetPlatform = targetPlatform,
             ProtonLaunch = protonLaunch,
+            XivLauncher = xivLauncher,
             InstallActions = actions,
             Dependencies = DependencyTargeting.ForPackage(dependencies, targetPlatform),
             Verify = verify,

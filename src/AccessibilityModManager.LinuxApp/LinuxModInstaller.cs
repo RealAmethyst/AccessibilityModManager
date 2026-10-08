@@ -39,7 +39,8 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
         CancellationToken ct = default)
     {
         var target = ReleaseTarget.ForRuntime(release.TargetPlatform);
-        var game = target == ReleaseTarget.Linux ? RequireNativeGame(mod) : RequireProtonGameWithExecutable(mod);
+        var game = target == ReleaseTarget.XivLauncher ? RequireInstall(mod) :
+            target == ReleaseTarget.Linux ? RequireNativeGame(mod) : RequireProtonGameWithExecutable(mod);
         var packagePath = Path.Combine(Path.GetTempPath(),
             "amm-catalog-" + Guid.NewGuid().ToString("N") + ".zip");
         try
@@ -70,6 +71,13 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
                     ? "Preparing the verified native package, then installing the mod."
                     : "Preparing the verified loader and speech bridge, then installing the mod."
             });
+            if (target == ReleaseTarget.XivLauncher)
+            {
+                await CreateXivLauncherSetup().InstallAsync(game, release, packagePath,
+                    account?.ConfigPath ?? throw new InvalidOperationException("Choose a Steam account."),
+                    update, dependencyHost, progress, ct);
+                return;
+            }
             if (target == ReleaseTarget.Linux)
             {
                 var installer = CreateInstallerEngine();
@@ -103,6 +111,8 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
     public Task UninstallAsync(LinuxModEntry mod, SteamAccountConfig? account, string? proton,
         CancellationToken ct = default)
     {
+        if (mod.InstalledTarget == ReleaseTarget.XivLauncher)
+            return CreateXivLauncherSetup().UninstallAsync(RequireInstall(mod), ct);
         if (mod.InstalledTarget == ReleaseTarget.Linux)
             return CreateInstallerEngine().UninstallAsync(RequireNativeGame(mod), mod.Author.Id, ct: ct);
         if (mod.OwnSetup is null)
@@ -143,6 +153,11 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
             throw new InvalidOperationException("The game's Proton prefix is missing. Launch it once from Steam first.");
         return game;
     }
+
+    public XivLauncherSetup CreateXivLauncherSetup() => new(CreateInstallerEngine(), new ReceiptStore(logger),
+        httpClient, logger, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AccessibilityModManager", "xivlauncher-setups"),
+        configureFrontend: steamRoot => XivLauncherFrontendInstaller.EnsureInstalled(steamRoot));
 
     private ProtonSteamInstallCoordinator CreateCoordinator(SteamAccountConfig account, string proton)
     {

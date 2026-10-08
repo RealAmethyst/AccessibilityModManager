@@ -44,7 +44,7 @@ public sealed class SteamDetector : ISteamDetector
         _logger.Information("Found {Count} Steam library folders", libraryPaths.Count);
 
         var gamesList = knownGames.ToList();
-        var gamesWithSteamId = gamesList.Where(g => !string.IsNullOrEmpty(g.SteamAppId)).ToList();
+        var gamesWithSteamId = gamesList.Where(g => !string.IsNullOrEmpty(g.EffectiveSteamAppId)).ToList();
 
         foreach (var (libraryPath, steamRoot) in libraryPaths)
         {
@@ -60,14 +60,14 @@ public sealed class SteamDetector : ISteamDetector
 
             foreach (var game in gamesWithSteamId)
             {
-                if (appManifests.TryGetValue(game.SteamAppId!, out var installDir))
+                if (appManifests.TryGetValue(game.EffectiveSteamAppId!, out var installDir))
                 {
                     var gamePath = Path.Combine(commonPath, installDir);
                     if (Directory.Exists(gamePath) && _gameVerifier.VerifyInstallPath(game, gamePath) &&
                         !results.Any(result => result.Game.GameId == game.GameId))
                     {
                         var prefixPath = Path.Combine(libraryPath, "steamapps", "compatdata",
-                            game.SteamAppId!, "pfx");
+                            game.EffectiveSteamAppId!, "pfx");
                         results.Add(new GameInstall
                         {
                             Game = game,

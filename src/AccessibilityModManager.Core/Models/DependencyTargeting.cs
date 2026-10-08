@@ -6,6 +6,9 @@ public static class DependencyTargeting
     {
         Validate(dependency);
         var target = ReleaseTarget.ForRuntime(targetPlatform);
+        // Old readers see a known Linux-only dependency and ignore it on Windows. The new
+        // host-tool metadata narrows it to the dedicated XIVLauncher installation workflow.
+        if (dependency.Fix?.Xlm is not null) return target == ReleaseTarget.XivLauncher;
         if (dependency.TargetPlatforms is null)
             return target is ReleaseTarget.Windows or ReleaseTarget.Proton;
         return dependency.TargetPlatforms.Contains(target, StringComparer.Ordinal);
@@ -22,6 +25,10 @@ public static class DependencyTargeting
 
     public static void Validate(Dependency dependency)
     {
+        if (dependency.Fix?.Xlm is not null &&
+            (dependency.TargetPlatforms is not { Count: 1 } || dependency.TargetPlatforms[0] != ReleaseTarget.Linux ||
+             dependency.IsGameInstaller || !dependency.Required || dependency.Fix.AutoInstall is not null))
+            throw new InvalidOperationException("XLM must be a required XIVLauncher-on-Linux dependency, not a game installer.");
         if (dependency.TargetPlatforms is null) return;
         if (dependency.TargetPlatforms.Count == 0)
             throw new InvalidOperationException(
@@ -29,7 +36,7 @@ public static class DependencyTargeting
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var target in dependency.TargetPlatforms)
         {
-            if (target is not (ReleaseTarget.Windows or ReleaseTarget.Proton or ReleaseTarget.Linux) || !seen.Add(target))
+            if (target is not (ReleaseTarget.Windows or ReleaseTarget.Proton or ReleaseTarget.Linux or ReleaseTarget.XivLauncher) || !seen.Add(target))
                 throw new InvalidOperationException(
                     $"Dependency '{dependency.Id}' has an invalid or repeated target platform.");
         }

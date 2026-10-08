@@ -29,6 +29,7 @@ public sealed class Manifest
     public string? TargetPlatform { get; init; }
     /// <summary>Steam launch setup for a Proton package. Paths are relative to the game folder.</summary>
     public ProtonLaunchConfig? ProtonLaunch { get; init; }
+    public XivLauncherConfig? XivLauncher { get; init; }
     public List<InstallAction> InstallActions { get; init; } = [];
     public List<Dependency> Dependencies { get; init; } = [];
     public List<VerifyRule> Verify { get; init; } = [];
@@ -52,6 +53,17 @@ public sealed class Manifest
     /// logs but doesn't block the uninstall.
     /// </summary>
     public LifecycleScript? PostUninstall { get; init; }
+}
+
+/// <summary>Plugin payload installed under XIVLauncher user data, outside the Steam game folder.</summary>
+public sealed class XivLauncherConfig
+{
+    public required string PluginAssembly { get; init; }
+    public required string InternalName { get; init; }
+    /// <summary>Stable Dalamud dev-plugin identity, retained across releases.</summary>
+    public required string WorkingPluginId { get; init; }
+    /// <summary>Optional package-relative Wine host modules for the plugin's speech library.</summary>
+    public string? BridgeDirectory { get; init; }
 }
 
 public sealed class ProtonLaunchConfig
@@ -231,6 +243,8 @@ public sealed class DependencyFix
     /// mod ZIP itself.
     /// </summary>
     public DependencyAutoInstall? AutoInstall { get; init; }
+    /// <summary>Linux host tool metadata, separate from legacy autoInstall kinds for catalog compatibility.</summary>
+    public XlmAutoInstall? Xlm { get; init; }
 }
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
@@ -245,6 +259,9 @@ public abstract class DependencyAutoInstall
     /// </summary>
     public required string Sha256 { get; init; }
 }
+
+/// <summary>Pinned XLM executable installed as a Steam compatibility tool by the XIVLauncher coordinator.</summary>
+public sealed class XlmAutoInstall : DependencyAutoInstall;
 
 public sealed class ExtractZipAutoInstall : DependencyAutoInstall
 {

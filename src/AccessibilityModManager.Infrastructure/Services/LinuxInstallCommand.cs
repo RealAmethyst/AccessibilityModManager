@@ -28,8 +28,8 @@ public static class LinuxInstallCommand
             if (result.BackupDirectory is not null) Console.WriteLine("Previous build: " + result.BackupDirectory);
             if (args[0] == "--apply-update")
             {
-                _ = Process.Start(new ProcessStartInfo(result.Executable) { UseShellExecute = false,
-                    ArgumentList = { "--updated" } }) ?? throw new IOException("The update installed, but the manager could not restart. Open it from the application menu.");
+                _ = Process.Start(new ProcessStartInfo(result.Executable) { UseShellExecute = false })
+                    ?? throw new IOException("The update installed, but the manager could not restart. Open it from the application menu.");
                 // This helper runs in our private downloaded package, never in the live install.
                 var extraction = Directory.GetParent(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
                 var download = extraction?.Parent;

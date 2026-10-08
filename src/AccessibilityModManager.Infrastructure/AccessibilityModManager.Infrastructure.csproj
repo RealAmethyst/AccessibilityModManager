@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
@@ -12,6 +12,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Assets/Prism0173Compat/prism_compat.dll" />
+    <EmbeddedResource Include="Assets/PrismWine/prism.dll" />
+    <Content Include="Assets/PrismWine/source.tar.gz;Assets/PrismWine/LICENSE;Assets/PrismWine/NOTICE;Assets/PrismWine/wine-detection.patch;Assets/PrismWine/build.sh" CopyToOutputDirectory="PreserveNewest" Link="third-party/prism-wine/%(Filename)%(Extension)" />
   </ItemGroup>
 
   <PropertyGroup>

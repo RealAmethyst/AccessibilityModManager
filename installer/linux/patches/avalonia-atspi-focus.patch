@@ -12,11 +12,47 @@ index d5a16c4..a883928 100644
 
      public int ChildCount => appNode.WindowChildren.Count;
      public string Locale => AtSpiConstants.ResolveLocale();
+diff --git a/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.RoleMapping.cs b/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.RoleMapping.cs
+index c8db8ca..670077e 100644
+--- a/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.RoleMapping.cs
++++ b/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.RoleMapping.cs
+@@ -17,7 +17,7 @@ public static AtSpiRole ToAtSpiRole(AutomationControlType controlType, Automatio
+                 AutomationControlType.CheckBox => AtSpiRole.CheckBox,
+                 AutomationControlType.ComboBox => AtSpiRole.ComboBox,
+                 AutomationControlType.ComboBoxItem => AtSpiRole.ListItem,
+-                AutomationControlType.Edit => AtSpiRole.Entry,
++                AutomationControlType.Edit => IsPasswordPeer(peer) ? AtSpiRole.PasswordText : AtSpiRole.Entry,
+                 AutomationControlType.Hyperlink => AtSpiRole.Link,
+                 AutomationControlType.Image => AtSpiRole.Image,
+                 AutomationControlType.ListItem => AtSpiRole.ListItem,
+@@ -69,6 +69,7 @@ public static string ToAtSpiRoleName(AtSpiRole role)
+                 AtSpiRole.CheckBox => "check box",
+                 AtSpiRole.ComboBox => "combo box",
+                 AtSpiRole.Entry => "entry",
++                AtSpiRole.PasswordText => "password text",
+                 AtSpiRole.Label => "label",
+                 AtSpiRole.Image => "image",
+                 AtSpiRole.List => "list",
 diff --git a/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs b/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs
-index 09fec39..34811b6 100644
+index 09fec39..db0926f 100644
 --- a/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs
 +++ b/src/Avalonia.FreeDesktop.AtSpi/AtSpiNode.cs
-@@ -168,9 +168,15 @@ internal void Attach(AtSpiNode? parent)
+@@ -18,6 +18,14 @@ namespace Avalonia.FreeDesktop.AtSpi
+     /// </summary>
+     internal partial class AtSpiNode
+     {
++        // PasswordChar masks the visual control, but IValueProvider still holds the secret.
++        // Mask both text queries and value-change signals at the accessibility boundary.
++        internal static bool IsPasswordPeer(AutomationPeer? peer) =>
++            peer is TextBoxAutomationPeer text && text.Owner.PasswordChar != '\0';
++
++        internal string AccessibleText(string? value) => IsPasswordPeer(Peer)
++            ? new string('•', value?.Length ?? 0) : value ?? string.Empty;
++
+         private protected bool _detached;
+         private bool _attached;
+         private bool _childrenDirty = true;
+@@ -168,9 +176,15 @@ internal void Attach(AtSpiNode? parent)
          // AT-SPI children so SelectChild-by-index and parent lookups work.
          private IReadOnlyList<AutomationPeer> GetChildPeers()
          {
@@ -33,7 +69,7 @@ index 09fec39..34811b6 100644
              var items = new List<AutomationPeer>();
              CollectSelectionItemPeers(Peer.GetChildren(), items);
              return items.Count > 0 ? items : Peer.GetChildren();
-@@ -330,6 +336,14 @@ private void OnPeerChildrenChanged(object? sender, EventArgs e)
+@@ -330,6 +344,14 @@ private void OnPeerChildrenChanged(object? sender, EventArgs e)
 
          private void OnPeerPropertyChanged(object? sender, AutomationPropertyChangedEventArgs e)
          {
@@ -48,6 +84,15 @@ index 09fec39..34811b6 100644
              if (Server.A11yConnection is null || !Server.HasEventListeners)
                  return;
 
+@@ -368,7 +390,7 @@ private void OnPeerPropertyChanged(object? sender, AutomationPropertyChangedEven
+             {
+                 eventHandler.EmitPropertyChangeSignal(
+                     "accessible-value",
+-                    new DBusVariant(e.NewValue?.ToString() ?? string.Empty));
++                    new DBusVariant(AccessibleText(e.NewValue?.ToString())));
+             }
+             else if (e.Property == SelectionPatternIdentifiers.SelectionProperty)
+             {
 diff --git a/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs b/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs
 index 06b9b7a..eb4acf0 100644
 --- a/src/Avalonia.FreeDesktop.AtSpi/AtSpiServer.cs
@@ -90,6 +135,19 @@ index 06b9b7a..eb4acf0 100644
          }
 
          private static async Task InitializeRegistryTrackerAsync(AtSpiRegistryEventTracker tracker)
+diff --git a/src/Avalonia.FreeDesktop.AtSpi/Handlers/AtSpiTextHandler.cs b/src/Avalonia.FreeDesktop.AtSpi/Handlers/AtSpiTextHandler.cs
+index daec606..2f179b1 100644
+--- a/src/Avalonia.FreeDesktop.AtSpi/Handlers/AtSpiTextHandler.cs
++++ b/src/Avalonia.FreeDesktop.AtSpi/Handlers/AtSpiTextHandler.cs
+@@ -290,7 +290,7 @@ public ValueTask<bool> ScrollSubstringToPointAsync(
+
+         private string GetText()
+         {
+-            return node.Peer.GetProvider<IValueProvider>()?.Value ?? string.Empty;
++            return node.AccessibleText(node.Peer.GetProvider<IValueProvider>()?.Value);
+         }
+     }
+ }
 diff --git a/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs b/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs
 index 0a013db..92a4903 100644
 --- a/src/Avalonia.FreeDesktop.AtSpi/RootAtSpiNode.cs

@@ -140,6 +140,13 @@ public static class PluginPackageValidation
 
             CheckActionSources(manifest, entryNames, errors);
             CheckProtonLaunchAssets(manifest, entryNames, errors);
+            if (manifest.XivLauncher is { } xiv)
+            {
+                foreach (var path in new[] { xiv.PluginAssembly, Path.ChangeExtension(xiv.PluginAssembly, ".json") })
+                    if (!entryNames.Contains("files/" + path)) errors.Add("XIVLauncher package is missing " + path);
+                if (xiv.BridgeDirectory is not null && !entryNames.Any(name => name.StartsWith("files/" + xiv.BridgeDirectory + "/", StringComparison.Ordinal)))
+                    errors.Add("XIVLauncher package is missing its Wine speech bridge.");
+            }
             CheckLifecycleScripts(manifest, entryNames, errors);
             CheckVerifyRules(manifest, errors);
         }

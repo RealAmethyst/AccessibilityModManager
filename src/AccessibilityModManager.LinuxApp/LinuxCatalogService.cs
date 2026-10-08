@@ -93,18 +93,18 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
                 var index = fetched.Value;
                 var author = new LinuxAuthorEntry(source, index);
                 authors.Add(author);
-                var steamGames = index.Games.Where(game => !string.IsNullOrWhiteSpace(game.SteamAppId)).ToArray();
+                var steamGames = index.Games.Where(game => !string.IsNullOrWhiteSpace(game.EffectiveSteamAppId)).ToArray();
                 var installs = await detector.DetectInstalledGamesAsync(steamGames, source.PluginId, ct);
                 var installByGame = installs.ToDictionary(install => install.Game.GameId);
                 foreach (var game in index.Games)
                 {
                     if (!index.ReleasesByGameId.TryGetValue(game.GameId, out var allReleases)) continue;
-                    var releases = allReleases.Where(release =>
+                    var releases = allReleases.Select(release => ReleasePackages.ForPlatform(release, linux: true)).Where(release =>
                             (release.PackageUrl is not null ||
                              release.Patreon is { } gate && patreon is not null &&
                              (patreon.IsCampaignOwner(gate.CampaignId) || patreon.IsEntitled(gate))) &&
                             ReleaseTarget.Normalize(release.TargetPlatform) is
-                                ReleaseTarget.Windows or ReleaseTarget.Proton or ReleaseTarget.Linux or ReleaseTarget.WindowsLinux)
+                                ReleaseTarget.Windows or ReleaseTarget.Proton or ReleaseTarget.Linux or ReleaseTarget.WindowsLinux or ReleaseTarget.XivLauncher)
                         .OrderByDescending(release => release.Version, VersionComparer.Instance)
                         .ToArray();
                     if (releases.Length == 0) continue;
@@ -123,8 +123,8 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
                         new GameVerifier(logger).VerifyInstallPath(game, emulatorPath))
                         install = new GameInstall { Game = game, PluginId = source.PluginId, InstallPath = emulatorPath, IsValid = true };
                     var receipt = await receipts.LoadAsync(game.GameId, source.PluginId);
-                    var setups = install is null || string.IsNullOrWhiteSpace(game.SteamAppId)
-                        ? [] : ProtonSteamSetupLookup.Find(setupRoot, game.SteamAppId, install.InstallPath);
+                    var setups = install is null || string.IsNullOrWhiteSpace(game.EffectiveSteamAppId)
+                        ? [] : ProtonSteamSetupLookup.Find(setupRoot, game.EffectiveSteamAppId, install.InstallPath);
                     var ownSetup = setups.FirstOrDefault(state =>
                         state.GameId == game.GameId && state.PluginId == source.PluginId);
                     var otherSetup = setups.FirstOrDefault(state =>

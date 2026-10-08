@@ -91,6 +91,63 @@ public static class SteamLocalConfigEditor
         return text[..lineStart] + text[lineEnd..];
     }
 
+    // Reuse the strict, position-preserving parser for Steam's global compatibility mapping.
+    public static string? ReadBlock(string text, params string[] path)
+    {
+        var node = FindPath(text, path);
+        if (node is null) return null;
+        if (node.Children is null) throw new InvalidDataException("Expected a Steam settings block.");
+        return text[node.KeyStart..(node.CloseBrace + 1)];
+    }
+
+    public static bool BlocksEqual(string? left, string? right)
+    {
+        if (left is null || right is null) return left == right;
+        static string Canonical(string text)
+        {
+            var tokens = Tokenize(text);
+            var position = 0;
+            static string Render(List<Node> nodes) => string.Join(";", nodes
+                .OrderBy(n => n.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(n => Quote(n.Key.ToLowerInvariant()) + (n.Children is null ? Quote(n.Value!) : "{" + Render(n.Children) + "}")));
+            return Render(ParseNodes(tokens, ref position, false));
+        }
+        return Canonical(left) == Canonical(right);
+    }
+
+    public static string SetBlock(string text, string[] path, string? block)
+    {
+        if (path.Length == 0) throw new ArgumentException("A settings path is required.");
+        var node = FindPath(text, path);
+        if (node is not null)
+        {
+            if (node.Children is null) throw new InvalidDataException("Expected a Steam settings block.");
+            return text[..node.KeyStart] + (block ?? "") + text[(node.CloseBrace + 1)..];
+        }
+        if (block is null) return text;
+        if (path.Length == 1) throw new InvalidDataException("Steam configuration root is missing.");
+        var parent = FindPath(text, path[..^1]);
+        if (parent is null)
+            return SetBlock(text, path[..^1], Quote(path[^2]) + "\n{\n" + block + "\n}");
+        if (parent.Children is null) throw new InvalidDataException("Expected a Steam settings block.");
+        return text.Insert(parent.CloseBrace, "\n" + block + "\n");
+    }
+
+    private static Node? FindPath(string text, string[] path)
+    {
+        var tokens = Tokenize(text);
+        var position = 0;
+        var nodes = ParseNodes(tokens, ref position, nested: false);
+        Node? node = null;
+        foreach (var key in path)
+        {
+            node = FindOne(nodes, key);
+            if (node is null) return null;
+            nodes = node.Children ?? [];
+        }
+        return node;
+    }
+
     private static Node? FindApp(string text, string appId)
     {
         if (string.IsNullOrWhiteSpace(appId) || !appId.All(char.IsAsciiDigit))

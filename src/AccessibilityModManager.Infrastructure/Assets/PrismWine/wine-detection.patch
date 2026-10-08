@@ -1,0 +1,107 @@
+diff --git a/cmake/PrismCodegen.cmake b/cmake/PrismCodegen.cmake
+index 58f51b3..742f6c9 100644
+--- a/cmake/PrismCodegen.cmake
++++ b/cmake/PrismCodegen.cmake
+@@ -3,7 +3,7 @@
+ include_guard(GLOBAL)
+ include(PrismGuards)
+ prism_require_targets(prism prism_common)
+-if(WIN32)
++if(WIN32 AND TARGET prism_backend_nvda)
+   prism_require_vars(PRISM_MIDL_HOST_DIR PRISM_MIDL_ENV)
+   if(NOT DEFINED CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+     get_filename_component(
+diff --git a/cmake/PrismPlatformWindows.cmake b/cmake/PrismPlatformWindows.cmake
+index f729933..9f026ee 100644
+--- a/cmake/PrismPlatformWindows.cmake
++++ b/cmake/PrismPlatformWindows.cmake
+@@ -9,8 +9,8 @@ target_compile_definitions(
+             _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT=1
+             BELT_COM_NO_LEAK_DETECTION UNICODE _UNICODE)
+ target_link_libraries(
+-  prism PRIVATE ole32.lib onecore.lib runtimeobject.lib
+-                uiautomationcore.lib rpcrt4)
++  prism PRIVATE ole32 onecore runtimeobject
++                uiautomationcore rpcrt4)
+ if(PRISM_ENABLE_POWER_MANAGEMENT)
+   target_compile_definitions(prism_common
+                              INTERFACE PRISM_ENABLE_POWER_MANAGEMENT)
+diff --git a/source/backends/orca.cpp b/source/backends/orca.cpp
+index f044381..7359147 100644
+--- a/source/backends/orca.cpp
++++ b/source/backends/orca.cpp
+@@ -241,6 +241,7 @@ REGISTER_BACKEND_WITH_ID(OrcaBackend, Backends::Orca, "Orca", 100);
+ #elifdef _WIN32
+ #include "../logging.h"
+ #include "../optional_library.h"
++#include "../winelib_bridge.h"
+ #include <atomic>
+ #include <optional>
+ #include <raw/prism_orca_bridge.h>
+@@ -304,15 +305,10 @@ public:
+   [[nodiscard]] std::bitset<64> get_features() const override {
+     using namespace BackendFeature;
+     std::bitset<64> features;
+-    if (auto *const ntdll_handle = GetModuleHandle(_T("ntdll.dll"));
+-        ntdll_handle != nullptr) {
+-      if (auto *const wgv_addr =
+-              GetProcAddress(ntdll_handle, "wine_get_version");
+-          wgv_addr != nullptr) {
+-        if (const auto *bridge = orca_bridge();
+-            bridge != nullptr && bridge->prism_orca_available()) {
+-          features |= IS_SUPPORTED_AT_RUNTIME;
+-        }
++    if (running_under_wine()) {
++      if (const auto *bridge = orca_bridge();
++          bridge != nullptr && bridge->prism_orca_available()) {
++        features |= IS_SUPPORTED_AT_RUNTIME;
+       }
+     }
+     features |= SUPPORTS_SPEAK | SUPPORTS_OUTPUT | SUPPORTS_STOP;
+@@ -323,21 +319,11 @@ public:
+     if (instance != nullptr) {
+       return std::unexpected(BackendError::AlreadyInitialized);
+     }
+-    if (auto *const ntdll_handle = GetModuleHandle(_T("ntdll.dll"));
+-        ntdll_handle == nullptr) {
+-      return std::unexpected(BackendError::InternalBackendError);
+-    } else {
+-      if (auto *const wgv_addr =
+-              GetProcAddress(ntdll_handle, "wine_get_version");
+-          wgv_addr == nullptr) {
+-        return std::unexpected(BackendError::BackendNotAvailable);
+-      } else {
+-        api = orca_bridge();
+-        if (api == nullptr || !api->prism_orca_available()) {
+-          return std::unexpected(BackendError::BackendNotAvailable);
+-        }
+-      }
+-    }
++    if (!running_under_wine())
++      return std::unexpected(BackendError::BackendNotAvailable);
++    api = orca_bridge();
++    if (api == nullptr || !api->prism_orca_available())
++      return std::unexpected(BackendError::BackendNotAvailable);
+     PrismOrcaDBusInstance *h = nullptr;
+     if (!api->prism_orca_create(&h)) {
+       return std::unexpected(BackendError::BackendNotAvailable);
+diff --git a/source/winelib_bridge.h b/source/winelib_bridge.h
+index 6c6c34b..634062e 100644
+--- a/source/winelib_bridge.h
++++ b/source/winelib_bridge.h
+@@ -12,8 +12,13 @@
+ 
+ inline bool running_under_wine() noexcept {
+   auto *const ntdll = GetModuleHandle(_T("ntdll.dll"));
+-  return ntdll != nullptr &&
+-         GetProcAddress(ntdll, "wine_get_version") != nullptr;
++  if (ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr)
++    return true;
++  // Wine-XIV hides version exports to preserve the game's Windows licensing.
++  // This Wine-specific path API remains available with HideWineExports enabled.
++  auto *const kernel = GetModuleHandle(_T("kernel32.dll"));
++  return kernel != nullptr &&
++         GetProcAddress(kernel, "wine_get_unix_file_name") != nullptr;
+ }
+ 
+ inline BackendResult<> winelib_result(PrismWinelibStatus status) noexcept {

@@ -63,7 +63,7 @@ public sealed class ProtonWindowsPackageAdapter(
         if (!OperatingSystem.IsLinux() || ReleaseTarget.Normalize(release.TargetPlatform) != ReleaseTarget.Windows)
             throw new InvalidOperationException("Automatic Proton conversion needs a Windows release on Linux.");
         if (game.Game.GameId != release.GameId || game.PluginId != release.PluginId ||
-            string.IsNullOrWhiteSpace(game.Game.SteamAppId) ||
+            string.IsNullOrWhiteSpace(game.Game.EffectiveSteamAppId) ||
             string.IsNullOrWhiteSpace(game.Game.ExeName) ||
             string.IsNullOrWhiteSpace(game.ProtonPrefixPath) ||
             !Directory.Exists(game.ProtonPrefixPath))
@@ -177,7 +177,7 @@ public sealed class ProtonWindowsPackageAdapter(
             var proxyName = WineDllProxy.ModuleName(finding.DllOverride);
             var launch = new ProtonLaunchConfig
             {
-                SteamAppId = game.Game.SteamAppId!,
+                SteamAppId = game.Game.EffectiveSteamAppId!,
                 GameDisplayName = game.Game.DisplayName,
                 GameExecutable = game.Game.ExeName.Replace('\\', '/'),
                 LaunchMode = reloaded is null ? "direct" : "replaceExecutable",
