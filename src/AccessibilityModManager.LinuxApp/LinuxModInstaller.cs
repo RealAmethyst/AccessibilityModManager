@@ -64,6 +64,7 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
                 throw new InvalidOperationException("This release has no package address.");
             if (!await repo.VerifySha256Async(packagePath, release.Sha256, ct))
                 throw new InvalidDataException("The downloaded package does not match its catalog SHA-256.");
+            await new PluginDirectoryClient(httpClient).RequireAvailableAsync(mod.Author.Source.IndexUrl.AbsoluteUri, ct);
             progress?.Report(new ProgressInfo
             {
                 Percentage = 100,

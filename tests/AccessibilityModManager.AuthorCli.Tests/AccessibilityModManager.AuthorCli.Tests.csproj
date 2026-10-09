@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <ProjectReference Include="../../src/AccessibilityModManager.AuthorCli/AccessibilityModManager.AuthorCli.csproj" />
+    <Using Include="Xunit" />
+    <Compile Include="../AccessibilityModManager.Tests/Helpers/*.cs" Link="Helpers/%(Filename)%(Extension)" />
+    <Compile Include="../AccessibilityModManager.Tests/Services/PluginPackageValidationTests.cs" Link="ManagerValidation/PluginPackageValidationTests.cs" />
+    <Compile Include="../AccessibilityModManager.Tests/Services/ManifestParserTests.cs" Link="ManagerValidation/ManifestParserTests.cs" />
+    <Compile Include="../AccessibilityModManager.Tests/Services/PreviewAgainstRealClientTests.cs" Link="ManagerValidation/PreviewAgainstRealClientTests.cs" />
+    <Compile Include="../AccessibilityModManager.Tests/Services/PublicDownloadVerificationTests.cs" Link="ManagerValidation/PublicDownloadVerificationTests.cs" />
+    <Compile Include="../AccessibilityModManager.Tests/Services/GitHubIndexPublisherTests.cs" Link="ManagerValidation/GitHubIndexPublisherTests.cs" />
+    <Compile Include="../AccessibilityModManager.Tests/Services/Net9PresetTests.cs" Link="ManagerValidation/Net9PresetTests.cs" />
+  </ItemGroup>
+</Project>

@@ -60,6 +60,7 @@ public partial class App : Application
 
         // HTTP
         services.AddSingleton<HttpClient>();
+        services.AddSingleton<PluginDirectoryClient>();
 
         // Infrastructure — services
         services.AddSingleton<IConfigService, ConfigService>();
@@ -146,7 +147,8 @@ public partial class App : Application
                     // a deliberate press of Remove, nothing on disk is touched — installed mods stay
                     // and stay uninstallable — and the source can be added back. Defaulting to No
                     // meant Enter silently undid the action the user had just chosen.
-                    MessageBoxResult.Yes) == MessageBoxResult.Yes);
+                    MessageBoxResult.Yes) == MessageBoxResult.Yes,
+                directory: sp.GetRequiredService<PluginDirectoryClient>());
 
             var gamesListVm = new GamesListViewModel(
                 sp.GetRequiredService<IPluginRegistryClient>(),
@@ -176,6 +178,8 @@ public partial class App : Application
                     mainVm!.ShowGameDetails(detailsVm);
                 },
                 BrowseForFolder);
+
+            gamesListVm.NewGamesAvailable += messages => ShowInfoDialog("New games", string.Join(Environment.NewLine, messages));
 
             // Adding or removing a source changes which catalogs the Mods tab reads, so it has to
             // re-read them. Without this, a user adds a source, is told it worked, and finds no new
@@ -322,7 +326,8 @@ public partial class App : Application
             // only one thing claims focus. Back from there returns to the mods list.
             owner => mainVm.SwitchFromGameDetailsToDeveloper(
                 CreateDeveloperDetailsViewModel(sp, mainVm, owner)),
-            registryClient: sp.GetRequiredService<IPluginRegistryClient>());
+            registryClient: sp.GetRequiredService<IPluginRegistryClient>(),
+            directory: sp.GetRequiredService<PluginDirectoryClient>());
     }
 
     /// <summary>

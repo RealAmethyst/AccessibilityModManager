@@ -18,19 +18,17 @@ trap 'rm -rf -- "$stage"' EXIT
     --configuration Release --runtime linux-x64 --self-contained true \
     --output "$stage/manager" --verbosity quiet
 "$dotnet_bin" publish \
-    "$project_root/src/AccessibilityModManager.LinuxAuthorTool/AccessibilityModManager.LinuxAuthorTool.csproj" \
+    "$project_root/src/AccessibilityModManager.AuthorCli/AccessibilityModManager.AuthorCli.csproj" \
     --configuration Release --runtime linux-x64 --self-contained true \
     --output "$stage/author" --verbosity quiet
 DOTNET_BIN="$dotnet_bin" "$project_root/installer/linux/build-avalonia-atspi.sh" "$stage/manager"
 DOTNET_BIN="$dotnet_bin" bash "$project_root/installer/linux/build-xivlauncher.sh" "$stage/manager"
-cp -- "$stage/manager/Avalonia.FreeDesktop.AtSpi.dll" "$stage/author/Avalonia.FreeDesktop.AtSpi.dll"
-cp -a -- "$stage/manager/third-party" "$stage/author/third-party"
 "$cc_bin" -std=c11 -O2 -Wall -Wextra -Werror \
     -o "$stage/manager/steam-proton-launch" \
     "$project_root/installer/linux/steam-proton-launch.c"
 chmod 755 "$stage/manager/AccessibilityModManager.LinuxApp" \
     "$stage/manager/steam-proton-launch" \
-    "$stage/author/AccessibilityModManager.LinuxAuthorTool"
+    "$stage/author/amm-author"
 
 # The author workflow uses gh for repository discovery and release publishing. Bundle the
 # official pinned CLI so a fresh desktop installation works without an administrator account.
@@ -62,7 +60,7 @@ if ! cp -a -- "$stage" "$final" || ! diff -qr -- "$stage" "$final" >/dev/null; t
 fi
 rm -rf -- "$stage"
 trap - EXIT
-printf 'Linux manager and AuthorTool built: %s\n' "$final"
+printf 'Linux manager and author CLI built: %s\n' "$final"
 
 # Keep dist limited to versioned downloads and their checksums. Build trees stay in publish.
 python3 "$project_root/installer/linux/package-release.py" "$project_root" "$final" "$dist_root"

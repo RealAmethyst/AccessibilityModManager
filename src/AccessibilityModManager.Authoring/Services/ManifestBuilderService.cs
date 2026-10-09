@@ -88,7 +88,7 @@ public sealed class ManifestBuilderService
             scripts?.PostUninstall is not null;
         if (topLevelEntries.Count == 0 && !hasAnyScript)
             throw new InvalidOperationException(
-                "Source folder is empty and no lifecycle script is enabled. Put your mod files in there first (e.g. version.dll, MelonLoader/, Mods/), or enable a script on the Scripts tab.");
+                "Source folder is empty and no lifecycle script is enabled. Put your mod files in there first (e.g. version.dll, MelonLoader/, Mods/), or configure a lifecycle script.");
 
         // Verify each declared script can be located: either via the absolute path the author
         // picked with Browse, or — failing that — under the source folder. Catches typos and
@@ -245,6 +245,47 @@ public sealed class ManifestBuilderService
         return new BuiltPackage(outputZipPath, fileCount, totalBytes);
     }
 
+    public static string ValidateBuildInputs(
+        string sourceFolder,
+        LifecycleScriptInputs? scripts = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceFolder);
+        if (!Directory.Exists(sourceFolder))
+            throw new DirectoryNotFoundException($"Source folder not found: {sourceFolder}");
+
+        var normalizedSource = Path.GetFullPath(sourceFolder);
+        var hasContent = Directory
+            .EnumerateFileSystemEntries(normalizedSource, "*", SearchOption.TopDirectoryOnly)
+            .Any();
+        var hasAnyScript =
+            scripts?.PreInstall is not null ||
+            scripts?.PostInstall is not null ||
+            scripts?.PostUninstall is not null;
+        if (!hasContent && !hasAnyScript)
+        {
+            throw new InvalidOperationException(
+                "Source folder is empty and no lifecycle script is enabled. Put your mod files in there first (e.g. version.dll, MelonLoader/, Mods/), or configure a lifecycle script.");
+        }
+
+        ValidateScriptIsBundled(
+            scripts?.PreInstall,
+            scripts?.PreInstallSourcePath,
+            normalizedSource,
+            "Pre-install");
+        ValidateScriptIsBundled(
+            scripts?.PostInstall,
+            scripts?.PostInstallSourcePath,
+            normalizedSource,
+            "Post-install");
+        ValidateScriptIsBundled(
+            scripts?.PostUninstall,
+            scripts?.PostUninstallSourcePath,
+            normalizedSource,
+            "Post-uninstall");
+
+        return normalizedSource;
+    }
+
     /// <summary>
     /// Adds a <see cref="CopyFileAction"/> mapping the script's in-package path to the game
     /// folder root when the author opted into <see cref="LifecycleScript.InstallToGameFolder"/>.
@@ -334,14 +375,14 @@ public sealed class ManifestBuilderService
             if (!File.Exists(absoluteSourcePath))
                 throw new FileNotFoundException(
                     $"{label} script source file is missing: '{absoluteSourcePath}'. " +
-                    "Re-pick it on the Scripts tab.",
+                    "Update the configured script source path.",
                     absoluteSourcePath);
 
             var pickedExt = Path.GetExtension(absoluteSourcePath).ToLowerInvariant();
             if (!string.Equals(pickedExt, ext, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException(
                     $"{label}: picked file extension '{pickedExt}' doesn't match the script entry's '{ext}'. " +
-                    "Re-pick the file on the Scripts tab so the in-package name matches.");
+                    "Update the script source so the in-package extension matches.");
             return;
         }
 
@@ -354,7 +395,7 @@ public sealed class ManifestBuilderService
         if (!File.Exists(fullPath))
             throw new FileNotFoundException(
                 $"{label} script '{script.Executable}' not found at '{fullPath}'. " +
-                "Either place the file inside your source folder, or click Browse on the Scripts tab to pick it from anywhere.",
+                "Place the file inside your source folder at the corresponding path.",
                 fullPath);
     }
 }

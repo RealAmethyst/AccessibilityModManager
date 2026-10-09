@@ -26,6 +26,8 @@ public sealed class AppConfig
     /// </summary>
     public List<UserPluginSource> UserPluginSources { get; set; } = [];
 
+    public Dictionary<string, List<string>> KnownPluginGameIds { get; set; } = [];
+
     /// <summary>
     /// The last index address the SIGNED registry gave for each plugin id, recorded every time one
     /// of its catalogs is read.

@@ -17,12 +17,13 @@ Updates are offered on startup and through **Settings, Check for manager updates
 Installing an update preserves your data, backs up the previous build and restarts
 the manager. Windows and Linux select only their own update package.
 
-The Linux AuthorTool is a separate `PluginIndexAuthor-{version}-linux-x64.tar.gz`
-download with its own `install.sh` and **Plugin Index Author** menu entry.
+The authoring tool is a separate command-line download: `amm-author-{version}-linux-x64.zip` or `amm-author-{version}-win-x64.zip`. Each ZIP includes its runtime and full `docs` folder.
 
 ## How it works
 
-The Linux manager and AuthorTool have separate self-contained downloads with per-user application-menu launchers. The manager uses the signed catalog, user-added sources, Patreon through Secret Service, native Linux packages, and reversible Steam Proton setup. A verified Windows file-copy package can be adapted automatically when it uses a recognized BepInEx or MelonLoader proxy that is bundled, already installed, or supplied by a pinned ZIP dependency. An exact Prism 0.18.3 x64 build gains its matching verified Wine bridge automatically. The verified legacy Tolk build in the published Next Order and Master Duel packages is replaced in the temporary Proton package by Prism's official Tolk compatibility DLL and Orca bridge; other speech builds need a verified Proton path. Reloaded II needs explicit Proton launch assets. Windows elevation and lifecycle installers do not become Linux host privileges. The AuthorTool shares the Windows publishing services and package builder, and can build Windows, Proton, and native Linux releases. See [Linux port](LINUX_PORT.md) and [Steam Proton loader backend](PROTON_LOADER_BACKEND.md) for setup, checks, and compatibility limits.
+The Linux manager has a self-contained download with a per-user application-menu launcher. It supports the signed catalog, user-added sources, Patreon through Secret Service, native Linux packages, and reversible Steam Proton setup. Verified Windows file-copy packages can be adapted when their loader and speech dependencies have a supported Proton path. Windows elevation and lifecycle installers do not become Linux host privileges. See [Linux port](LINUX_PORT.md) and [Steam Proton loader backend](PROTON_LOADER_BACKEND.md) for compatibility limits.
+
+Third-party authors use the cross-platform CLI described below. Amethyst maintains her own catalog through the separate web dashboard.
 
 - **Browse mods** by game, language, or accessibility tag (screen-reader support, controller-only, completable, etc.)
 - **Detect installs** automatically through Steam — or browse to a folder if you installed elsewhere
@@ -48,32 +49,36 @@ The manager refuses to do anything that isn't verifiable end-to-end:
 6. **Lifecycle scripts (optional)** — pre-install, post-install, and post-uninstall scripts are supported, but the user must explicitly confirm them on a warning dialog that lists each script's path, what it does, why it's needed, what it modifies, and whether it needs admin. Failures roll back the install.
 7. **Receipts are tamper-checked** — every install writes a JSON receipt with a SHA256 hash file alongside it. If a receipt is edited after the fact, the manager refuses to use it for uninstall.
 
-## Getting your plugin listed
+## The author CLI
 
-1. Make a dedicated GitHub repo for your plugin index (one repo per plugin author works well — it can be separate from the repos that hold your actual mod code).
-2. Open the AuthorTool on that project. The tool checks the public registry on load and shows a banner with your status: listed, not listed, or unreachable. If you're not listed yet, the **Request listing** button opens a pre-filled GitHub issue on the registry repo with your plugin id, display name, and repo URL ready to submit — no manual issue-writing needed.
-3. Once the registry maintainer signs your entry into the registry, the manager picks it up automatically on the next refresh, and the AuthorTool's banner flips to "listed".
+`amm-author` replaces both desktop AuthorTool interfaces. It manages public GitHub plugin repositories, games, releases, dependencies, lifecycle scripts, and manager-format ZIPs. It is designed for direct use and for AI assistants working through commands in the background.
 
-## The AuthorTool
+Install Git and [GitHub CLI](https://cli.github.com/), then run `gh auth login` once. Extract the complete CLI ZIP; its .NET runtime and documentation are included. Run `./amm-author help` on Linux or `./amm-author.exe help` in PowerShell. Use `--json` for automation, `--dry-run` to preview operations, and command-specific `--help` for arguments.
 
-`PluginIndexAuthor-{version}.exe` or the runtime-bundled `PluginIndexAuthor-{version}-selfcontained.exe` (next to the manager installer on the [Releases page](https://github.com/RealAmethyst/AccessibilityModManager/releases)) is a small WPF app that handles the entire publishing workflow for you. It uses the `gh` CLI under the hood for all GitHub interaction; install [GitHub CLI](https://cli.github.com/) and run `gh auth login` once before using it. This now also supports placing tester builds behind your own Patreon community, meaning people will need to have access to your Patreon tier that you select before the mod release shows up in the manager for them.
+A typical workflow, using `amm-author` from PATH:
 
-What the tool gives you:
+```sh
+amm-author project create YOUR-NAME/accessibility-mods --plugin-id your-plugin --project ./catalog --yes
+amm-author game add --id example-game --display-name "Example Game" --project ./catalog
+amm-author game repo example-game --repo YOUR-NAME/example-game-mod --project ./catalog
+amm-author package build --source ./mod-files --game example-game --version 1.0.0 --output ./mod-1.0.0.zip --project ./catalog
+amm-author release publish --game example-game --version 1.0.0 --channel stable --zip ./mod-1.0.0.zip --project ./catalog --dry-run
+amm-author release publish --game example-game --version 1.0.0 --channel stable --zip ./mod-1.0.0.zip --project ./catalog --yes
+```
 
-- **Edit your plugin index** — add games, fill in display names, descriptions, tags, languages, dependencies. The tool writes a valid `index.json` for you so you never have to hand-edit JSON.
-- **Build wrapped ZIPs** — point the tool at a folder containing your mod's files. It generates the manager's `manifest.json`, validates lifecycle scripts, and produces a SHA256-stable ZIP ready to upload.
-- **Upload releases to your mod's own GitHub repo** — the tool uses `gh` to create a GitHub release on your mod's repo and attach the wrapped ZIP as an asset, then writes the resulting public URL + SHA256 back into your plugin index. This is intentional: your mod stays on its own repo (where your users already look for it), and your plugin index simply points at those release assets. The plugin index repo itself is *not* released — it's just a regular `git commit` + `git push` of the updated `index.json`. One click does the asset upload, the index commit, and the index push together, so the SHA256 in your plugin index always matches the asset that's live on GitHub.
-- **Lifecycle script editor** — fill in the executable path, the what / why / modifies descriptions, and whether the script needs admin. The tool validates that each declared script is actually bundled in your source folder before producing the ZIP.
+Use `project clone OWNER/REPO --project PATH` for an existing catalog. Each game can use its own GitHub release repository; the catalog repository receives the updated `index.json` as a normal commit and push. Package hashes and manager validation remain mandatory. The tool reports partial publication failures rather than calling them complete.
 
-## Releasing a new version
+Patreon releases use post links and manually uploaded attachments. Users download in their browser and select the ZIP for the manager to verify and install. The CLI does not promise automatic attachment downloads. Custom-server publishing and registry administration are absent from third-party authoring; Amethyst's dashboard and existing manager downloads remain supported.
 
-1. Open the AuthorTool, open your plugin project (the folder with `index.json`).
-2. Pick the game, click **Add release**.
-3. Type the version, pick the GitHub repo for the mod, click **Build…**
-4. Point at the source folder containing your mod's files; the tool wraps it into `{game}-v{version}-amm.zip`.
-5. Click **Upload and save**. The tool creates / updates the GitHub release on the mod's repo, attaches the wrapped ZIP as an asset, and stages the new entry in your plugin index.
-6. Confirm the **commit and push** prompt — your `index.json` gets committed and pushed to your plugin-index repo (a normal commit, not a GitHub release).
-7. Users see the update on their next manager refresh.
+## Author documentation
+
+Start with [the author guide](docs/README.md) and [publishing walkthrough](docs/publishing.md). The documentation explains [catalogs and packages](docs/catalog.md), [dependencies and why to keep them separate](docs/dependencies.md), [lifecycle scripts](docs/scripts.md), and [Patreon](docs/patreon.md). The [command reference](docs/commands.md) lists all commands, options, JSON behavior, and exit codes. The complete `docs` folder and editable examples ship in each CLI ZIP.
+
+## Sharing your plugin
+
+Publishing through the CLI submits your public default-branch catalog to the manager's plugin directory. Users open Sources in the Authors tab and choose Add after reviewing the source notice. Already-added sources offer Remove, including sources added before the directory existed. A listing is not an endorsement.
+
+The manager announces newly added games for sources you added and authors whose mods you have installed. Your first refresh establishes a baseline; repeat refreshes do not repeat announcements. Directory-only authors do not generate game notifications.
 
 ## Building from source
 
@@ -81,10 +86,10 @@ What the tool gives you:
 dotnet build AccessibilityModManager.slnx
 dotnet test AccessibilityModManager.slnx
 powershell -ExecutionPolicy Bypass -File installer\build.ps1            # manager + Inno installer
-powershell -ExecutionPolicy Bypass -File installer\build-author-tool.ps1 # AuthorTool single-file exe
+python3 installer/build-author-cli.py --runtime win-x64                # CLI ZIP with docs
 ```
 
-The Windows applications target `net10.0-windows` and require the .NET 10 SDK; the installer also requires [Inno Setup 6](https://jrsoftware.org/isdl.php). On Linux, build the cross-platform projects and package both Linux applications with:
+The Windows applications target `net10.0-windows` and require the .NET 10 SDK; the installer also requires [Inno Setup 6](https://jrsoftware.org/isdl.php). On Linux, build the cross-platform projects and package the Linux manager and author CLI with:
 
 ```bash
 dotnet build AccessibilityModManager.slnx -p:EnableWindowsTargeting=true
@@ -92,7 +97,16 @@ installer/linux/build-linux.sh
 installer/linux/install-user.sh
 ```
 
-Linux packages are self-contained and install for the current user. Building them needs the .NET 10 SDK, a C compiler, Python 3, Git, `curl`, `tar`, and `sha256sum`. See [release packaging](installer/README.md) for the `dist/` artifacts and platform-specific update naming. The AuthorTool uses GNOME's `zenity` for file and confirmation dialogs. Its pinned GitHub CLI is bundled; sign in with the installed `tools/gh auth login` before GitHub publishing.
+Linux packages are self-contained and install for the current user. Building them needs the .NET 10 SDK, a C compiler, Python 3, Git, `curl`, `tar`, and `sha256sum`. See [release packaging](installer/README.md) for the `dist/` artifacts and platform-specific update naming. For CLI-only builds, run `python3 installer/build-author-cli.py --runtime linux-x64` or `--runtime win-x64`. This produces self-contained ZIPs with the entire documentation folder and checksums, without publishing them. Git and GitHub CLI are prerequisites for repository operations.
+
+Run the portable suites on Linux:
+
+```sh
+dotnet test tests/AccessibilityModManager.AuthorCli.Tests
+dotnet test tests/AccessibilityModManager.PortableTests
+```
+
+The Windows manager test project remains in the solution and requires Windows to execute. The CLI test project runs on both platforms.
 
 ## License
 

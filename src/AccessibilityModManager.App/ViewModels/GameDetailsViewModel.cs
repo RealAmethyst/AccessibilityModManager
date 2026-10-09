@@ -16,6 +16,7 @@ namespace AccessibilityModManager.App.ViewModels;
 public partial class GameDetailsViewModel : ObservableObject
 {
     private readonly IPluginRepoClient _repoClient;
+    private readonly PluginDirectoryClient? _directory;
     private readonly IPluginRegistryClient? _registryClient;
     private string _dependencyCatalogNotice = "";
     private bool _checkingBeforePlay;
@@ -165,9 +166,11 @@ public partial class GameDetailsViewModel : ObservableObject
         Action<string, string, string?, string?> showChangelog,
         Func<string, string, string?, string?> pickFile,
         Func<string, string?> pickFolder,
-        Action<PluginEntry>? navigateToDeveloper = null, IPluginRegistryClient? registryClient = null)
+        Action<PluginEntry>? navigateToDeveloper = null, IPluginRegistryClient? registryClient = null,
+        PluginDirectoryClient? directory = null)
     {
         _navigateToDeveloper = navigateToDeveloper;
+        _directory = directory;
         _repoClient = repoClient;
         _registryClient = registryClient;
         _installerEngine = installerEngine;
@@ -828,6 +831,19 @@ public partial class GameDetailsViewModel : ObservableObject
     {
         if (_checkingBeforePlay || group?.SelectedRelease == null) return;
         var release = group.SelectedRelease;
+        if (_directory is not null)
+        {
+            try
+            {
+                await _directory.RequirePluginAvailableAsync(release.PluginId, _configService, ct,
+                    _ownerPlugin?.Id == release.PluginId ? _ownerPlugin.RepoIndexUrl.AbsoluteUri : null);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _showInfoDialog("Download unavailable", ex.Message);
+                return;
+            }
+        }
         // A selected release older than the installed one is a DOWNGRADE, and every string in the
         // flow says so (finding 43) — the button quietly labelled "Update" while rolling backwards
         // was a long-standing trap, worst over a screen reader. Downgrading stays possible on
@@ -995,6 +1011,9 @@ public partial class GameDetailsViewModel : ObservableObject
                         return;
                     }
 
+                    if (_directory is not null)
+                        await _directory.RequirePluginAvailableAsync(release.PluginId, _configService, innerCt,
+                            _ownerPlugin?.Id == release.PluginId ? _ownerPlugin.RepoIndexUrl.AbsoluteUri : null);
                     if (isUpdate)
                         await _installerEngine.UpdateAsync(gameInstall, release, downloadedFile, scriptHost, depHost, innerCt);
                     else
@@ -1211,6 +1230,20 @@ public partial class GameDetailsViewModel : ObservableObject
         }
         var pending = plans.SelectMany(plan => plan.Updates).ToArray();
         if (pending.Length == 0) return true;
+        if (_directory is not null)
+        {
+            try
+            {
+                foreach (var id in ids)
+                    await _directory.RequirePluginAvailableAsync(id, _configService, ct,
+                        _ownerPlugin?.Id == id ? _ownerPlugin.RepoIndexUrl.AbsoluteUri : null);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _dependencyCatalogNotice = ex.Message + " Using the installed files. ";
+                return true;
+            }
+        }
         var text = "Updated dependencies are available: " + string.Join(", ", pending.Select(update => update.Dependency.Id).Distinct()) +
             ". Update them before starting " + DisplayName + "? Choose No to cancel launching. Close any other running copy first. " +
             "Replaced emulator files will be backed up. Files outside the update are kept.";

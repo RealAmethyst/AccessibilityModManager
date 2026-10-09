@@ -118,6 +118,8 @@ public static class PluginPackageValidation
                 return new PackageValidationReport(errors);
             }
 
+            errors.AddRange(DependencyAuthoringValidation.Errors(manifest.Dependencies));
+
             // Identity — the engine compares all three and aborts the install on any mismatch.
             if (!string.Equals(manifest.PluginId, expectedPluginId, StringComparison.Ordinal))
             {

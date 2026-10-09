@@ -5,12 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="AccessibilityModManager.AuthorCli.Tests" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <ProjectReference Include="../AccessibilityModManager.Infrastructure/AccessibilityModManager.Infrastructure.csproj" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="../AccessibilityModManager.AuthorTool/Services/**/*.cs" Link="Services/%(RecursiveDir)%(Filename)%(Extension)" />
-    <Compile Include="../AccessibilityModManager.AuthorTool/ViewModels/**/*.cs" Link="ViewModels/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

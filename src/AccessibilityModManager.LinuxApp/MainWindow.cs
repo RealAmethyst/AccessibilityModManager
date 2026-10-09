@@ -28,8 +28,6 @@ internal sealed class MainWindow : Window
     private readonly TabControl tabs = new SectionTabs();
     private readonly ListBox modsList = new();
     private readonly ListBox authorsList = new();
-    private readonly ListBox userSourcesList = new();
-    private readonly TextBox newSourceAddress = new();
     private readonly StackPanel filters = new() { Spacing = 6 };
     private readonly TextBlock modsStatus = new() { Focusable = true };
     private readonly TextBlock authorsStatus = new() { Focusable = true };
@@ -203,8 +201,6 @@ internal sealed class MainWindow : Window
         root.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
         root.RowDefinitions.Add(new RowDefinition(GridLength.Star));
         root.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
-        root.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
-        root.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
         root.Children.Add(new TextBlock { Text = "Authors", FontSize = 24, FontWeight = Avalonia.Media.FontWeight.Bold });
         AutomationProperties.SetName(authorsList, "Authors");
         authorsList.ContainerPrepared += (_, e) =>
@@ -226,52 +222,6 @@ internal sealed class MainWindow : Window
         };
         Grid.SetRow(authorsList, 1);
         root.Children.Add(authorsList);
-        var sourceSection = new StackPanel { Spacing = 4, Margin = new Thickness(0, 12, 0, 0) };
-        sourceSection.Children.Add(new TextBlock { Text = "Sources you added" });
-        AutomationProperties.SetName(userSourcesList, "Sources you added");
-        userSourcesList.MaxHeight = 130;
-        userSourcesList.ContainerPrepared += (_, e) =>
-        {
-            if (userSourcesList.ItemsSource is IReadOnlyList<UserPluginSource> entries &&
-                e.Index >= 0 && e.Index < entries.Count)
-                AutomationProperties.SetName(e.Container, DescribeSource(entries[e.Index]));
-        };
-        userSourcesList.AddHandler(InputElement.KeyDownEvent, (_, e) =>
-        {
-            if (e.Key != Key.Delete || userSourcesList.SelectedItem is not UserPluginSource source) return;
-            _ = RemoveSourceAsync(source);
-            e.Handled = true;
-        }, RoutingStrategies.Tunnel, handledEventsToo: true);
-        sourceSection.Children.Add(userSourcesList);
-        var removeSource = new Button { Content = "Remove source" };
-        removeSource.Click += async (_, _) =>
-        {
-            if (userSourcesList.SelectedItem is UserPluginSource source)
-                await RemoveSourceAsync(source);
-        };
-        sourceSection.Children.Add(removeSource);
-        Grid.SetRow(sourceSection, 2);
-        root.Children.Add(sourceSection);
-
-        var sourceEntry = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
-            Margin = new Thickness(0, 12, 0, 0) };
-        sourceEntry.Children.Add(new TextBlock { Text = "Add a source", VerticalAlignment = VerticalAlignment.Center });
-        AutomationProperties.SetName(newSourceAddress, "Add a source");
-        AutomationProperties.SetHelpText(newSourceAddress, "Full https address of the author's index.json file");
-        newSourceAddress.MinWidth = 360;
-        newSourceAddress.AddHandler(InputElement.KeyDownEvent, (_, e) =>
-        {
-            if (e.Key != Key.Enter) return;
-            _ = AddSourceAsync();
-            e.Handled = true;
-        }, RoutingStrategies.Tunnel, handledEventsToo: true);
-        sourceEntry.Children.Add(newSourceAddress);
-        var addSource = new Button { Content = "Add source" };
-        addSource.Click += async (_, _) => await AddSourceAsync();
-        sourceEntry.Children.Add(addSource);
-        Grid.SetRow(sourceEntry, 3);
-        root.Children.Add(sourceEntry);
-
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(0, 8, 0, 0) };
         var open = new Button { Content = "Open author details" };
         open.Click += (_, _) =>
@@ -282,9 +232,12 @@ internal sealed class MainWindow : Window
         refresh.Click += async (_, _) => await RefreshModsAsync(focusList: false);
         actions.Children.Add(open);
         actions.Children.Add(refresh);
+        var browse = new Button { Content = "Sources" };
+        browse.Click += async (_, _) => await BrowseDirectoryAsync();
+        actions.Children.Add(browse);
         AutomationProperties.SetLiveSetting(authorsStatus, AutomationLiveSetting.Polite);
         actions.Children.Add(authorsStatus);
-        Grid.SetRow(actions, 4);
+        Grid.SetRow(actions, 2);
         root.Children.Add(actions);
         return root;
     }
@@ -467,7 +420,6 @@ internal sealed class MainWindow : Window
             catalog = await new LinuxCatalogService(httpClient, logger, patreon).LoadAsync();
             authorsList.ItemsSource = catalog.Authors.Select(author => new AuthorRow(author)).ToArray();
             if (authorsList.ItemCount > 0 && authorsList.SelectedIndex < 0) authorsList.SelectedIndex = 0;
-            userSourcesList.ItemsSource = catalog.UserSources;
             RebuildFilters();
             FilterMods();
             var message = $"Found {catalog.Mods.Count} mods.";
@@ -475,6 +427,8 @@ internal sealed class MainWindow : Window
             if (catalog.Unavailable.Count > 0)
                 message += " Could not check: " + string.Join(", ", catalog.Unavailable) + ".";
             ShowMessage(message);
+            var additions = await new NewGameNotifications(new ConfigService(logger)).ObserveAsync(catalog.Observations);
+            if (additions.Count > 0) await ShowTextDialogAsync("New games", string.Join(Environment.NewLine, additions));
             if (focusList && tabs.SelectedIndex == 0)
             {
                 if (startupFocusPending) QueueStartupFocus();
@@ -625,14 +579,9 @@ internal sealed class MainWindow : Window
         else authorsList.Focus();
     }
 
-    private async Task AddSourceAsync()
+    private async Task AddSourceAsync(string address)
     {
         if (sourceBusy) return;
-        if (string.IsNullOrWhiteSpace(newSourceAddress.Text))
-        {
-            ReportAuthorStatus("Type the address of the source you want to add first.");
-            return;
-        }
         sourceBusy = true;
         try
         {
@@ -643,7 +592,7 @@ internal sealed class MainWindow : Window
                 .FetchRegistryAsync(new Uri(config.PluginRegistryUrl))).Value;
             var installed = await new ReceiptStore(logger).InstalledPluginIdsAsync();
             var preview = await new UserSourceAdder(new PluginRepoClient(httpClient, logger), logger)
-                .PreviewAsync(newSourceAddress.Text, registry.Plugins, config.UserPluginSources,
+                .PreviewAsync(address, registry.Plugins, config.UserPluginSources,
                     installed, config.KnownPluginAddresses);
             if (!preview.CanAdd)
             {
@@ -672,6 +621,7 @@ internal sealed class MainWindow : Window
                         installed, preview.PluginId, preview.IndexUrl,
                         current.KnownPluginAddresses) is not null) return;
                 current.UserPluginSources.Add(UserSourceAdder.Accept(preview, DateTimeOffset.UtcNow));
+                current.KnownPluginGameIds.Remove(UserPluginSource.AcceptanceKey(preview.PluginId, preview.IndexUrl));
                 current.KnownPluginAddresses[preview.PluginId] = preview.IndexUrl;
                 committed = true;
             });
@@ -680,7 +630,6 @@ internal sealed class MainWindow : Window
                 ReportAuthorStatus("That source wasn't added because its developer id is now in use.");
                 return;
             }
-            newSourceAddress.Text = "";
             await RefreshModsAsync(focusList: false);
             ReportAuthorStatus("Added " + preview.DisplayName + ".");
         }
@@ -690,6 +639,33 @@ internal sealed class MainWindow : Window
             ReportAuthorStatus("Couldn't add that source. " + CatalogRefusedException.SpeakableReason(ex));
         }
         finally { sourceBusy = false; }
+    }
+
+    private async Task BrowseDirectoryAsync()
+    {
+        if (sourceBusy || busy) return;
+        try
+        {
+            var directory = new PluginDirectoryClient(httpClient);
+            var config = await new ConfigService(logger).LoadAsync();
+            IReadOnlyList<PluginDirectoryEntry> listings = [];
+            try { listings = await directory.ListAsync(); }
+            catch (Exception ex)
+            {
+                ReportAuthorStatus("Could not load available sources. Showing sources you already added. " +
+                    CatalogRefusedException.SpeakableReason(ex));
+            }
+            var choices = SourceListItem.Build(listings, UserPluginSourceValidation.Accept(config.UserPluginSources).Accepted);
+            var selected = await new SourcesDialog(choices).ShowDialog<SourceListItem?>(this);
+            if (selected is null) return;
+            if (selected.Saved is { } saved) await RemoveSourceAsync(saved);
+            else
+            {
+                await directory.RequireAvailableAsync(selected.IndexUrl);
+                await AddSourceAsync(selected.IndexUrl);
+            }
+        }
+        catch (Exception ex) { ReportError(ex); }
     }
 
     private async Task RemoveSourceAsync(UserPluginSource source)
@@ -727,10 +703,6 @@ internal sealed class MainWindow : Window
         AutomationProperties.SetName(authorsStatus, message);
         authorsStatus.Focus();
     }
-
-    private static string DescribeSource(UserPluginSource source) =>
-        $"{(string.IsNullOrWhiteSpace(source.DisplayName) ? source.PluginId : source.DisplayName)}, " +
-        source.IndexUrl;
 
     private void ShowModDetails(LinuxModEntry mod, bool fromAuthor = false,
         string? completionMessage = null)
@@ -1071,6 +1043,7 @@ internal sealed class MainWindow : Window
         busy = true;
         try
         {
+            await new PluginDirectoryClient(httpClient).RequireAvailableAsync(mod.Author.Source.IndexUrl.AbsoluteUri);
             string? localPackagePath = null;
             if (release.Patreon is { } gate && string.IsNullOrWhiteSpace(gate.ServerUrl))
             {
@@ -1279,6 +1252,7 @@ internal sealed class MainWindow : Window
         string? installedPath = null;
         try
         {
+            await new PluginDirectoryClient(httpClient).RequireAvailableAsync(mod.Author.Source.IndexUrl.AbsoluteUri);
             var choices = NativeGameInstaller.Available(mod.Game).Select(dependency => new GameInstallerChoice(dependency)).ToArray();
             var selected = choices.Length == 1 ? choices[0] : await ChoiceDialog.ChooseAsync(this,
                 "Game or emulator installer", "Choose the Linux installer to use.", choices);
@@ -1387,7 +1361,13 @@ internal sealed class MainWindow : Window
                         InstallPath = mod.Install.InstallPath, IsValid = true };
                     var target = mod.InstalledTarget == ReleaseTarget.Linux ? ReleaseTarget.Linux : ReleaseTarget.Proton;
                     var pending = await updater.FindAsync(game, target);
+                    var canUpdate = true;
                     if (pending.Count > 0)
+                    {
+                        try { await new PluginDirectoryClient(httpClient).RequireAvailableAsync(mod.Author.Source.IndexUrl.AbsoluteUri); }
+                        catch (InvalidOperationException ex) { canUpdate = false; catalogNotice = ex.Message + " Using the installed files. "; }
+                    }
+                    if (pending.Count > 0 && canUpdate)
                     {
                         var message = "Updated dependencies are available: " + string.Join(", ", pending.Select(update => update.Dependency.Id)) +
                             ". Update before launching " + mod.Game.DisplayName + "? Close any other running copy first. " +

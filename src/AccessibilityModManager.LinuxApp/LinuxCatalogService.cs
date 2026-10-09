@@ -59,7 +59,7 @@ internal sealed record LinuxModEntry(
 internal sealed record LinuxCatalog(
     IReadOnlyList<LinuxModEntry> Mods, IReadOnlyList<LinuxAuthorEntry> Authors,
     IReadOnlyList<UserPluginSource> UserSources,
-    IReadOnlyList<string> Unavailable, bool FromCache);
+    IReadOnlyList<string> Unavailable, bool FromCache, IReadOnlyList<ObservedPluginGames> Observations);
 
 internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
     PatreonService? patreon = null)
@@ -75,6 +75,8 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
         var receipts = new ReceiptStore(logger);
         var setupRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "AccessibilityModManager", "proton-setups");
+        var installedPluginIds = await receipts.InstalledPluginIdsAsync();
+        var observations = new List<ObservedPluginGames>();
         var mods = new List<LinuxModEntry>();
         var authors = new List<LinuxAuthorEntry>();
         var unavailable = new List<string>();
@@ -93,6 +95,10 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
                 var index = fetched.Value;
                 var author = new LinuxAuthorEntry(source, index);
                 authors.Add(author);
+                if (!fetched.FromCache && fetched.LiveRejectionReason is null &&
+                    (source.IsUserAdded || installedPluginIds.Contains(source.PluginId)))
+                    observations.Add(new(UserPluginSource.AcceptanceKey(source.PluginId, source.IndexUrl.AbsoluteUri),
+                        author.Author, index.Games));
                 var steamGames = index.Games.Where(game => !string.IsNullOrWhiteSpace(game.EffectiveSteamAppId)).ToArray();
                 var installs = await detector.DetectInstalledGamesAsync(steamGames, source.PluginId, ct);
                 var installByGame = installs.ToDictionary(install => install.Game.GameId);
@@ -150,6 +156,6 @@ internal sealed class LinuxCatalogService(HttpClient httpClient, ILogger logger,
             mods.OrderBy(mod => mod.ModName, StringComparer.CurrentCultureIgnoreCase).ToArray(),
             authors.OrderBy(author => author.Author, StringComparer.CurrentCultureIgnoreCase).ToArray(),
             accepted.Accepted,
-            unavailable, fromCache);
+            unavailable, fromCache, observations);
     }
 }

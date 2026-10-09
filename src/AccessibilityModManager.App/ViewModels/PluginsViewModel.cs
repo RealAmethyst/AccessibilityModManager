@@ -15,6 +15,13 @@ public partial class PluginsViewModel : ObservableObject
     private readonly IConfigService _configService;
     private readonly IReceiptStore _receiptStore;
     private readonly UserSourceAdder _sourceAdder;
+    private readonly PluginDirectoryClient? _directory;
+    private IReadOnlyList<PluginDirectoryEntry> _directoryEntries = [];
+    public ObservableCollection<SourceListItem> DirectorySources { get; } = [];
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SourceActionLabel))]
+    private SourceListItem? _selectedSource;
+    public string SourceActionLabel => SelectedSource?.ActionLabel ?? "Add";
     private readonly ILogger _logger;
     private readonly Action<PluginEntry>? _navigateToDeveloperDetails;
 
@@ -45,19 +52,6 @@ public partial class PluginsViewModel : ObservableObject
 
     public ObservableCollection<PluginItemViewModel> Plugins { get; } = [];
 
-    /// <summary>Sources the user added themselves, newest last — the order they own their ids in.</summary>
-    public ObservableCollection<UserSourceItemViewModel> UserSources { get; } = [];
-
-    public bool HasUserSources => UserSources.Count > 0;
-
-    /// <summary>
-    /// The address typed into the Add-a-source field. A plain field on the tab rather than a popup:
-    /// the action belongs beside the list it changes, and it saves a screen-reader user a dialog to
-    /// enter and leave for one line of text.
-    /// </summary>
-    [ObservableProperty]
-    private string? _newSourceAddress;
-
     public PluginsViewModel(
         IPluginRegistryClient registryClient,
         IConfigService configService,
@@ -66,7 +60,8 @@ public partial class PluginsViewModel : ObservableObject
         ILogger logger,
         Action<PluginEntry>? navigateToDeveloperDetails = null,
         Func<SourcePreview, bool>? confirmRisk = null,
-        Func<string, bool>? confirmRemove = null)
+        Func<string, bool>? confirmRemove = null,
+        PluginDirectoryClient? directory = null)
     {
         _registryClient = registryClient;
         _configService = configService;
@@ -76,22 +71,60 @@ public partial class PluginsViewModel : ObservableObject
         _navigateToDeveloperDetails = navigateToDeveloperDetails;
         _confirmRisk = confirmRisk;
         _confirmRemove = confirmRemove;
+        _directory = directory;
     }
 
-    /// <summary>
-    /// Adds a source: ask for the address, look at what is really there, then show the notice.
-    ///
-    /// <para>Nothing is written until the user has accepted, and the save goes through the config
-    /// transaction — adding a source takes as long as a fetch plus however long someone spends
-    /// reading a warning, and an ordinary settings save landing in that window would otherwise be
-    /// written from a snapshot taken before the source existed.</para>
-    /// </summary>
+    private void RebuildSources(AppConfig config)
+    {
+        var selectedId = SelectedSource?.PluginId;
+        DirectorySources.Clear();
+        foreach (var source in SourceListItem.Build(_directoryEntries,
+                     UserPluginSourceValidation.Accept(config.UserPluginSources).Accepted))
+            DirectorySources.Add(source);
+        SelectedSource = DirectorySources.FirstOrDefault(source => source.PluginId == selectedId)
+            ?? DirectorySources.FirstOrDefault();
+    }
+
     [RelayCommand]
-    private async Task AddSourceAsync(CancellationToken ct)
+    private async Task BrowseDirectoryAsync(CancellationToken ct)
+    {
+        if (_directory is null) return;
+        IsLoading = true;
+        try
+        {
+            RebuildSources(await _configService.LoadAsync());
+            _directoryEntries = await _directory.ListAsync(ct);
+            RebuildSources(await _configService.LoadAsync());
+            Report($"Found {DirectorySources.Count} sources. Select a source and choose Add or Remove.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        { Report("Could not load available sources. Sources you already added remain listed. " + ex.Message); }
+        finally { IsLoading = false; }
+    }
+
+    [RelayCommand]
+    private async Task ManageSourceAsync(CancellationToken ct)
+    {
+        if (SelectedSource is not { } source)
+        {
+            Report("Select a source first.");
+            return;
+        }
+        if (source.IsAdded)
+            await RemoveSourceAsync(source);
+        else
+        {
+            if (_directory is null) return;
+            try { await _directory.RequireAvailableAsync(source.IndexUrl, ct); }
+            catch (InvalidOperationException ex) { Report(ex.Message); return; }
+            await AddSourceAsync(source.IndexUrl, ct);
+        }
+    }
+
+    private async Task AddSourceAsync(string? address, CancellationToken ct)
     {
         if (_confirmRisk is null) return;
 
-        var address = NewSourceAddress;
         if (string.IsNullOrWhiteSpace(address))
         {
             Report("Type the address of the source you want to add first.");
@@ -138,6 +171,7 @@ public partial class PluginsViewModel : ObservableObject
                 if (!stillFree) return;
 
                 c.UserPluginSources.Add(UserSourceAdder.Accept(preview, DateTimeOffset.UtcNow));
+                c.KnownPluginGameIds.Remove(UserPluginSource.AcceptanceKey(preview.PluginId, preview.IndexUrl));
 
                 // Remembered so this source can be removed and added back later: the installed-mods
                 // reservation has to know this address is the one that created them.
@@ -152,7 +186,6 @@ public partial class PluginsViewModel : ObservableObject
                 return;
             }
 
-            NewSourceAddress = null;
             SourcesChanged?.Invoke();
 
             // Reload FIRST, then speak. LoadPlugins writes its own status line, so reporting before
@@ -180,8 +213,7 @@ public partial class PluginsViewModel : ObservableObject
     /// Removes a source. Mods already installed from it stay installed and can still be uninstalled
     /// — removal stops updates and new installs, it does not touch anything on disk.
     /// </summary>
-    [RelayCommand]
-    private async Task RemoveSourceAsync(UserSourceItemViewModel? source)
+    private async Task RemoveSourceAsync(SourceListItem? source)
     {
         // Every exit from here says something. Silence after pressing a button is the worst outcome
         // on a screen reader: it is indistinguishable from success, and it is exactly what happened —
@@ -259,6 +291,7 @@ public partial class PluginsViewModel : ObservableObject
         try
         {
             var config = await _configService.LoadAsync();
+            RebuildSources(config);
             var registryFetch = await _registryClient.FetchRegistryAsync(new Uri(config.PluginRegistryUrl), ct);
             var registry = registryFetch.Value;
 
@@ -279,10 +312,6 @@ public partial class PluginsViewModel : ObservableObject
             // Rebuilt from the ACCEPTED list, not the raw config, so a source the loader refused
             // never appears here as though it were working.
             var accepted = UserPluginSourceValidation.Accept(config.UserPluginSources);
-            UserSources.Clear();
-            foreach (var source in accepted.Accepted)
-                UserSources.Add(new UserSourceItemViewModel(source));
-            OnPropertyChanged(nameof(HasUserSources));
 
             var summary = $"Loaded {Plugins.Count} developer{(Plugins.Count == 1 ? "" : "s")}.";
             if (accepted.Rejected.Count > 0)
@@ -348,26 +377,4 @@ public partial class PluginItemViewModel : ObservableObject
     }
 
     public override string ToString() => Name;
-}
-
-/// <summary>One source the user added, as a row on the Developers tab.</summary>
-public sealed class UserSourceItemViewModel(UserPluginSource source)
-{
-    public string PluginId => source.PluginId;
-
-    public string DisplayName =>
-        string.IsNullOrWhiteSpace(source.DisplayName) ? source.PluginId : source.DisplayName!;
-
-    public string Address => source.IndexUrl;
-
-    /// <summary>
-    /// What the row says. The host is included because it is the part a user can actually judge —
-    /// a name is whatever the source calls itself, but the address is where it really comes from.
-    /// "Added by you" is what separates it from a developer in the built-in catalog.
-    /// </summary>
-    public string AnnouncementText =>
-        $"{DisplayName}, added by you, from {Host}";
-
-    private string Host =>
-        Uri.TryCreate(source.IndexUrl, UriKind.Absolute, out var url) ? url.Host : source.IndexUrl;
 }

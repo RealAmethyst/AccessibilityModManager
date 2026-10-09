@@ -1,0 +1,15 @@
+{
+  "id": "example-loader",
+  "type": "framework",
+  "required": true,
+  "targetPlatforms": ["windows"],
+  "check": { "filePath": "version.dll" },
+  "fix": {
+    "downloadUrl": "https://example.invalid/replace-with-real-pinned-loader.zip",
+    "autoInstall": {
+      "kind": "extractZip",
+      "sha256": "REPLACE_WITH_THE_ACTUAL_64_CHARACTER_SHA256",
+      "targetDir": "."
+    }
+  }
+}

@@ -23,8 +23,9 @@ public sealed class AddRemoveSourceTests
         var saw = new List<SourcePreview>();
         var vm = Build(config, confirmRisk: p => { saw.Add(p); return true; });
 
-        vm.NewSourceAddress = "https://example.invalid/buu420/index.json";
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        vm.SelectedSource = new SourceListItem(new PluginDirectoryEntry("listing", "buu420", "Buu", "buu420", 42,
+            "buu420/catalog", "https://example.invalid/buu420/index.json", []), null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         // The notice was shown, and it named a real developer with a real mod count rather than
         // just echoing the address back.
@@ -48,8 +49,9 @@ public sealed class AddRemoveSourceTests
         var config = new AppConfig();
         var vm = Build(config, confirmRisk: _ => false);
 
-        vm.NewSourceAddress = "https://example.invalid/buu420/index.json";
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        vm.SelectedSource = new SourceListItem(new PluginDirectoryEntry("listing", "buu420", "Buu", "buu420", 42,
+            "buu420/catalog", "https://example.invalid/buu420/index.json", []), null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.Empty(config.UserPluginSources);
         Assert.Contains("Cancelled", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
@@ -64,8 +66,9 @@ public sealed class AddRemoveSourceTests
         var config = new AppConfig();
         var vm = Build(config, confirmRisk: _ => true);
 
-        vm.NewSourceAddress = "https://example.invalid/buu420/index.json";
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        vm.SelectedSource = new SourceListItem(new PluginDirectoryEntry("listing", "buu420", "Buu", "buu420", 42,
+            "buu420/catalog", "https://example.invalid/buu420/index.json", []), null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.Single(UserPluginSourceValidation.Accept(config.UserPluginSources).Accepted);
     }
@@ -78,8 +81,9 @@ public sealed class AddRemoveSourceTests
         var vm = Build(config, confirmRisk: _ => { asked = true; return true; },
             registryPluginId: "buu420");
 
-        vm.NewSourceAddress = "https://example.invalid/buu420/index.json";
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        vm.SelectedSource = new SourceListItem(new PluginDirectoryEntry("listing", "buu420", "Buu", "buu420", 42,
+            "buu420/catalog", "https://example.invalid/buu420/index.json", []), null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         // Refused before the notice: there is no decision to put to the user about a source that
         // cannot be added at all.
@@ -90,14 +94,13 @@ public sealed class AddRemoveSourceTests
     }
 
     [Fact]
-    public async Task An_empty_address_says_so_rather_than_doing_nothing()
+    public async Task No_selected_source_says_so_rather_than_doing_nothing()
     {
         // Silence is the worst outcome on a screen reader — pressing a button and hearing nothing
         // is indistinguishable from the button being broken.
         var vm = Build(new AppConfig(), confirmRisk: _ => true);
 
-        vm.NewSourceAddress = "   ";
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement));
     }
@@ -117,22 +120,10 @@ public sealed class AddRemoveSourceTests
                 announcements++;
         };
 
-        vm.NewSourceAddress = "   ";
-        await vm.AddSourceCommand.ExecuteAsync(null);
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.Equal(2, announcements);
-    }
-
-    [Fact]
-    public async Task Adding_clears_the_address_box()
-    {
-        var vm = Build(new AppConfig(), confirmRisk: _ => true);
-
-        vm.NewSourceAddress = "https://example.invalid/buu420/index.json";
-        await vm.AddSourceCommand.ExecuteAsync(null);
-
-        Assert.True(string.IsNullOrEmpty(vm.NewSourceAddress));
     }
 
     [Fact]
@@ -144,8 +135,9 @@ public sealed class AddRemoveSourceTests
         var vm = Build(new AppConfig(), confirmRisk: _ => true);
         vm.SourcesChanged += () => raised++;
 
-        vm.NewSourceAddress = "https://example.invalid/buu420/index.json";
-        await vm.AddSourceCommand.ExecuteAsync(null);
+        vm.SelectedSource = new SourceListItem(new PluginDirectoryEntry("listing", "buu420", "Buu", "buu420", 42,
+            "buu420/catalog", "https://example.invalid/buu420/index.json", []), null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.Equal(1, raised);
     }
@@ -159,7 +151,7 @@ public sealed class AddRemoveSourceTests
         var vm = Build(config, confirmRisk: _ => true, confirmRemove: _ => true);
         await vm.LoadPluginsCommand.ExecuteAsync(null);
 
-        await vm.RemoveSourceCommand.ExecuteAsync(Assert.Single(vm.UserSources));
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.Empty(config.UserPluginSources);
         Assert.Contains("still installed", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
@@ -177,7 +169,7 @@ public sealed class AddRemoveSourceTests
         var vm = Build(config, confirmRisk: _ => true, confirmRemove: _ => false);
         await vm.LoadPluginsCommand.ExecuteAsync(null);
 
-        await vm.RemoveSourceCommand.ExecuteAsync(Assert.Single(vm.UserSources));
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.Single(config.UserPluginSources);
         Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement));
@@ -189,7 +181,7 @@ public sealed class AddRemoveSourceTests
     {
         var vm = Build(new AppConfig(), confirmRisk: _ => true);
 
-        await vm.RemoveSourceCommand.ExecuteAsync(null);
+        await vm.ManageSourceCommand.ExecuteAsync(null);
 
         Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement));
     }
@@ -205,7 +197,7 @@ public sealed class AddRemoveSourceTests
             var vm = Build(config, confirmRisk: _ => true, confirmRemove: _ => accepted);
             await vm.LoadPluginsCommand.ExecuteAsync(null);
 
-            await vm.RemoveSourceCommand.ExecuteAsync(Assert.Single(vm.UserSources));
+            await vm.ManageSourceCommand.ExecuteAsync(null);
 
             Assert.False(string.IsNullOrWhiteSpace(vm.StatusAnnouncement),
                 $"nothing was announced when the confirmation returned {accepted}");
@@ -225,13 +217,13 @@ public sealed class AddRemoveSourceTests
         var vm = Build(config, confirmRisk: _ => true);
         await vm.LoadPluginsCommand.ExecuteAsync(null);
 
-        var listed = Assert.Single(vm.UserSources);
+        var listed = Assert.Single(vm.DirectorySources);
         Assert.Equal("buu420", listed.PluginId);
         Assert.Contains("wasn't loaded", vm.StatusMessage ?? "", StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task A_source_row_says_it_was_added_by_you_and_where_it_comes_from()
+    public async Task A_source_row_says_it_was_added_and_where_it_comes_from()
     {
         var config = new AppConfig();
         config.UserPluginSources.Add(TestUserSource.Accepted("buu420", "Buu"));
@@ -239,10 +231,10 @@ public sealed class AddRemoveSourceTests
         var vm = Build(config, confirmRisk: _ => true);
         await vm.LoadPluginsCommand.ExecuteAsync(null);
 
-        var row = Assert.Single(vm.UserSources);
-        Assert.Contains("Buu", row.AnnouncementText, StringComparison.Ordinal);
-        Assert.Contains("added by you", row.AnnouncementText, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("example.invalid", row.AnnouncementText, StringComparison.Ordinal);
+        var row = Assert.Single(vm.DirectorySources);
+        Assert.Contains("Buu", row.ToString(), StringComparison.Ordinal);
+        Assert.Contains("added", row.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("example.invalid", row.ToString(), StringComparison.Ordinal);
     }
 
     // ------------------------------------------------------------------ harness
@@ -262,7 +254,15 @@ public sealed class AddRemoveSourceTests
             TestLogger.Create(),
             navigateToDeveloperDetails: null,
             confirmRisk: confirmRisk,
-            confirmRemove: confirmRemove ?? (_ => true));
+            confirmRemove: confirmRemove ?? (_ => true),
+            directory: new PluginDirectoryClient(new HttpClient(new AvailableSource())));
+    }
+
+    private sealed class AvailableSource : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            { Content = new StringContent("{\"available\":true}") });
     }
 
     private sealed class StubRepo : IPluginRepoClient

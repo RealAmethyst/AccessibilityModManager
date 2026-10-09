@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create separately installable, self-contained manager and AuthorTool downloads."""
+"""Create separately installable, self-contained manager and author CLI downloads."""
 from datetime import datetime, timezone
 import argparse
 import hashlib
@@ -16,9 +16,13 @@ parser.add_argument("dist", type=Path)
 parser.add_argument("--product", choices=["manager", "author"])
 args = parser.parse_args()
 project, build, dist = args.project, args.build, args.dist
+if args.product in (None, "author"):
+    import subprocess
+    subprocess.run(["python3", str(project / "installer" / "build-author-cli.py"),
+                    "--runtime", "linux-x64", "--prepared", str(build / "author"),
+                    "--dist", str(dist)], check=True)
 for folder, project_name, product, filename, executable in [
     ("manager", "LinuxApp", "AccessibilityModManager", "AccessibilityModManager", "AccessibilityModManager.LinuxApp"),
-    ("author", "LinuxAuthorTool", "AccessibilityModManager-Author", "PluginIndexAuthor", "AccessibilityModManager.LinuxAuthorTool"),
 ]:
     if args.product is not None and folder != args.product:
         continue
@@ -37,7 +41,7 @@ exec "./{executable}" --install
     (source / "INSTALL.txt").write_text(f'''{filename} {version} for x86-64 Linux
 
 Extract this archive and run ./install.sh from its folder. Do not use sudo.
-Then open {"Accessibility Mod Manager" if folder == "manager" else "Plugin Index Author"} from your application menu (Meta key).
+Then open Accessibility Mod Manager from your application menu (Meta key).
 The .NET runtime is included. A graphical Linux desktop is required to run the app.
 
 The installer adds an application-menu shortcut and installs below
@@ -46,10 +50,10 @@ It preserves your settings, sign-ins, mod receipts and installed game files.
 An existing app build is backed up beside the installation before replacement.
 Close the application before running install.sh again to upgrade manually.
 
-{"The manager checks for updates at startup. You can also use Settings, Check for manager updates. Installation requires your confirmation." if folder == "manager" else "For an AuthorTool update, download and extract its new archive and run install.sh again."}
+The manager checks for updates at startup. You can also use Settings, Check for manager updates. Installation requires your confirmation.
 
 To remove the application, delete only its linux-x64 installation directory and
-$XDG_DATA_HOME/applications/{"accessibility-mod-manager.desktop" if folder == "manager" else "accessibility-mod-author.desktop"}
+$XDG_DATA_HOME/applications/accessibility-mod-manager.desktop
 (or the same path under ~/.local/share/applications).
 Keep the application's other data folders: they contain settings and mod ownership records.
 ''')

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
+using AccessibilityModManager.Infrastructure.Services;
 using AccessibilityModManager.Infrastructure.Detection;
 using AccessibilityModManager.Infrastructure.Patreon;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -14,6 +15,7 @@ public partial class GamesListViewModel : ObservableObject
 {
     private readonly IPluginRegistryClient _registryClient;
     private readonly IPluginRepoClient _repoClient;
+    public event Action<IReadOnlyList<string>>? NewGamesAvailable;
     private readonly IConfigService _configService;
     private readonly IReceiptStore _receiptStore;
     private readonly IGameVerifier _gameVerifier;
@@ -186,6 +188,7 @@ public partial class GamesListViewModel : ObservableObject
             // Every registry-listed plugin is active. We don't filter by an "enabled" state
             // anymore — registry membership IS the gate.
             var activeIndexes = new Dictionary<string, PluginRepoIndex>();
+            var observations = new List<ObservedPluginGames>();
 
             // Every developer whose catalog could not be loaded, and why. A refusal used to be
             // logged and then followed by a perfectly ordinary "Found N mods", so a plugin
@@ -284,6 +287,11 @@ public partial class GamesListViewModel : ObservableObject
                 {
                     var indexFetch = await _repoClient.FetchPluginIndexAsync(plugin, ct);
                     activeIndexes[plugin.PluginId] = indexFetch.Value;
+                    if (!indexFetch.FromCache && indexFetch.LiveRejectionReason is null &&
+                        (plugin.IsUserAdded || installedPluginIds.Contains(plugin.PluginId)))
+                        observations.Add(new(UserPluginSource.AcceptanceKey(plugin.PluginId, plugin.IndexUrl.AbsoluteUri),
+                            indexFetch.Value.Author?.DisplayName ?? plugin.RegistryEntry?.Author ?? plugin.UserDisplayName ?? plugin.PluginId,
+                            indexFetch.Value.Games));
 
                     if (indexFetch.LiveRejectionReason is { } rejected)
                     {
@@ -450,6 +458,8 @@ public partial class GamesListViewModel : ObservableObject
 
             // Spoken only when something is actually wrong. A plain count is shown and left alone.
             StatusAnnouncement = unavailable.Count > 0 || anyFromCache ? StatusMessage : null;
+            var additions = await new NewGameNotifications(_configService).ObserveAsync(observations);
+            if (additions.Count > 0) NewGamesAvailable?.Invoke(additions);
         }
         catch (OperationCanceledException)
         {

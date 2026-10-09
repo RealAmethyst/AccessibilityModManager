@@ -1,0 +1,6 @@
+{
+  "campaignId": "12345",
+  "tierIds": ["67890"],
+  "postId": "123456",
+  "attachmentFileName": "example-game-1.0.0.zip"
+}

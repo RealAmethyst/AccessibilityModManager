@@ -18,9 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AccessibilityModManager.Core\AccessibilityModManager.Core.csproj" />
     <ProjectReference Include="..\..\src\AccessibilityModManager.Infrastructure\AccessibilityModManager.Infrastructure.csproj" />
-    <!-- The AuthorTool holds the signing-key store: security-critical, and previously untestable
-         because nothing referenced it. -->
-    <ProjectReference Include="..\..\src\AccessibilityModManager.AuthorTool\AccessibilityModManager.AuthorTool.csproj" />
+    <!-- Shared authoring retains the dashboard signing-key store and its security tests. -->
+    <ProjectReference Include="..\..\src\AccessibilityModManager.Authoring\AccessibilityModManager.Authoring.csproj" />
     <!-- The App holds what the user is TOLD. On an accessibility product the announcement is the
          feature, so "a plugin was refused" being spoken needs pinning like any other behaviour. -->
     <ProjectReference Include="..\..\src\AccessibilityModManager.App\AccessibilityModManager.App.csproj" />

@@ -1,0 +1,11 @@
+{
+  "executable": "files/scripts/setup.ps1",
+  "what": "Enable the mod's accessibility option in its configuration file.",
+  "why": "This example mod requires a configuration value that a file copy cannot preserve safely.",
+  "modifies": "The mod's configuration file in the game folder. Replace this text with the exact path.",
+  "needsAdmin": false,
+  "failureFatal": true,
+  "runOnUpdate": true,
+  "installToGameFolder": false,
+  "runFromGameFolder": true
+}
