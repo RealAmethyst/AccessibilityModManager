@@ -5,8 +5,9 @@ using AccessibilityModManager.Infrastructure.Security;
 namespace AccessibilityModManager.Infrastructure.Detection;
 
 /// <summary>
-/// Fills the executable omitted by older Steam catalog entries only when the game install
-/// identifies one unambiguous Windows executable in the root or one directory below it.
+/// Fills the executable omitted by older Steam catalog entries. Steam's own launch configuration
+/// is used when it names one Windows executable; otherwise the game install must contain one
+/// unambiguous Windows executable in the root or one directory below it.
 /// No game-specific names are kept here.
 /// </summary>
 public static class SteamGameExecutableResolver
@@ -17,6 +18,16 @@ public static class SteamGameExecutableResolver
             return install;
         if (string.IsNullOrWhiteSpace(install.Game.EffectiveSteamAppId))
             throw new InvalidOperationException("This catalog game has no Steam App ID.");
+
+        // Steam's own launch configuration names the executable it starts for this game.
+        var launched = install.SteamRootPath is null ? null
+            : SteamAppInfo.LaunchExecutable(install.SteamRootPath, install.Game.EffectiveSteamAppId);
+        if (launched is not null && !launched.Split('/').Any(part => part is "" or "." or ".."))
+        {
+            var launchedPath = Path.Combine(install.InstallPath, launched);
+            if (File.Exists(launchedPath) && IsWindowsExecutable(install.InstallPath, launchedPath))
+                return WithExecutable(install, launchedPath);
+        }
 
         var directories = new[] { install.InstallPath }
             .Concat(Directory.EnumerateDirectories(install.InstallPath)
@@ -38,6 +49,11 @@ public static class SteamGameExecutableResolver
                 "and the game folder has no unique title-matching executable in its root or direct subfolders. " +
                 "The author needs to name the executable or publish a Proton package.");
 
+        return WithExecutable(install, chosen);
+    }
+
+    private static GameInstall WithExecutable(GameInstall install, string chosen)
+    {
         var original = install.Game;
         var game = new GameDefinition
         {

@@ -108,9 +108,19 @@ public static class ProtonLaunchAnalyzer
             : null;
         if (codeFiles > 0 && launchers.Count == 0 && proxies.Count == 0 && gameLoaded.Count == 0 &&
             !replacesGameFiles && installedLoader is null)
-            throw new InvalidOperationException(
-                "The mod's code has no launcher, loader DLL beside the game, or loader it depends on. " +
-                "A Proton release is needed for this mod.");
+        {
+            // A loader DLL in another folder cannot load on Windows either; name the fix.
+            var misplaced = packageFiles.Keys.Concat(dependencyFiles.Keys).FirstOrDefault(target =>
+                target.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) &&
+                builtinModules.Contains(Path.GetFileNameWithoutExtension(target)) &&
+                !Folder(target).Equals(gameFolder, StringComparison.OrdinalIgnoreCase));
+            throw new InvalidOperationException(misplaced is null
+                ? "The mod's code has no launcher, loader DLL beside the game, or loader it depends on. " +
+                  "A Proton release is needed for this mod."
+                : $"The mod's code has no launcher, loader DLL beside the game, or loader it depends on. " +
+                  $"The release installs the loader '{misplaced}', but the game starts '{gameRelative}'. " +
+                  "The release's files need to be installed in the game executable's folder.");
+        }
         if (proxies.Count > MaxProxies)
             throw new InvalidOperationException(
                 $"The mod places {proxies.Count} DLLs that replace Proton components beside the game. " +

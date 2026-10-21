@@ -126,6 +126,98 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
     }
 
     [Fact]
+    public async Task ChaudloaderReleaseLoadsThroughDxgiBesideTheGameInItsSubfolder()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var rootZip = Environment.GetEnvironmentVariable("AMM_MMBN_ROOT_ZIP");
+        var exeZip = Environment.GetEnvironmentVariable("AMM_MMBN_EXE_ZIP");
+        var gameExecutable = Environment.GetEnvironmentVariable("AMM_MMBN_GAME_EXE");
+        if (rootZip is null || exeZip is null || gameExecutable is null) return;
+
+        var gamePath = Path.Combine(root, "mmbn-game");
+        var steamRoot = Path.Combine(root, "mmbn-steam");
+        var prefix = Path.Combine(steamRoot, "steamapps", "compatdata", "1798020", "pfx");
+        Directory.CreateDirectory(Path.Combine(gamePath, "exe"));
+        Directory.CreateDirectory(prefix);
+        File.Copy(gameExecutable, Path.Combine(gamePath, "exe", "MMBN_LC2.exe"));
+        var game = new GameInstall
+        {
+            Game = new GameDefinition
+            {
+                GameId = "mmbnvi", DisplayName = "Mega man battle network 6",
+                ExeName = "exe/MMBN_LC2.exe", SteamAppId = "1798020"
+            },
+            PluginId = "amethyst", InstallPath = gamePath, SteamRootPath = steamRoot,
+            ProtonPrefixPath = prefix, IsValid = true
+        };
+        ModRelease Release(string path) => new()
+        {
+            GameId = "mmbnvi", PluginId = "amethyst", Channel = "beta",
+            Version = System.Text.Json.JsonDocument.Parse(ZipFile.OpenRead(path)
+                .GetEntry("manifest.json")!.Open()).RootElement.GetProperty("modVersion").GetString()!,
+            TargetPlatform = ReleaseTarget.Windows,
+            Sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)))
+        };
+
+        // Loader files placed above the game's exe folder can never load, on Windows or Proton.
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, Release(rootZip), rootZip, Proton("dxgi")));
+        Assert.Contains("installs the loader 'dxgi.dll', but the game starts 'exe/MMBN_LC2.exe'", error.Message);
+
+        using var adapted = await new ProtonWindowsPackageAdapter(logger)
+            .PrepareAsync(game, Release(exeZip), exeZip, Proton("dxgi"));
+        var proxy = Assert.Single(adapted.Launch.Proxies);
+        Assert.Equal("exe/dxgi.dll", proxy.Path);
+        var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
+        Assert.Equal("dxgi=n,b", Assert.Single(local.Manifest.ProtonLaunch!.WineDllOverrides));
+        Assert.Equal("exe/dxgi.dll", local.Manifest.ProtonLaunch.WineDllProxyPaths["dxgi"]);
+        Assert.Equal(".amm/prism-0.18.3-x64/wine", local.Manifest.ProtonLaunch.BridgeDirectory);
+        Assert.Contains(local.Manifest.InstallActions, action => action is CopyFileAction
+            { Target: "exe/mods/mmbnlc-accessibility/prism_orca_bridge.dll" });
+        using (var archive = ZipFile.OpenRead(adapted.Path))
+        using (var prism = archive.Entries.Single(entry =>
+                   entry.FullName.EndsWith("/mmbnlc-accessibility/prism.dll", StringComparison.Ordinal)).Open())
+            Assert.Equal(OfficialPrism0183Sha256, Convert.ToHexStringLower(SHA256.HashData(prism)));
+
+        var proton = Proton("dxgi");
+        // Reports the Visual C++ registry value as an installed prefix would.
+        File.WriteAllText(proton, "#!/bin/sh\nprintf '    Version    REG_SZ    v14.51.36247.00\\n'\n");
+        File.SetUnixFileMode(proton, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var wrapper = Path.Combine(root, "mmbn-wrapper");
+        File.WriteAllText(wrapper, "wrapper");
+        File.SetUnixFileMode(wrapper, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        var configPath = Path.Combine(root, "mmbn-localconfig.vdf");
+        const string config = "\"UserLocalConfigStore\"\n{\n\"Software\" { \"Valve\" { \"Steam\" { \"apps\"\n{\n\"1798020\"\n{\n\"LaunchOptions\" \"%command%\"\n}\n}\n} } }\n}\n";
+        File.WriteAllText(configPath, config);
+        var backup = new BackupManager(logger);
+        var receipts = new ReceiptStore(logger, Path.Combine(root, "mmbn-receipts"));
+        var engine = new InstallerEngine(backup, new InstallActionExecutor(backup, logger),
+            new InstallVerifier(logger), new ManifestParser(logger), new SafeZipExtractor(logger),
+            receipts, new DependencyChecker(logger), new LifecycleScriptRunner(logger),
+            new DependencyAutoInstaller(new HttpClient(),
+                new DependencyReceiptStore(logger, Path.Combine(root, "mmbn-dep-receipts")), logger),
+            new GameVerifier(logger), logger);
+        var coordinator = new ProtonSteamInstallCoordinator(engine, receipts,
+            new ProtonPackageInspector(logger),
+            new ProtonWindowsDesktopRuntime(new HttpClient(), Path.Combine(root, "mmbn-runtime-cache")),
+            new ProtonVisualCppRuntime(new HttpClient(), Path.Combine(root, "mmbn-runtime-cache")),
+            new SteamLocalConfigStore(configPath, () => false), Path.Combine(root, "mmbn-setups"),
+            wrapper, proton, logger);
+
+        await coordinator.InstallAsync(game, adapted.Release, adapted.Path);
+        Assert.True(File.Exists(Path.Combine(gamePath, "exe", "dxgi.dll")));
+        Assert.True(File.Exists(Path.Combine(gamePath, "exe", "mods", "mmbnlc-accessibility",
+            "prism_orca_bridge.dll")));
+        var installed = SteamLocalConfigEditor.Read(File.ReadAllText(configPath), "1798020")!;
+        Assert.Contains("--amm-v1 direct", installed);
+        Assert.Contains("'dxgi=n,b'", installed);
+        await coordinator.UninstallAsync(game, "amethyst");
+        Assert.False(File.Exists(Path.Combine(gamePath, "exe", "dxgi.dll")));
+        Assert.Equal(config, File.ReadAllText(configPath));
+        Assert.True(File.Exists(Path.Combine(gamePath, "exe", "MMBN_LC2.exe")));
+    }
+
+    [Fact]
     public async Task BundledBepInExWindowsReleaseBecomesValidatedProtonPackage()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -865,7 +957,11 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         return (game, release, package);
     }
 
-    private string Proton() => TestPe.Proton(root, "winhttp", "version", "dinput8");
+    private const string OfficialPrism0183Sha256 =
+        "7c7d09c8c7306e8e1a0c46d603ccb2a391c194c77843400c11b746e7dd56a467";
+
+    private string Proton(params string[] extraBuiltins) =>
+        TestPe.Proton(root, ["winhttp", "version", "dinput8", .. extraBuiltins]);
 
     private static void Write(ZipArchive zip, string name, string content) =>
         WriteBinary(zip, name, System.Text.Encoding.UTF8.GetBytes(content));
