@@ -12,11 +12,11 @@ using Serilog;
 namespace AccessibilityModManager.Infrastructure.Services;
 
 public sealed class AdaptedProtonPackage(string directory, string path, ModRelease release,
-    ProtonLoaderDetector.Finding loader) : IDisposable
+    ProtonLaunchAnalyzer.Plan launch) : IDisposable
 {
     public string Path { get; } = path;
     public ModRelease Release { get; } = release;
-    public ProtonLoaderDetector.Finding Loader { get; } = loader;
+    public ProtonLaunchAnalyzer.Plan Launch { get; } = launch;
 
     public void Dispose()
     {
@@ -31,11 +31,13 @@ public sealed class AdaptedProtonPackage(string directory, string path, ModRelea
 public sealed class ProtonWindowsPackageAdapter(
     ILogger logger, HttpClient? httpClient = null, string? bridgeCacheRoot = null,
     PrismBridgeRelease? prismRelease = null, string? prismDllSha256 = null,
-    string? legacyTolkDllSha256 = null, string? tolkShimSha256 = null)
+    string? legacyTolkDllSha256 = null, string? tolkShimSha256 = null,
+    string? legacyPrismDllSha256 = null)
 {
     private static readonly HttpClient SharedHttpClient = new();
     private const string OfficialPrismDllSha256 =
         "7c7d09c8c7306e8e1a0c46d603ccb2a391c194c77843400c11b746e7dd56a467";
+    // Official Prism 0.7.1 prism-windows-x64.zip release/bin/prism.dll.
     private const string LegacyPrismDllSha256 =
         "3b02d1d9b2d44066604be1a6acf751c8c3c7f109c19035646aab21542083b02f";
     private const string CyberSleuthPrism0173DllSha256 =
@@ -58,7 +60,8 @@ public sealed class ProtonWindowsPackageAdapter(
     };
 
     public async Task<AdaptedProtonPackage> PrepareAsync(
-        GameInstall game, ModRelease release, string packagePath, CancellationToken ct = default)
+        GameInstall game, ModRelease release, string packagePath, string protonExecutable,
+        CancellationToken ct = default, IReadOnlySet<string>? installedModFiles = null)
     {
         if (!OperatingSystem.IsLinux() || ReleaseTarget.Normalize(release.TargetPlatform) != ReleaseTarget.Windows)
             throw new InvalidOperationException("Automatic Proton conversion needs a Windows release on Linux.");
@@ -109,12 +112,27 @@ public sealed class ProtonWindowsPackageAdapter(
             var extracted = System.IO.Path.Combine(directory, "extracted");
             await new SafeZipExtractor(logger).ExtractAsync(original, extracted, ct);
             var proposed = PlannedFiles(game.InstallPath, extracted, manifest);
-            var reloaded = InspectReloadedPackage(game, proposed);
+            var gameMachine = GameMachine(game);
+            var dependencyFiles = await InspectFrameworkDependenciesAsync(game, manifest, directory, ct);
+            foreach (var path in dependencyFiles.Keys.Where(proposed.ContainsKey))
+                throw new InvalidDataException($"The package and a dependency both provide '{path}'.");
+            var analysis = ProtonLaunchAnalyzer.Analyze(game.InstallPath, game.Game.ExeName, proposed,
+                dependencyFiles, ProtonBuiltinModules.Read(protonExecutable, gameMachine),
+                installedModFiles);
+            logger.Information("Proton launch analysis for {PluginId}/{GameId}: {Plan}",
+                release.PluginId, release.GameId, analysis.Description);
             if (manifest.PreInstall is not null || manifest.PostUninstall is not null ||
                 manifest.PostInstall is not null &&
-                (reloaded is null || !IsReplacedIfeoScript(manifest.PostInstall, extracted)))
+                (analysis.LauncherPath is null || !IsReplacedIfeoScript(manifest.PostInstall, extracted)))
                 throw new InvalidOperationException(
                     "This Windows release has a lifecycle script without a verified Proton equivalent.");
+            var runtimeMinimum = RequiredDotNetRuntime(proposed);
+            if (runtimeMinimum is not null && gameMachine != Machine.Amd64)
+                throw new InvalidOperationException(
+                    "This mod needs the Windows .NET runtime, which the manager installs only for x64 games.");
+            (string Version, string Sha512)? runtime = runtimeMinimum is null ? null
+                : await ProtonWindowsDesktopRuntime.ResolveAsync(httpClient ?? SharedHttpClient,
+                    runtimeMinimum, ct);
             var tolkTargets = proposed.Where(pair =>
                     pair.Key.Equals("tolk.dll", StringComparison.OrdinalIgnoreCase) ||
                     pair.Key.EndsWith("/tolk.dll", StringComparison.OrdinalIgnoreCase))
@@ -133,36 +151,8 @@ public sealed class ProtonWindowsPackageAdapter(
                 throw new InvalidOperationException(
                     "This Windows package mixes Prism and Tolk speech files. " +
                     "Publish an explicit Proton package for that speech layout.");
-            var finding = reloaded is null
-                ? ProtonLoaderDetector.Detect(game.InstallPath, game.Game.ExeName, proposed)
-                : new ProtonLoaderDetector.Finding("Reloaded II", "", "", "");
-            var dependencyFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (finding is null)
-            {
-                dependencyFiles = await InspectFrameworkDependenciesAsync(game, manifest,
-                    directory, ct);
-                var withDependencies = new Dictionary<string, string>(proposed, StringComparer.OrdinalIgnoreCase);
-                foreach (var (path, source) in dependencyFiles)
-                    if (!withDependencies.TryAdd(path, source))
-                        throw new InvalidDataException(
-                            $"The package and a dependency both provide loader asset '{path}'.");
-                finding = ProtonLoaderDetector.Detect(game.InstallPath, game.Game.ExeName, withDependencies);
-            }
-            if (finding is null) throw new InvalidOperationException(
-                    "No supported bundled, installed, or dependency-provided BepInEx, MelonLoader, or DSCSModLoader proxy was found. " +
-                    "A Proton release is needed for this mod.");
-            var bundledProxy = reloaded is null && proposed.ContainsKey(finding.ProxyPath);
-            var bundledMarker = proposed.ContainsKey(finding.MarkerPath);
-            var dependencyProxy = dependencyFiles.ContainsKey(finding.ProxyPath);
-            var dependencyMarker = dependencyFiles.ContainsKey(finding.MarkerPath);
-            if (bundledProxy != bundledMarker || dependencyProxy != dependencyMarker ||
-                bundledProxy && dependencyProxy)
-                throw new InvalidOperationException(
-                    "The package replaces only part of an existing loader. Publish an explicit Proton release.");
-            var installedProxy = reloaded is null && !bundledProxy && !dependencyProxy;
-
             if ((prismTargets.Length > 0 || tolkTargets.Length > 0) &&
-                !IsAmd64Game(game))
+                gameMachine != Machine.Amd64)
                 throw new InvalidOperationException(
                     "The pinned Prism and Tolk Wine bridge is x64, but this game executable is not x64.");
             var prismAssets = prismTargets.Length == 0 && tolkTargets.Length == 0
@@ -174,23 +164,28 @@ public sealed class ProtonWindowsPackageAdapter(
                             $"The Windows package already installs '{asset.Target}'. " +
                             "Publish an explicit Proton package for this Prism layout.");
 
-            var proxyName = WineDllProxy.ModuleName(finding.DllOverride);
+            var proxies = analysis.Proxies.Select(proxy => (proxy.Override, proxy.Path)).ToList();
+            if (analysis.InstalledLoader is { } installed)
+                proxies.Add((installed.DllOverride, installed.ProxyPath));
+            // The mod's own launcher keeps writing its loader configuration on each start, as on
+            // Windows, so the manager does not take ownership of those files.
             var launch = new ProtonLaunchConfig
             {
                 SteamAppId = game.Game.EffectiveSteamAppId!,
                 GameDisplayName = game.Game.DisplayName,
                 GameExecutable = game.Game.ExeName.Replace('\\', '/'),
-                LaunchMode = reloaded is null ? "direct" : "replaceExecutable",
-                LauncherPath = reloaded?.LauncherPath,
+                LaunchMode = analysis.LauncherPath is null ? "direct" : "replaceExecutable",
+                LauncherPath = analysis.LauncherPath,
                 BridgeDirectory = prismAssets?.BridgeDirectory,
-                WineDllOverrides = reloaded is null ? [finding.DllOverride] : [],
-                UseInstalledWineDllProxy = installedProxy,
-                WineDllProxyFromDependency = dependencyProxy,
-                WineDllProxyPaths = reloaded is not null || finding.ProxyPath.Equals(proxyName + ".dll", StringComparison.OrdinalIgnoreCase)
-                    ? [] : new Dictionary<string, string> { [proxyName] = finding.ProxyPath },
-                WindowsDesktopRuntimeVersion = reloaded is null ? null : ProtonWindowsDesktopRuntime.Version,
-                ReloadedRoot = reloaded?.Root,
-                ReloadedModId = reloaded?.ModId
+                WineDllOverrides = proxies.Select(proxy => proxy.Override).ToList(),
+                UseInstalledWineDllProxy = analysis.InstalledLoader is not null,
+                WineDllProxyFromDependency = analysis.Proxies.Any(proxy => proxy.FromDependency),
+                WineDllProxyPaths = proxies
+                    .Where(proxy => !proxy.Path.Equals(WineDllProxy.ModuleName(proxy.Override) + ".dll",
+                        StringComparison.OrdinalIgnoreCase))
+                    .ToDictionary(proxy => WineDllProxy.ModuleName(proxy.Override), proxy => proxy.Path),
+                WindowsDesktopRuntimeVersion = runtime?.Version,
+                WindowsDesktopRuntimeSha512 = runtime?.Sha512
             };
 
             var node = JsonSerializer.SerializeToNode(manifest, JsonOptions)!.AsObject();
@@ -229,11 +224,6 @@ public sealed class ProtonWindowsPackageAdapter(
                              !e.FullName.Equals("manifest.json", StringComparison.OrdinalIgnoreCase)))
                 {
                     ct.ThrowIfCancellationRequested();
-                    // The Windows AppConfig contains its author's C: game path. The prefix
-                    // owner creates the correct Z: config and restores it on uninstall.
-                    if (reloaded is not null && entry.FullName.Equals(
-                            "files/" + reloaded.AppConfigPath, StringComparison.OrdinalIgnoreCase))
-                        continue;
                     var copy = output.CreateEntry(entry.FullName, CompressionLevel.Optimal);
                     if (entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\')) continue;
                     await using var source = prismAssets is not null &&
@@ -263,7 +253,7 @@ public sealed class ProtonWindowsPackageAdapter(
                 Sha256 = adaptedHash
             };
             using (await new ProtonPackageInspector(logger).PrepareAsync(adapted, adaptedRelease, ct)) { }
-            return new AdaptedProtonPackage(directory, adapted, adaptedRelease, finding);
+            return new AdaptedProtonPackage(directory, adapted, adaptedRelease, analysis);
         }
         catch
         {
@@ -275,8 +265,6 @@ public sealed class ProtonWindowsPackageAdapter(
     private sealed record BridgeFile(string Source, string Entry, string? Target);
     private sealed record PrismAssets(string BridgeDirectory, List<BridgeFile> Files,
         Dictionary<string, string> Replacements);
-    private sealed record ReloadedPackage(string Root, string ModId, string LauncherPath,
-        string AppConfigPath);
 
     private static void EnsurePackageDependenciesMatchCatalog(GameDefinition game, Manifest manifest)
     {
@@ -309,66 +297,47 @@ public sealed class ProtonWindowsPackageAdapter(
         }
     }
 
-    private static ReloadedPackage? InspectReloadedPackage(GameInstall game,
-        IReadOnlyDictionary<string, string> proposed)
+    /// <summary>
+    /// Reads every .NET runtime configuration the mod installs and returns the newest required
+    /// runtime version, or null when no shared .NET runtime is needed. Mod components load into
+    /// their host's runtime, so the newest requirement is the one the game process hosts.
+    /// </summary>
+    private static string? RequiredDotNetRuntime(IReadOnlyDictionary<string, string> proposed)
     {
-        const string root = "Reloaded-II";
-        if (!proposed.Keys.Any(path => path.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase)))
-            return null;
-        if (!IsAmd64Game(game))
-            throw new InvalidOperationException("This Reloaded II package requires an x64 game executable.");
-        var launcher = proposed.Keys.Where(path =>
-            !path.Contains('/') && path.EndsWith("_Launcher.exe", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-        if (launcher.Length != 1 ||
-            !proposed.ContainsKey(root + "/Loader/X64/Bootstrapper/Reloaded.Mod.Loader.Bootstrapper.dll") ||
-            !proposed.ContainsKey(root + "/Loader/X64/Reloaded.Mod.Loader.dll"))
+        System.Version? required = null;
+        var hosts = new List<System.Version>();
+        foreach (var (target, source) in proposed)
+        {
+            if (!target.EndsWith(".runtimeconfig.json", StringComparison.OrdinalIgnoreCase)) continue;
+            if (new FileInfo(source).Length > 1024 * 1024)
+                throw new InvalidDataException($"'{target}' is too large.");
+            using var document = JsonDocument.Parse(File.ReadAllText(source));
+            if (!document.RootElement.TryGetProperty("runtimeOptions", out var options)) continue;
+            var frameworks = new List<JsonElement>();
+            if (options.TryGetProperty("framework", out var single)) frameworks.Add(single);
+            if (options.TryGetProperty("frameworks", out var many) && many.ValueKind == JsonValueKind.Array)
+                frameworks.AddRange(many.EnumerateArray());
+            foreach (var framework in frameworks)
+            {
+                var name = framework.TryGetProperty("name", out var nameValue) ? nameValue.GetString() : null;
+                if (name is not ("Microsoft.NETCore.App" or "Microsoft.WindowsDesktop.App"))
+                    throw new InvalidOperationException(
+                        $"'{target}' needs the .NET framework '{name}', which the manager cannot install under Proton.");
+                if (!framework.TryGetProperty("version", out var versionValue) ||
+                    !System.Version.TryParse(versionValue.GetString(), out var version) || version.Build < 0)
+                    throw new InvalidOperationException($"'{target}' has an unreadable .NET version.");
+                version = new System.Version(version.Major, version.Minor, version.Build);
+                if (required is null || version > required) required = version;
+                // A configuration beside its own .exe starts a separate process with its own runtime.
+                if (proposed.ContainsKey(target[..^".runtimeconfig.json".Length] + ".exe"))
+                    hosts.Add(version);
+            }
+        }
+        if (required is not null && hosts.Any(host =>
+                host.Major != required.Major || host.Minor != required.Minor))
             throw new InvalidOperationException(
-                "Reloaded II conversion needs one bundled launcher, bootstrapper and x64 loader.");
-        using (var stream = File.OpenRead(proposed[launcher[0]]))
-        using (var pe = new PEReader(stream))
-            if (pe.PEHeaders.CoffHeader.Machine != Machine.Amd64)
-                throw new InvalidOperationException("The Reloaded II launcher is not x64.");
-
-        var appConfig = root + "/Apps/" + Path.GetFileName(game.Game.ExeName!).ToLowerInvariant() +
-                        "/AppConfig.json";
-        if (!proposed.TryGetValue(appConfig, out var appConfigPath))
-            throw new InvalidOperationException("The Reloaded II package has no matching game configuration.");
-        using var app = JsonDocument.Parse(File.ReadAllText(appConfigPath));
-        if (!app.RootElement.TryGetProperty("EnabledMods", out var enabled) ||
-            enabled.ValueKind != JsonValueKind.Array || enabled.GetArrayLength() != 1)
-            throw new InvalidOperationException("Reloaded II conversion needs one enabled accessibility mod.");
-        var modId = enabled[0].GetString();
-        if (string.IsNullOrWhiteSpace(modId) ||
-            modId.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-')) ||
-            !proposed.TryGetValue(root + "/Mods/" + modId + "/ModConfig.json", out var modConfigPath))
-            throw new InvalidOperationException("The Reloaded II mod configuration is missing or ambiguous.");
-        using var mod = JsonDocument.Parse(File.ReadAllText(modConfigPath));
-        if (!mod.RootElement.TryGetProperty("ModId", out var declaredId) ||
-            declaredId.GetString() != modId ||
-            !mod.RootElement.TryGetProperty("ModDll", out var dllName) ||
-            string.IsNullOrWhiteSpace(dllName.GetString()) ||
-            !proposed.ContainsKey(root + "/Mods/" + modId + "/" + dllName.GetString()))
-            throw new InvalidOperationException("The Reloaded II mod DLL does not match its configuration.");
-        var runtimePath = proposed[root + "/Loader/X64/Reloaded.Mod.Loader.runtimeconfig.json"];
-        using var runtime = JsonDocument.Parse(File.ReadAllText(runtimePath));
-        var frameworks = runtime.RootElement.GetProperty("runtimeOptions").GetProperty("frameworks");
-        var required = frameworks.EnumerateArray().ToDictionary(
-            item => item.GetProperty("name").GetString()!,
-            item => item.GetProperty("version").GetString()!, StringComparer.Ordinal);
-        if (required.Count != 2 ||
-            !CompatibleRuntime("Microsoft.NETCore.App") ||
-            !CompatibleRuntime("Microsoft.WindowsDesktop.App"))
-            throw new InvalidOperationException(
-                "The bundled Reloaded II loader needs a Windows Desktop Runtime that this manager has not pinned.");
-        if (!proposed.Keys.Any(path => path.StartsWith(root + "/Mods/" + modId + "/", StringComparison.OrdinalIgnoreCase) &&
-                                       path.EndsWith("/prism.dll", StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException("The Reloaded II mod has no Prism build verified for Orca.");
-        return new ReloadedPackage(root, modId, launcher[0], appConfig);
-
-        bool CompatibleRuntime(string name) => required.TryGetValue(name, out var text) &&
-            System.Version.TryParse(text, out var version) && version.Major == 9 &&
-            version.Minor == 0 && version <= new System.Version(9, 0, 20);
+                "The mod's programs need more than one .NET runtime version. A Proton release is needed for this mod.");
+        return required?.ToString(3);
     }
 
     private static bool IsReplacedIfeoScript(LifecycleScript script, string extracted)
@@ -381,14 +350,13 @@ public sealed class ProtonWindowsPackageAdapter(
             .Equals(IfeoOnlyInstallerSha256, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsAmd64Game(GameInstall game)
+    private static Machine GameMachine(GameInstall game)
     {
         var path = PathSafety.CombineContained(game.InstallPath,
             game.Game.ExeName!.Replace('\\', '/'));
         PathSafety.EnsureNoReparseTraversal(game.InstallPath, path, "game executable");
-        using var stream = File.OpenRead(path);
-        using var pe = new PEReader(stream);
-        return pe.PEHeaders.CoffHeader.Machine == Machine.Amd64;
+        return PeImage.Read(path)?.Machine ??
+            throw new InvalidOperationException("The game executable is not a readable Windows program.");
     }
 
     private async Task<PrismAssets> PreparePrismBridgeAsync(
@@ -414,8 +382,7 @@ public sealed class ProtonWindowsPackageAdapter(
         foreach (var (target, hash) in prismHashes)
         {
             if (!hash.Equals(expected, StringComparison.OrdinalIgnoreCase) &&
-                (cyberSleuthPrism || prismDllSha256 is not null ||
-                 !hash.Equals(LegacyPrismDllSha256, StringComparison.OrdinalIgnoreCase)))
+                (cyberSleuthPrism || !IsLegacyPrism071(hash)))
                 throw new InvalidOperationException(
                     $"Prism at '{target}' is not the pinned build with a verified Wine bridge. " +
                     "Publish a Proton package with a matching Prism bridge for Orca.");
@@ -456,22 +423,28 @@ public sealed class ProtonWindowsPackageAdapter(
         var bridgeDirectory = $".amm/prism-{release.Version}-{release.Architecture}/wine";
         var files = new List<BridgeFile>();
         var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var compatibilityDll = cyberSleuthPrism
-            ? await Prism0173Compatibility.ExtractAsync(extracted, ct) : null;
-        foreach (var (_, source) in prismTargets)
+        // An older Prism ABI keeps its own prism.dll interface through a verified adapter that
+        // loads Prism 0.18.3 as prism-core.dll from the same folder.
+        string? prism0173Adapter = null, prism071Adapter = null;
+        for (var index = 0; index < prismTargets.Length; index++)
         {
-            var hash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(source)));
-            if (compatibilityDll is not null ||
-                !hash.Equals(expected, StringComparison.OrdinalIgnoreCase))
-            {
-                var relative = Path.GetRelativePath(Path.Combine(extracted, Manifest.PackageFilesFolder), source)
-                    .Replace('\\', '/');
-                replacements["files/" + relative] = compatibilityDll ?? bundle.WindowsPrismDll;
-            }
+            var (target, source) = prismTargets[index];
+            var hash = prismHashes[target];
+            string? adapter = null;
+            if (cyberSleuthPrism)
+                adapter = prism0173Adapter ??= await Prism0173Compatibility.ExtractAsync(extracted, ct);
+            else if (IsLegacyPrism071(hash))
+                adapter = prism071Adapter ??= await Prism071Compatibility.ExtractAsync(extracted, ct);
+            if (adapter is null && hash.Equals(expected, StringComparison.OrdinalIgnoreCase)) continue;
+            var relative = Path.GetRelativePath(Path.Combine(extracted, Manifest.PackageFilesFolder), source)
+                .Replace('\\', '/');
+            replacements["files/" + relative] = adapter ?? bundle.WindowsPrismDll;
+            if (adapter is null) continue;
+            var folder = Path.GetDirectoryName(target.Replace('/', Path.DirectorySeparatorChar))?
+                .Replace('\\', '/') ?? "";
+            files.Add(new BridgeFile(bundle.WindowsPrismDll, $"files/amm-prism/core/{index}/prism-core.dll",
+                folder.Length == 0 ? "prism-core.dll" : folder + "/prism-core.dll"));
         }
-        if (compatibilityDll is not null)
-            files.Add(new BridgeFile(bundle.WindowsPrismDll,
-                "files/amm-prism/prism-core.dll", "resources/plugins/prism-core.dll"));
         if (tolkTargets.Length > 0)
         {
             files.Add(new BridgeFile(bundle.WindowsPrismDll,
@@ -516,6 +489,10 @@ public sealed class ProtonWindowsPackageAdapter(
         return new PrismAssets(bridgeDirectory, files, replacements);
     }
 
+    /// <summary>The official Prism 0.7.1 Windows x64 release DLL, which uses PrismConfig version 1.</summary>
+    private bool IsLegacyPrism071(string hash) =>
+        hash.Equals(legacyPrismDllSha256 ?? LegacyPrismDllSha256, StringComparison.OrdinalIgnoreCase);
+
     private static bool IsCyberSleuthPrismConsumer(GameInstall game,
         KeyValuePair<string, string>[] prismTargets)
     {
@@ -535,6 +512,8 @@ public sealed class ProtonWindowsPackageAdapter(
         GameInstall game, Manifest manifest, string staging, CancellationToken ct)
     {
         var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var gameFolder = (Path.GetDirectoryName(game.Game.ExeName!.Replace('\\', '/')) ?? "")
+            .Replace('\\', '/');
         var dependencies = DependencyTargeting.ForTarget(game.Game.Dependencies, ReleaseTarget.Proton)
             .Where(dep => dep.Required && dep.Type == "framework" &&
                           dep.Fix?.AutoInstall is ExtractZipAutoInstall)
@@ -589,7 +568,11 @@ public sealed class ProtonWindowsPackageAdapter(
                 if (!seen.Add(relative))
                     throw new InvalidDataException(
                         $"Framework dependency '{dependency.Id}' has a duplicate ZIP path.");
-                if (!IsLoaderAsset(relative)) continue;
+                // Only a DLL beside the game executable can change how the game starts.
+                if (!relative.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+                    !(Path.GetDirectoryName(relative) ?? "").Replace('\\', '/')
+                        .Equals(gameFolder, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if (entry.Length == 0 || entry.Length > MaxLoaderDllBytes)
                     throw new InvalidDataException(
                         $"Framework dependency '{dependency.Id}' has an invalid loader DLL size.");
@@ -640,22 +623,6 @@ public sealed class ProtonWindowsPackageAdapter(
             await output.WriteAsync(buffer.AsMemory(0, read), ct);
         }
     }
-
-    private static bool IsLoaderAsset(string path) =>
-        path.EndsWith("/version.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("version.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.EndsWith("/winhttp.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("winhttp.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.EndsWith("/freetype.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("freetype.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.EndsWith("/DSCSModLoader.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("DSCSModLoader.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.EndsWith("/BepInEx/core/BepInEx.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("BepInEx/core/BepInEx.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.EndsWith("/MelonLoader/net6/MelonLoader.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.EndsWith("/MelonLoader/net35/MelonLoader.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("MelonLoader/net6/MelonLoader.dll", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("MelonLoader/net35/MelonLoader.dll", StringComparison.OrdinalIgnoreCase);
 
     private static Dictionary<string, string> PlannedFiles(string gameDirectory,
         string extractedDirectory, Manifest manifest)

@@ -6,7 +6,9 @@ work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 cc -std=c11 -O2 -Wall -Wextra -Werror -o "$work/steam-proton-launch" "$project_root/installer/linux/steam-proton-launch.c"
 touch "$work/Game.exe" "$work/Launcher.exe"
-mkdir "$work/bridge"
+mkdir -p "$work/bridge" "$work/compat/pfx/dosdevices" "$work/unmapped/pfx/dosdevices"
+ln -s / "$work/compat/pfx/dosdevices/z:"
+windows_game="Z:${work//\//\\}\\Game.exe"
 cat > "$work/capture" <<'CAPTURE'
 #!/usr/bin/env bash
 printf 'DLLPATH=%s\nOVERRIDES=%s\nRELOADED=%s\n' "${WINEDLLPATH-}" "${WINEDLLOVERRIDES-}" "${AMM_RELOADED_CONFIG_READY-}"
@@ -30,16 +32,26 @@ rg -Fx 'DLLPATH=' "$work/no-bridge.txt"
 rg -Fx 'OVERRIDES=version=n,b' "$work/no-bridge.txt"
 rg -Fx 'RELOADED=' "$work/no-bridge.txt"
 
-"$work/steam-proton-launch" --amm-v1 replaceExecutable "$work/Game.exe" \
+STEAM_COMPAT_DATA_PATH="$work/compat" \
+    "$work/steam-proton-launch" --amm-v1 replaceExecutable "$work/Game.exe" \
     "$work/Launcher.exe" - - 1 -- "$work/capture" "$work/Game.exe" > "$work/replace.txt"
 rg -Fx 'RELOADED=1' "$work/replace.txt"
 rg -Fx "ARG=$work/Launcher.exe" "$work/replace.txt"
+rg -Fx "ARG=$windows_game" "$work/replace.txt"
+if rg -Fqx "ARG=$work/Game.exe" "$work/replace.txt"; then exit 1; fi
 
-"$work/steam-proton-launch" "$work/Game.exe" "$work/Launcher.exe" "$work/bridge" \
+STEAM_COMPAT_DATA_PATH="$work/compat" \
+    "$work/steam-proton-launch" "$work/Game.exe" "$work/Launcher.exe" "$work/bridge" \
     -- "$work/capture" "$work/Game.exe" after > "$work/legacy.txt"
 rg -Fx 'RELOADED=1' "$work/legacy.txt"
 rg -Fx "ARG=$work/Launcher.exe" "$work/legacy.txt"
-rg -Fx "ARG=$work/Game.exe" "$work/legacy.txt"
+rg -Fx "ARG=$windows_game" "$work/legacy.txt"
+rg -Fx 'ARG=after' "$work/legacy.txt"
+
+STEAM_COMPAT_DATA_PATH="$work/unmapped" \
+    "$work/steam-proton-launch" --amm-v1 replaceExecutable "$work/Game.exe" \
+    "$work/Launcher.exe" - - 0 -- "$work/capture" "$work/Game.exe" > "$work/unmapped.txt" 2>&1 && exit 1
+rg -F 'no Z: drive' "$work/unmapped.txt"
 
 WINEDLLOVERRIDES='winhttp=n' \
     "$work/steam-proton-launch" --amm-v1 direct "$work/Game.exe" - - \

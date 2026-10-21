@@ -33,7 +33,7 @@ public sealed class ProtonSteamInstallCoordinator(
         IDependencyHost? dependencyHost = null)
     {
         using var adapted = await new ProtonWindowsPackageAdapter(logger)
-            .PrepareAsync(game, release, packagePath, ct);
+            .PrepareAsync(game, release, packagePath, protonExecutable, ct);
         await InstallAsync(game, adapted.Release, adapted.Path, ct, dependencyHost);
     }
 
@@ -41,8 +41,14 @@ public sealed class ProtonSteamInstallCoordinator(
         GameInstall game, ModRelease release, string packagePath, CancellationToken ct = default,
         IDependencyHost? dependencyHost = null)
     {
+        // Files this mod added earlier are not part of the game when its launch is re-analyzed.
+        var receipt = await receipts.LoadAsync(game.Game.GameId, release.PluginId);
+        var modFiles = (receipt?.Changes ?? [])
+            .Where(change => change.Type == ChangeType.Added)
+            .Select(change => change.RelativePath.Replace('\\', '/'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         using var adapted = await new ProtonWindowsPackageAdapter(logger)
-            .PrepareAsync(game, release, packagePath, ct);
+            .PrepareAsync(game, release, packagePath, protonExecutable, ct, modFiles);
         await UpdateAsync(game, adapted.Release, adapted.Path, ct, dependencyHost);
     }
 
@@ -81,7 +87,7 @@ public sealed class ProtonSteamInstallCoordinator(
         if (launch.SteamAppId != game.Game.EffectiveSteamAppId ||
             launch.GameExecutable != game.Game.ExeName!.Replace('\\', '/'))
             throw new InvalidDataException("The package's Steam App ID or game executable differs from the detected game.");
-        if (!launch.WineDllProxyFromDependency) VerifyInstalledProxy(game, launch);
+        if (launch.UseInstalledWineDllProxy) VerifyPreinstalledProxy(game, launch);
         if (launch.WindowsDesktopRuntimeVersion is { } requiredVersion)
         {
             var compatPath = Path.GetDirectoryName(game.ProtonPrefixPath!)!;
@@ -102,7 +108,7 @@ public sealed class ProtonSteamInstallCoordinator(
             await installer.InstallAsync(game, release, package.Path,
                 dependencyHost: dependencyHost, ct: ct);
             installed = true;
-            if (launch.WineDllProxyFromDependency) VerifyInstalledProxy(game, launch);
+            VerifyProxiesPresent(game, launch);
 
             var gameExe = PathSafety.CombineContained(game.InstallPath, game.Game.ExeName!.Replace('\\', '/'));
             var plan = await steamConfig.PlanAsync(game.Game.EffectiveSteamAppId!, wrapperPath,
@@ -144,41 +150,26 @@ public sealed class ProtonSteamInstallCoordinator(
         if (await receipts.LoadAsync(game.Game.GameId, release.PluginId) is null)
             throw new InvalidOperationException("The Proton setup record exists but its mod receipt is missing.");
         var current = await steamConfig.ReadLaunchOptionsAsync(state.SteamAppId, ct);
-        if (current != state.Plan.Installed)
-            throw new InvalidOperationException("Steam launch options changed after install. Restore them before updating.");
 
         using var package = await packageInspector.PrepareAsync(packagePath, release, ct);
         var launch = package.Manifest.ProtonLaunch!;
         if (launch.SteamAppId != state.SteamAppId ||
             launch.GameExecutable != game.Game.ExeName!.Replace('\\', '/'))
             throw new InvalidDataException("The update targets a different Steam game or executable.");
-        VerifyInstalledProxy(game, launch);
+        if (launch.UseInstalledWineDllProxy) VerifyPreinstalledProxy(game, launch);
         var gameExe = PathSafety.CombineContained(game.InstallPath, game.Game.ExeName!.Replace('\\', '/'));
-        SteamLaunchOptionsPlan nextPlan;
-        if (state.Plan.Installed.Contains("--amm-v1", StringComparison.Ordinal))
-        {
-            nextPlan = SteamLaunchOptionsPlan.Create(state.Plan.WasPresent ? state.Plan.Previous : null,
-                wrapperPath, gameExe, game.InstallPath, launch);
-        }
-        else
-        {
-            if (launch.LaunchMode != "replaceExecutable" || launch.LauncherPath is null ||
-                launch.BridgeDirectory is null || launch.WineDllOverrides.Count != 0)
-                throw new InvalidOperationException("This update changes the legacy Steam launch setup. Uninstall and install it fresh.");
-            nextPlan = SteamLaunchOptionsPlan.Create(state.Plan.WasPresent ? state.Plan.Previous : null,
-                wrapperPath, gameExe,
-                PathSafety.CombineContained(game.InstallPath, launch.LauncherPath),
-                PathSafety.CombineContained(game.InstallPath, launch.BridgeDirectory));
-        }
-        if (nextPlan.Installed != state.Plan.Installed)
-            throw new InvalidOperationException("This update changes Steam launch setup. Uninstall and install it fresh.");
+        // The new release may start differently. Keep the user's own options and replace only
+        // the manager's text, which also restores it if the user removed it.
+        var userOptions = state.Plan.UserOptions(current);
+        SteamLaunchOptionsPlan.RequireCommandMarker(userOptions);
         var nextReloadedFiles = launch.ReloadedRoot is null
             ? []
             : ProtonReloadedConfig.Plan(game, launch);
-        if (nextReloadedFiles.Count != state.ReloadedFiles.Count ||
-            nextReloadedFiles.Where((file, index) =>
-                file.Path != state.ReloadedFiles[index].Path ||
-                file.InstalledBase64 != state.ReloadedFiles[index].InstalledBase64).Any())
+        if (nextReloadedFiles.Count > 0 &&
+            (nextReloadedFiles.Count != state.ReloadedFiles.Count ||
+             nextReloadedFiles.Where((file, index) =>
+                 file.Path != state.ReloadedFiles[index].Path ||
+                 file.InstalledBase64 != state.ReloadedFiles[index].InstalledBase64).Any()))
             throw new InvalidOperationException("This update changes Reloaded II prefix setup. Uninstall and install it fresh.");
 
         if (launch.WindowsDesktopRuntimeVersion is { } requiredVersion)
@@ -194,10 +185,38 @@ public sealed class ProtonSteamInstallCoordinator(
             await visualCppRuntime.EnsureAsync(new ProtonContext(protonExecutable, game.SteamRootPath!,
                 compatPath, state.SteamAppId), package.RequiredVisualCppRuntimes, ct);
         }
-        await installer.UpdateAsync(game, release, package.Path,
-            dependencyHost: dependencyHost, ct: ct);
+        var reloadedFiles = state.ReloadedFiles;
+        var releasesReloadedFiles = nextReloadedFiles.Count == 0 && reloadedFiles.Count > 0;
+        if (releasesReloadedFiles)
+        {
+            // The release's own launcher now owns its loader configuration, as on Windows. Restore
+            // the manager's files first so the update's copy of them is an ordinary package file.
+            var recovered = ProtonReloadedConfig.Restore(game, reloadedFiles, RecoveryDirectory(game, release.PluginId));
+            foreach (var copy in recovered)
+                logger.Information("Saved a changed launcher config before restoring it: {Path}", copy);
+        }
+        try
+        {
+            await installer.UpdateAsync(game, release, package.Path,
+                dependencyHost: dependencyHost, ct: ct);
+        }
+        catch
+        {
+            if (releasesReloadedFiles) ProtonReloadedConfig.Apply(game, reloadedFiles);
+            throw;
+        }
+        if (releasesReloadedFiles) reloadedFiles = [];
+        VerifyProxiesPresent(game, launch);
+        var nextPlan = SteamLaunchOptionsPlan.Create(userOptions, wrapperPath, gameExe,
+            game.InstallPath, launch) with
+        {
+            AppWasPresent = state.Plan.AppWasPresent || userOptions is not null
+        };
+        // Save first: if Steam's write fails, uninstall still recognizes the older manager text.
         await SaveStateAsync(SetupPath(game.Game.GameId, release.PluginId),
-            state with { Version = release.Version });
+            state with { Version = release.Version, Plan = nextPlan, ReloadedFiles = reloadedFiles });
+        if (nextPlan.Installed != current)
+            await steamConfig.ReplaceAsync(state.SteamAppId, current, nextPlan.Installed, ct);
         logger.Information("Proton mod updated to {Version} for {PluginId}/{GameId}",
             release.Version, release.PluginId, game.Game.GameId);
     }
@@ -218,21 +237,56 @@ public sealed class ProtonSteamInstallCoordinator(
         await steamConfig.InstallAsync(state.SteamAppId, state.Plan, ct);
     }
 
-    public async Task UninstallAsync(GameInstall game, string pluginId, CancellationToken ct = default)
+    /// <summary>
+    /// Removes the mod even when Steam's launch option or a launcher-owned config changed after
+    /// install. Only the manager's own launch text is removed; changed config files are kept
+    /// in a recovery folder before the pre-install state is restored.
+    /// </summary>
+    public async Task<ProtonUninstallResult> UninstallAsync(GameInstall game, string pluginId,
+        CancellationToken ct = default)
     {
         steamConfig.EnsureSteamClosed();
         using var gameLock = LockGame(game, pluginId);
         var state = await LoadStateAsync(game, pluginId);
         var current = await steamConfig.ReadLaunchOptionsAsync(state.SteamAppId, ct);
+        LaunchOptionsOutcome launchOptions;
         if (current == state.Plan.Installed)
+        {
             await steamConfig.RestoreAsync(state.SteamAppId, state.Plan, ct);
-        else if (!IsPrevious(current, state.Plan))
-            throw new InvalidOperationException("Steam launch options changed after the mod was installed. Review them before uninstalling.");
+            launchOptions = LaunchOptionsOutcome.Restored;
+        }
+        else if (IsPrevious(current, state.Plan))
+        {
+            launchOptions = LaunchOptionsOutcome.Restored;
+        }
+        else if (current is not null && state.Plan.WithoutManagerText(current) is { } removal)
+        {
+            await steamConfig.RestoreAsync(state.SteamAppId, removal, ct);
+            launchOptions = LaunchOptionsOutcome.ManagerTextRemoved;
+            logger.Information("Removed only the manager's launch text from edited Steam options for {AppId}",
+                state.SteamAppId);
+        }
+        else if (current is not null && SteamLaunchOptionsPlan.ContainsManagerText(current))
+        {
+            launchOptions = LaunchOptionsOutcome.ManualFixNeeded;
+            logger.Warning("Steam launch options for {AppId} name the manager's wrapper in an unexpected form; left unchanged",
+                state.SteamAppId);
+        }
+        else
+        {
+            launchOptions = LaunchOptionsOutcome.LeftUnchanged;
+            logger.Warning("Steam launch options for {AppId} no longer contain the manager's text; left unchanged",
+                state.SteamAppId);
+        }
 
-        ProtonReloadedConfig.Restore(game, state.ReloadedFiles);
+        var recovered = ProtonReloadedConfig.Restore(game, state.ReloadedFiles,
+            RecoveryDirectory(game, pluginId));
+        foreach (var copy in recovered)
+            logger.Information("Saved a changed launcher config before restoring it: {Path}", copy);
         if (await receipts.LoadAsync(game.Game.GameId, pluginId) is not null)
             await installer.UninstallAsync(game, pluginId, ct: ct);
         File.Delete(SetupPath(game.Game.GameId, pluginId));
+        return new ProtonUninstallResult(launchOptions, recovered);
     }
 
     private static void EnsureGame(GameInstall game, ModRelease release)
@@ -246,11 +300,11 @@ public sealed class ProtonSteamInstallCoordinator(
             throw new InvalidOperationException("Proton setup needs a detected Steam game, its prefix, and a matching Proton release.");
     }
 
-    private static void VerifyInstalledProxy(GameInstall game, ProtonLaunchConfig launch)
+    /// <summary>Checks a loader that was beside the game before the mod; the mod never owns it.</summary>
+    private static void VerifyPreinstalledProxy(GameInstall game, ProtonLaunchConfig launch)
     {
-        if (launch.UseInstalledWineDllProxy && launch.WineDllProxyFromDependency)
+        if (launch.WineDllProxyFromDependency)
             throw new InvalidDataException("A Wine proxy cannot be both preinstalled and dependency-owned.");
-        if (!launch.UseInstalledWineDllProxy && !launch.WineDllProxyFromDependency) return;
         if (launch.LaunchMode != "direct" || launch.WineDllOverrides.Count != 1 ||
             game.Game.ExeName is null)
             throw new InvalidDataException("An installed Wine proxy needs one direct loader override.");
@@ -261,6 +315,34 @@ public sealed class ProtonSteamInstallCoordinator(
         var requestedProxy = WineDllProxy.PathFor(launch, launch.WineDllOverrides[0]);
         if (!requestedProxy.Equals(finding.ProxyPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("The installed Wine proxy path differs from the recognized loader.");
+    }
+
+    /// <summary>Each native-first DLL must exist after install with the game's architecture.</summary>
+    private static void VerifyProxiesPresent(GameInstall game, ProtonLaunchConfig launch)
+    {
+        var gameExe = PathSafety.CombineContained(game.InstallPath, game.Game.ExeName!.Replace('\\', '/'));
+        var machine = PeImage.Read(gameExe)?.Machine;
+        foreach (var rule in launch.WineDllOverrides)
+        {
+            if (!rule.Split('=', 2)[1].StartsWith('n')) continue;
+            var relative = WineDllProxy.PathFor(launch, rule);
+            var proxy = PathSafety.CombineContained(game.InstallPath, relative);
+            PathSafety.EnsureNoReparseTraversal(game.InstallPath, proxy, "loader DLL");
+            if (machine is null || PeImage.Read(proxy)?.Machine != machine)
+                throw new InvalidOperationException(
+                    $"The loader DLL '{relative}' is missing or does not match the game's architecture.");
+        }
+    }
+
+    /// <summary>
+    /// Recovery copies live beside the setup records, never among them: every JSON file under the
+    /// setup folder is read as an ownership record.
+    /// </summary>
+    private string RecoveryDirectory(GameInstall game, string pluginId)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(setupRoot));
+        return PathSafety.CombineContained(root + "-recovery", pluginId,
+            game.Game.GameId + "-" + DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'"));
     }
 
     private static bool IsPrevious(string? current, SteamLaunchOptionsPlan plan) =>
@@ -313,6 +395,18 @@ public sealed class ProtonSteamInstallCoordinator(
         return state;
     }
 }
+
+public enum LaunchOptionsOutcome
+{
+    Restored,
+    ManagerTextRemoved,
+    LeftUnchanged,
+    /// <summary>The option still names the wrapper, but not in a form the manager can remove.</summary>
+    ManualFixNeeded
+}
+
+public sealed record ProtonUninstallResult(
+    LaunchOptionsOutcome LaunchOptions, IReadOnlyList<string> RecoveredFiles);
 
 public sealed record ProtonSteamSetupState(
     string GameId, string PluginId, string Version, string InstallPath,

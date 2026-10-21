@@ -94,29 +94,33 @@ public static class ProtonReloadedConfig
         }
     }
 
-    public static void Restore(GameInstall game, IReadOnlyList<OwnedProtonConfigFile> files)
+    /// <summary>
+    /// Restores each owned file to its state before install. A mod launcher may rewrite these
+    /// files on every launch, so a changed file is first copied to <paramref name="recoveryDirectory"/>.
+    /// Returns the recovery copies that were written.
+    /// </summary>
+    public static IReadOnlyList<string> Restore(GameInstall game, IReadOnlyList<OwnedProtonConfigFile> files,
+        string recoveryDirectory)
     {
-        // Check all files before changing any, so an unrelated edit cannot cause half a restore.
-        foreach (var file in files)
+        foreach (var file in files) EnsureOwnedPath(game, file.Path);
+        var recovered = new List<string>();
+        for (var index = files.Count - 1; index >= 0; index--)
         {
-            EnsureOwnedPath(game, file.Path);
-            var installed = Convert.FromBase64String(file.InstalledBase64);
-            var previous = file.PreviousBase64 is null ? null : Convert.FromBase64String(file.PreviousBase64);
-            var current = File.Exists(file.Path) ? File.ReadAllBytes(file.Path) : null;
-            if (!Equal(current, installed) && !Equal(current, previous))
-                throw new InvalidOperationException($"Reloaded II config changed after install: {file.Path}");
-        }
-        foreach (var file in files.Reverse())
-        {
+            var file = files[index];
             var installed = Convert.FromBase64String(file.InstalledBase64);
             var previous = file.PreviousBase64 is null ? null : Convert.FromBase64String(file.PreviousBase64);
             var current = File.Exists(file.Path) ? File.ReadAllBytes(file.Path) : null;
             if (Equal(current, previous)) continue;
-            if (!Equal(current, installed))
-                throw new InvalidOperationException($"Reloaded II config changed during restore: {file.Path}");
+            if (current is not null && !Equal(current, installed))
+            {
+                var copy = Path.Combine(recoveryDirectory, index + "-" + Path.GetFileName(file.Path));
+                Write(copy, current, null);
+                recovered.Add(copy);
+            }
             if (previous is null) File.Delete(file.Path);
             else Write(file.Path, previous, file.PreviousMode);
         }
+        return recovered;
     }
 
     private static OwnedProtonConfigFile Capture(string path, string content)

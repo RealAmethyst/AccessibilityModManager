@@ -27,6 +27,73 @@ public sealed class ProtonWindowsDesktopRuntime(HttpClient httpClient, string ca
         @"^(Microsoft\.(?:NETCore|WindowsDesktop)\.App) (\d+\.\d+\.\d+) \[",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
+    private const long MaxReleaseMetadataBytes = 16L * 1024 * 1024;
+
+    /// <summary>
+    /// Chooses the official x64 Windows Desktop Runtime for <paramref name="minimumVersion"/>, or
+    /// the newest later patch of that major.minor channel when Microsoft does not list it, with its
+    /// SHA-512 from Microsoft's release metadata. A prefix that already has the requirement or a
+    /// later patch keeps it. The already pinned legacy runtime is used without a metadata request.
+    /// </summary>
+    public static async Task<(string Version, string Sha512)> ResolveAsync(
+        HttpClient httpClient, string minimumVersion, CancellationToken ct = default)
+    {
+        ValidateRuntimeVersion(minimumVersion);
+        var minimum = new System.Version(minimumVersion);
+        if (minimum.Major == 9 && minimum.Minor == 0 && minimum <= new System.Version(Version))
+            return (Version, InstallerSha512);
+
+        var channel = $"{minimum.Major}.{minimum.Minor}";
+        var metadataUrl = new Uri(
+            $"https://builds.dotnet.microsoft.com/dotnet/release-metadata/{channel}/releases.json");
+        using var response = await httpClient.GetAsync(metadataUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+        if (response.RequestMessage?.RequestUri?.Scheme != Uri.UriSchemeHttps ||
+            response.RequestMessage.RequestUri.Host != "builds.dotnet.microsoft.com" ||
+            response.Content.Headers.ContentLength > MaxReleaseMetadataBytes)
+            throw new InvalidDataException(".NET release metadata is not safe to accept.");
+        await using var input = await response.Content.ReadAsStreamAsync(ct);
+        using var bounded = new MemoryStream();
+        var buffer = new byte[81920];
+        int length;
+        while ((length = await input.ReadAsync(buffer, ct)) != 0)
+        {
+            if (bounded.Length + length > MaxReleaseMetadataBytes)
+                throw new InvalidDataException(".NET release metadata exceeds the size limit.");
+            bounded.Write(buffer, 0, length);
+        }
+        bounded.Position = 0;
+        using var metadata = await System.Text.Json.JsonDocument.ParseAsync(bounded, cancellationToken: ct);
+
+        var candidates = new List<(System.Version Version, string Sha512)>();
+        foreach (var release in metadata.RootElement.GetProperty("releases").EnumerateArray())
+        {
+            if (!release.TryGetProperty("windowsdesktop", out var desktop) ||
+                desktop.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                !desktop.TryGetProperty("version", out var versionText) ||
+                !System.Version.TryParse(versionText.GetString(), out var version) ||
+                version.Build < 0 || version.Revision >= 0 ||
+                version.Major != minimum.Major || version.Minor != minimum.Minor || version < minimum)
+                continue;
+            var expectedUrl =
+                $"https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/{version}/windowsdesktop-runtime-{version}-win-x64.exe";
+            foreach (var file in desktop.GetProperty("files").EnumerateArray())
+            {
+                if (file.TryGetProperty("url", out var url) && url.GetString() == expectedUrl &&
+                    file.TryGetProperty("hash", out var hash) &&
+                    hash.GetString() is { Length: 128 } sha512 && sha512.All(Uri.IsHexDigit))
+                    candidates.Add((version, sha512.ToLowerInvariant()));
+            }
+        }
+        if (candidates.Count == 0)
+            throw new InvalidOperationException(
+                $"Microsoft lists no x64 Windows Desktop Runtime {channel} at or above {minimumVersion}.");
+        var chosen = candidates.FirstOrDefault(candidate => candidate.Version == minimum) is { Sha512: not null } exact
+            ? exact
+            : candidates.MaxBy(candidate => candidate.Version);
+        return (chosen.Version.ToString(3), chosen.Sha512);
+    }
+
     public async Task<bool> EnsureAsync(ProtonContext context, CancellationToken ct = default)
         => await EnsureAsync(context, Version, InstallerSha512, ct);
 

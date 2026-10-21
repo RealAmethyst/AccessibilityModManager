@@ -1,6 +1,7 @@
 // Steam expands %command% before invoking this wrapper. The legacy argument
-// form remains supported for installed Reloaded II packages.
-#define _POSIX_C_SOURCE 200809L
+// form remains supported for installed Reloaded II packages. A replacement
+// launcher receives the game's Windows path, as with a Windows IFEO redirect.
+#define _XOPEN_SOURCE 700
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +90,29 @@ static int prepend_bridge(const char *bridge) {
     return result;
 }
 
+// Windows starts a redirected game's launcher with the game's Windows path. Proton maps
+// Z: to the host root, so the same file is reachable as Z: plus the Unix path.
+static char *wine_path(const char *unix_path) {
+    const char *compat = getenv("STEAM_COMPAT_DATA_PATH");
+    if (!compat || !*compat || unix_path[0] != '/') return NULL;
+    size_t link_length = strlen(compat) + sizeof("/pfx/dosdevices/z:");
+    char *link = malloc(link_length);
+    if (!link) return NULL;
+    snprintf(link, link_length, "%s/pfx/dosdevices/z:", compat);
+    char *target = realpath(link, NULL);
+    free(link);
+    int mapped = target && strcmp(target, "/") == 0;
+    free(target);
+    if (!mapped) return NULL;
+    size_t length = strlen(unix_path) + 3;
+    char *path = malloc(length);
+    if (!path) return NULL;
+    snprintf(path, length, "Z:%s", unix_path);
+    for (char *c = path + 2; *c; ++c)
+        if (*c == '/') *c = '\\';
+    return path;
+}
+
 int main(int argc, char **argv) {
     int modern = argc > 1 && strcmp(argv[1], "--amm-v1") == 0;
     int command_start = modern ? 9 : 5;
@@ -135,6 +159,11 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "direct") == 0) {
         execvp(argv[command_start], argv + command_start);
     } else {
+        char *windows_game = wine_path(game);
+        if (!windows_game) {
+            fprintf(stderr, "The game's Proton prefix has no Z: drive for the mod launcher.\n");
+            return 2;
+        }
         char **command = calloc((size_t)(argc - command_start + 2), sizeof(char *));
         if (!command) {
             perror("calloc");
@@ -143,7 +172,7 @@ int main(int argc, char **argv) {
         int out = 0;
         for (int i = command_start; i < argc; ++i) {
             command[out++] = i == match ? (char *)launcher : argv[i];
-            if (i == match) command[out++] = (char *)game;
+            if (i == match) command[out++] = windows_game;
         }
         command[out] = NULL;
         execvp(command[0], command);

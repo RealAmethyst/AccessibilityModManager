@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Net;
+using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using AccessibilityModManager.Core.Interfaces;
 using AccessibilityModManager.Core.Models;
@@ -56,28 +57,37 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
             GameId = "dsts", PluginId = "amethyst", Version = version, Channel = "stable",
             TargetPlatform = ReleaseTarget.Windows, Sha256 = packageSha256
         };
-        var adapted = await new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, publicZip);
+        var adapted = await new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, publicZip, Proton());
         using (adapted)
         {
             var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
-            Assert.Equal("Reloaded II", adapted.Loader.Loader);
+            Assert.Equal("DSTS_Launcher.exe", adapted.Launch.LauncherPath);
+            Assert.Empty(adapted.Launch.Proxies);
             Assert.Null(local.Manifest.PostInstall);
             Assert.Equal("replaceExecutable", local.Manifest.ProtonLaunch!.LaunchMode);
             Assert.Equal("DSTS_Launcher.exe", local.Manifest.ProtonLaunch.LauncherPath);
-            Assert.Equal("DSTS.Accessibility", local.Manifest.ProtonLaunch.ReloadedModId);
+            Assert.Null(local.Manifest.ProtonLaunch.ReloadedRoot);
+            Assert.Equal("9.0.20", local.Manifest.ProtonLaunch.WindowsDesktopRuntimeVersion);
             using (var archive = ZipFile.OpenRead(adapted.Path))
             {
-                Assert.Null(archive.GetEntry(
+                // The release's launcher rewrites its AppConfig on each start, as on Windows.
+                Assert.NotNull(archive.GetEntry(
                     "files/Reloaded-II/Apps/digimon story time stranger.exe/AppConfig.json"));
-                using var prism = archive.GetEntry(
-                    "files/Reloaded-II/Mods/DSTS.Accessibility/prism.dll")!.Open();
-                Assert.Equal("7c7d09c8c7306e8e1a0c46d603ccb2a391c194c77843400c11b746e7dd56a467",
-                    Convert.ToHexStringLower(SHA256.HashData(prism)));
+                // The mod was built against Prism 0.7.1's ABI; the adapter keeps that ABI.
+                using (var prism = archive.GetEntry(
+                           "files/Reloaded-II/Mods/DSTS.Accessibility/prism.dll")!.Open())
+                    Assert.Equal("43581ed862e787cf1ff4b3f67e3076022e63090f8116138ab136e21effefa475",
+                        Convert.ToHexStringLower(SHA256.HashData(prism)));
+                using (var core = archive.GetEntry("files/amm-prism/core/0/prism-core.dll")!.Open())
+                    Assert.Equal("7c7d09c8c7306e8e1a0c46d603ccb2a391c194c77843400c11b746e7dd56a467",
+                        Convert.ToHexStringLower(SHA256.HashData(core)));
             }
 
-            var proton = Path.Combine(root, "published-proton");
+            var proton = Proton();
+            // Reports the .NET runtimes and the Visual C++ registry value as an installed prefix would.
             File.WriteAllText(proton,
-                "#!/bin/sh\nprintf 'Microsoft.NETCore.App 9.0.20 [C:\\\\dotnet]\\nMicrosoft.WindowsDesktop.App 9.0.20 [C:\\\\dotnet]\\n'\n");
+                "#!/bin/sh\nprintf 'Microsoft.NETCore.App 9.0.20 [C:\\\\dotnet]\\nMicrosoft.WindowsDesktop.App 9.0.20 [C:\\\\dotnet]\\n'\n" +
+                "printf '    Version    REG_SZ    v14.51.36247.00\\n'\n");
             File.SetUnixFileMode(proton, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             var wrapper = Path.Combine(root, "published-wrapper");
             File.WriteAllText(wrapper, "offline wrapper fixture");
@@ -105,7 +115,9 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
             Assert.Contains("replaceExecutable", File.ReadAllText(configPath));
             var appConfig = Path.Combine(gamePath, "Reloaded-II", "Apps",
                 "digimon story time stranger.exe", "AppConfig.json");
-            Assert.Contains("Z:", File.ReadAllText(appConfig));
+            Assert.True(File.Exists(appConfig));
+            Assert.False(Directory.Exists(Path.Combine(roaming, "Reloaded-Mod-Loader-II")));
+            File.WriteAllText(appConfig, "rewritten by the launcher");
             await coordinator.UninstallAsync(game, "amethyst");
             Assert.Equal(config, File.ReadAllText(configPath));
             Assert.False(File.Exists(appConfig));
@@ -120,16 +132,44 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         var (game, release, packagePath) = CreatePackage(includePrism: false);
 
         using var adapted = await new ProtonWindowsPackageAdapter(logger)
-            .PrepareAsync(game, release, packagePath);
+            .PrepareAsync(game, release, packagePath, Proton());
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
 
         Assert.Equal(ReleaseTarget.Proton, adapted.Release.TargetPlatform);
-        Assert.Equal("BepInEx", adapted.Loader.Loader);
+        Assert.Equal("winhttp.dll", Assert.Single(adapted.Launch.Proxies).Path);
         Assert.Equal("direct", local.Manifest.ProtonLaunch!.LaunchMode);
-        Assert.Equal("winhttp.dll=n,b", Assert.Single(local.Manifest.ProtonLaunch.WineDllOverrides));
+        Assert.Equal("winhttp=n,b", Assert.Single(local.Manifest.ProtonLaunch.WineDllOverrides));
         Assert.Equal(release.Version, adapted.Release.Version);
         Assert.Equal(release.Sha256,
             Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(packagePath))));
+    }
+
+    [Fact]
+    public async Task LoaderCopiedWithAFolderToTheGameRootIsRecognized()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var (game, _, _) = CreatePackage(includePrism: false);
+        var package = Path.Combine(root, "root-folder.zip");
+        using (var archive = ZipFile.Open(package, ZipArchiveMode.Create))
+        {
+            Write(archive, "manifest.json", """
+                {"gameId":"game","pluginId":"author","modVersion":"1.0.0",
+                 "installActions":[{"type":"copyFolder","sourceDir":"loader","targetDir":""}]}
+                """);
+            WriteBinary(archive, "files/loader/dinput8.dll", TestPe.Dll(Machine.Amd64));
+            Write(archive, "files/loader/scripts/Mod.asi", "mod");
+        }
+        var release = new ModRelease
+        {
+            GameId = "game", PluginId = "author", Version = "1.0.0", Channel = "stable",
+            TargetPlatform = ReleaseTarget.Windows,
+            Sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(package)))
+        };
+
+        using var adapted = await new ProtonWindowsPackageAdapter(logger)
+            .PrepareAsync(game, release, package, Proton());
+        var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
+        Assert.Equal("dinput8=n,b", Assert.Single(local.Manifest.ProtonLaunch!.WineDllOverrides));
     }
 
     [Fact]
@@ -139,7 +179,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         var (game, release, packagePath) = CreatePackage(includePrism: true);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, packagePath));
+            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, packagePath, Proton()));
         Assert.Contains("Prism", error.Message);
     }
 
@@ -170,7 +210,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         };
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, packagePath));
+            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, packagePath, Proton()));
         Assert.Contains("lifecycle script without a verified Proton equivalent", error.Message);
     }
 
@@ -181,7 +221,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         var (game, release, packagePath) = CreatePackage(includePrism: false, includeTolk: true);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, packagePath));
+            new ProtonWindowsPackageAdapter(logger).PrepareAsync(game, release, packagePath, Proton()));
         Assert.Contains("verified legacy build", error.Message);
     }
 
@@ -219,9 +259,9 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         using var adapted = await new ProtonWindowsPackageAdapter(logger, client,
             Path.Combine(root, "tolk-prism-cache"), bridgeRelease,
             Convert.ToHexStringLower(SHA256.HashData(pe)),
-            Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("tolk"))),
+            Convert.ToHexStringLower(SHA256.HashData(TestPe.Dll(Machine.Amd64))),
             Convert.ToHexStringLower(SHA256.HashData(pe)))
-            .PrepareAsync(game, release, packagePath);
+            .PrepareAsync(game, release, packagePath, Proton());
         using (var zip = ZipFile.OpenRead(adapted.Path))
         {
             using var stream = zip.GetEntry("files/Tolk.dll")!.Open();
@@ -286,7 +326,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         using var adapted = await new ProtonWindowsPackageAdapter(logger, client,
             Path.Combine(root, "prism-cache"), bridgeRelease,
             Convert.ToHexStringLower(SHA256.HashData(prism)))
-            .PrepareAsync(game, release, packagePath);
+            .PrepareAsync(game, release, packagePath, Proton());
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
         Assert.Equal(".amm/prism-9.9.9-x64/wine", local.Manifest.ProtonLaunch!.BridgeDirectory);
         Assert.Contains(local.Manifest.InstallActions, action =>
@@ -313,6 +353,66 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         await installer.UninstallAsync(game, "author");
         Assert.False(File.Exists(Path.Combine(game.InstallPath, "BepInEx", "plugins",
             "prism_orca_bridge.dll")));
+    }
+
+    [Fact]
+    public async Task LegacyPrism071KeepsItsAbiThroughTheAdapter()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var (game, originalRelease, packagePath) = CreatePackage(includePrism: false);
+        var legacy = System.Text.Encoding.UTF8.GetBytes("prism 0.7.1");
+        using (var zip = ZipFile.Open(packagePath, ZipArchiveMode.Update))
+            WriteBinary(zip, "files/BepInEx/plugins/prism.dll", legacy);
+        var release = new ModRelease
+        {
+            GameId = originalRelease.GameId, PluginId = originalRelease.PluginId,
+            Version = originalRelease.Version, Channel = originalRelease.Channel,
+            TargetPlatform = ReleaseTarget.Windows,
+            Sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(packagePath)))
+        };
+        var core = File.ReadAllBytes(typeof(ProtonLoaderDetector).Assembly.Location);
+        var windowsArchive = Path.Combine(root, "legacy-prism-windows.zip");
+        using (var zip = ZipFile.Open(windowsArchive, ZipArchiveMode.Create))
+        {
+            WriteBinary(zip, "dynamic/release/bin/prism.dll", core);
+            WriteBinary(zip, "dynamic/release/bin/tolk.dll", core);
+            Write(zip, "NOTICE", "notice");
+            Write(zip, "LICENSES/license.txt", "license");
+        }
+        var linuxArchive = Path.Combine(root, "legacy-prism-linux.zip");
+        using (var zip = ZipFile.Open(linuxArchive, ZipArchiveMode.Create))
+            foreach (var name in new[] { "prism_orca_bridge", "prism_speech_dispatcher_bridge",
+                         "prism_spiel_bridge" })
+            {
+                WriteBinary(zip, $"dynamic/release/wine/placeholders/{name}.dll", core);
+                Write(zip, $"dynamic/release/wine/{name}.dll.so", "host");
+            }
+        var bridgeRelease = new PrismBridgeRelease("9.9.9", "x64",
+            new Uri("https://example.test/prism-linux.zip"),
+            Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(linuxArchive))),
+            new Uri("https://example.test/prism-windows.zip"),
+            Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(windowsArchive))));
+        using var client = new HttpClient(new RoutingArchiveHandler(
+            File.ReadAllBytes(linuxArchive), File.ReadAllBytes(windowsArchive)));
+
+        using var adapted = await new ProtonWindowsPackageAdapter(logger, client,
+            Path.Combine(root, "legacy-prism-cache"), bridgeRelease,
+            Convert.ToHexStringLower(SHA256.HashData(core)),
+            legacyPrismDllSha256: Convert.ToHexStringLower(SHA256.HashData(legacy)))
+            .PrepareAsync(game, release, packagePath, Proton());
+
+        var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
+        Assert.Contains(local.Manifest.InstallActions, action =>
+            action is CopyFileAction { Target: "BepInEx/plugins/prism-core.dll" });
+        Assert.Contains(local.Manifest.InstallActions, action =>
+            action is CopyFileAction { Target: "BepInEx/plugins/prism_orca_bridge.dll" });
+        using var archive = ZipFile.OpenRead(adapted.Path);
+        using (var prism = archive.GetEntry("files/BepInEx/plugins/prism.dll")!.Open())
+            Assert.Equal("43581ed862e787cf1ff4b3f67e3076022e63090f8116138ab136e21effefa475",
+                Convert.ToHexStringLower(SHA256.HashData(prism)));
+        using (var prismCore = archive.GetEntry("files/amm-prism/core/0/prism-core.dll")!.Open())
+            Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(core)),
+                Convert.ToHexStringLower(SHA256.HashData(prismCore)));
     }
 
     [Fact]
@@ -343,7 +443,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         };
 
         using var adapted = await new ProtonWindowsPackageAdapter(logger)
-            .PrepareAsync(game, release, package);
+            .PrepareAsync(game, release, package, Proton());
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
         Assert.True(local.Manifest.ProtonLaunch!.UseInstalledWineDllProxy);
         Assert.Equal("winhttp.dll=n,b", Assert.Single(local.Manifest.ProtonLaunch.WineDllOverrides));
@@ -366,7 +466,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         var proxyFile = bepinex ? "winhttp.dll" : "version.dll";
         var markerPath = bepinex ? "BepInEx/core/BepInEx.dll" : "MelonLoader/net6/MelonLoader.dll";
         var modTarget = bepinex ? "BepInEx/plugins/mod.dll" : "Mods/mod.dll";
-        var overrideRule = bepinex ? "winhttp.dll=n,b" : "version=n,b";
+        var overrideRule = bepinex ? "winhttp=n,b" : "version=n,b";
         var gameDir = Path.Combine(root, "dependency-game");
         var prefix = Path.Combine(root, "dependency-prefix");
         var steamRoot = Path.Combine(root, "dependency-steam");
@@ -441,17 +541,17 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         };
         using var client = new HttpClient(new ArchiveHandler(dependencyBytes));
         using var adapted = await new ProtonWindowsPackageAdapter(logger, client)
-            .PrepareAsync(game, release, packagePath);
+            .PrepareAsync(game, release, packagePath, Proton());
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
-        Assert.Equal(preinstalled, local.Manifest.ProtonLaunch!.UseInstalledWineDllProxy);
-        Assert.Equal(!preinstalled, local.Manifest.ProtonLaunch.WineDllProxyFromDependency);
+        // A pinned dependency supplies the loader; one already beside the game satisfies it.
+        Assert.False(local.Manifest.ProtonLaunch!.UseInstalledWineDllProxy);
+        Assert.True(local.Manifest.ProtonLaunch.WineDllProxyFromDependency);
         Assert.Equal(overrideRule, Assert.Single(local.Manifest.ProtonLaunch.WineDllOverrides));
 
         var wrapper = Path.Combine(root, "dependency-wrapper");
         File.WriteAllText(wrapper, "wrapper");
         File.SetUnixFileMode(wrapper, UnixFileMode.UserRead | UnixFileMode.UserExecute);
-        var proton = Path.Combine(root, "dependency-proton");
-        File.WriteAllText(proton, "proton");
+        var proton = Proton();
         var configPath = Path.Combine(root, "dependency-localconfig.vdf");
         const string config = "\"UserLocalConfigStore\"\n{\n\"Software\" { \"Valve\" { \"Steam\" { \"apps\"\n{\n\"123\"\n{\n\"LaunchOptions\" \"%command%\"\n}\n}\n} } }\n}\n";
         File.WriteAllText(configPath, config);
@@ -494,6 +594,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         Directory.CreateDirectory(prefix);
         var pe = File.ReadAllBytes(typeof(ProtonLoaderDetector).Assembly.Location);
         File.WriteAllBytes(Path.Combine(appDir, "Digimon Story CS.exe"), pe);
+        File.WriteAllBytes(Path.Combine(appDir, "freetype.dll"), pe);
 
         var dependencyArchive = Path.Combine(root, "dscs-loader.zip");
         using (var zip = ZipFile.Open(dependencyArchive, ZipArchiveMode.Create))
@@ -542,11 +643,11 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         };
         using var client = new HttpClient(new ArchiveHandler(dependencyBytes));
         using var adapted = await new ProtonWindowsPackageAdapter(logger, client)
-            .PrepareAsync(game, release, packagePath);
+            .PrepareAsync(game, release, packagePath, Proton());
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
-        Assert.Equal("DSCSModLoader", adapted.Loader.Loader);
-        Assert.Equal("freetype=n,b", Assert.Single(local.Manifest.ProtonLaunch!.WineDllOverrides));
-        Assert.True(local.Manifest.ProtonLaunch.WineDllProxyFromDependency);
+        // Proton has no built-in freetype.dll, so the loader replacing the game's copy loads as is.
+        Assert.Equal("app_digister/freetype.dll", Assert.Single(adapted.Launch.GameLoadedDlls));
+        Assert.Empty(local.Manifest.ProtonLaunch!.WineDllOverrides);
         Assert.Equal("app_digister/DSCSModLoader.dll",
             Assert.Single(local.Manifest.Dependencies).Check!.FilePath);
     }
@@ -597,7 +698,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
             Sha256 = "fc96dce6eaaf01c63dce6d7b41d8e4d174d471bd404e3747f7a83430f9cf92e6"
         };
         using var adapted = await new ProtonWindowsPackageAdapter(logger)
-            .PrepareAsync(game, release, publicZip);
+            .PrepareAsync(game, release, publicZip, Proton());
         var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
         Assert.Equal(".amm/prism-0.18.3-x64/wine", local.Manifest.ProtonLaunch!.BridgeDirectory);
         Assert.Contains(local.Manifest.InstallActions, action =>
@@ -611,7 +712,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         Assert.Equal("f2f234b8ec3b0f6c0df5f4e501232e8e9c20a1299c885ffc7e19ef90559ab6ec",
             Hash(archive.GetEntry("files/resources/plugins/prism.dll")!));
         Assert.Equal("7c7d09c8c7306e8e1a0c46d603ccb2a391c194c77843400c11b746e7dd56a467",
-            Hash(archive.GetEntry("files/amm-prism/prism-core.dll")!));
+            Hash(archive.GetEntry("files/amm-prism/core/0/prism-core.dll")!));
         Assert.NotNull(archive.GetEntry("files/amm-prism/placeholders/0/prism_orca_bridge.dll"));
         Assert.NotNull(archive.GetEntry(
             "files/.amm/prism-0.18.3-x64/wine/prism_orca_bridge.dll.so"));
@@ -665,8 +766,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         var wrapper = Path.Combine(root, "steam-proton-launch");
         File.WriteAllText(wrapper, "wrapper");
         File.SetUnixFileMode(wrapper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        var proton = Path.Combine(root, "proton");
-        File.WriteAllText(proton, "proton");
+        var proton = Proton();
         var configPath = Path.Combine(root, "localconfig.vdf");
         const string config = "\"UserLocalConfigStore\"\n{\n\"Software\" { \"Valve\" { \"Steam\" { \"apps\"\n{\n\"123\"\n{\n\"LaunchOptions\" \"PROTON_LOG=1 %command%\"\n}\n}\n} } }\n}\n";
         File.WriteAllText(configPath, config);
@@ -688,7 +788,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         await coordinator.InstallCompatibleWindowsReleaseAsync(game, release, packagePath);
 
         Assert.True(File.Exists(Path.Combine(game.InstallPath, "winhttp.dll")));
-        Assert.Contains("winhttp.dll=n,b", SteamLocalConfigEditor.Read(File.ReadAllText(configPath), "123"));
+        Assert.Contains("winhttp=n,b", SteamLocalConfigEditor.Read(File.ReadAllText(configPath), "123"));
         Assert.NotNull(await receipts.LoadAsync("game", "author"));
 
         var alias = new GameInstall
@@ -746,7 +846,7 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
                 File.ReadAllBytes(typeof(ProtonLoaderDetector).Assembly.Location));
             Write(archive, "files/BepInEx/plugins/ScreenReader.dll", "mod");
             if (includePrism) Write(archive, "files/BepInEx/plugins/prism.dll", "prism");
-            if (includeTolk) Write(archive, "files/Tolk.dll", "tolk");
+            if (includeTolk) WriteBinary(archive, "files/Tolk.dll", TestPe.Dll(Machine.Amd64));
         }
         var game = new GameInstall
         {
@@ -764,6 +864,8 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         };
         return (game, release, package);
     }
+
+    private string Proton() => TestPe.Proton(root, "winhttp", "version", "dinput8");
 
     private static void Write(ZipArchive zip, string name, string content) =>
         WriteBinary(zip, name, System.Text.Encoding.UTF8.GetBytes(content));

@@ -109,17 +109,24 @@ internal sealed class LinuxModInstaller(HttpClient httpClient, ILogger logger)
         }
     }
 
-    public Task UninstallAsync(LinuxModEntry mod, SteamAccountConfig? account, string? proton,
-        CancellationToken ct = default)
+    /// <summary>Returns the Steam setup outcome for a Proton mod, or null for other targets.</summary>
+    public async Task<ProtonUninstallResult?> UninstallAsync(LinuxModEntry mod, SteamAccountConfig? account,
+        string? proton, CancellationToken ct = default)
     {
         if (mod.InstalledTarget == ReleaseTarget.XivLauncher)
-            return CreateXivLauncherSetup().UninstallAsync(RequireInstall(mod), ct);
+        {
+            await CreateXivLauncherSetup().UninstallAsync(RequireInstall(mod), ct);
+            return null;
+        }
         if (mod.InstalledTarget == ReleaseTarget.Linux)
-            return CreateInstallerEngine().UninstallAsync(RequireNativeGame(mod), mod.Author.Id, ct: ct);
+        {
+            await CreateInstallerEngine().UninstallAsync(RequireNativeGame(mod), mod.Author.Id, ct: ct);
+            return null;
+        }
         if (mod.OwnSetup is null)
             throw new InvalidOperationException("The installed mod has no verified Steam setup record. It was left untouched.");
-        return CreateCoordinator(account ?? throw new InvalidOperationException("Choose a Steam account."),
-            proton ?? throw new InvalidOperationException("Choose a Proton version."))
+        return await CreateCoordinator(account ?? throw new InvalidOperationException("Choose a Steam account."),
+                proton ?? throw new InvalidOperationException("Choose a Proton version."))
             .UninstallAsync(RequireProtonGame(mod), mod.Author.Id, ct);
     }
 

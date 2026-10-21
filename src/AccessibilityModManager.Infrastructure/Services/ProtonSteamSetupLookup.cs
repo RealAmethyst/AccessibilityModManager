@@ -16,7 +16,9 @@ public static class ProtonSteamSetupLookup
     {
         if (!Directory.Exists(setupRoot)) return [];
         var owners = new List<ProtonSteamSetupState>();
-        foreach (var path in Directory.EnumerateFiles(setupRoot, "*.json", SearchOption.AllDirectories))
+        // Records are stored as <plugin>/<game>.json; other files are not ownership records.
+        foreach (var path in Directory.EnumerateDirectories(setupRoot)
+                     .SelectMany(plugin => Directory.EnumerateFiles(plugin, "*.json")))
         {
             PathSafety.EnsureNoReparseTraversal(setupRoot, path, "Proton setup record");
             var wrapped = AtomicJson.TryReadWrapped(File.ReadAllText(path));

@@ -54,6 +54,18 @@ public sealed class SteamLocalConfigStore(string configPath, Func<bool>? steamIs
     public Task InstallAsync(string appId, SteamLaunchOptionsPlan plan, CancellationToken ct = default) =>
         ChangeAsync(text => SteamLocalConfigEditor.Install(text, appId, plan), ct);
 
+    /// <summary>Replaces the launch option only if it still has the <paramref name="expected"/> value.</summary>
+    public async Task ReplaceAsync(string appId, string? expected, string replacement,
+        CancellationToken ct = default)
+    {
+        var current = await ReadTextAsync(ct);
+        await InstallAsync(appId, new SteamLaunchOptionsPlan(expected ?? string.Empty, replacement)
+        {
+            WasPresent = expected is not null,
+            AppWasPresent = SteamLocalConfigEditor.HasApp(current.Text, appId)
+        }, ct);
+    }
+
     public Task RestoreAsync(string appId, SteamLaunchOptionsPlan plan, CancellationToken ct = default) =>
         ChangeAsync(text => SteamLocalConfigEditor.Restore(text, appId, plan), ct);
 

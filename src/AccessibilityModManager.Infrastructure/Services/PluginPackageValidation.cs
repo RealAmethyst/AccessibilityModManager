@@ -160,8 +160,9 @@ public static class PluginPackageValidation
         Manifest manifest, HashSet<string> entryNames, List<string> errors)
     {
         if (manifest.ProtonLaunch is not { } launch) return;
-        if (launch.LauncherPath is not null && !entryNames.Contains("files/" + launch.LauncherPath))
-            errors.Add($"The Proton launcher '{launch.LauncherPath}' is missing from files/.");
+        if (launch.LauncherPath is not null &&
+            !manifest.InstallActions.Any(action => InstallsPath(action, launch.LauncherPath, entryNames)))
+            errors.Add($"The Proton launcher '{launch.LauncherPath}' has no install action from files/.");
         if (launch.BridgeDirectory is not null)
         {
             var bridgePrefix = "files/" + launch.BridgeDirectory.TrimEnd('/') + "/";
@@ -173,14 +174,13 @@ public static class PluginPackageValidation
         {
             var proxy = WineDllProxy.PathFor(launch, rule);
             if (launch.UseInstalledWineDllProxy || launch.WineDllProxyFromDependency) continue;
-            if (!entryNames.Contains("files/" + proxy))
-                errors.Add($"The Wine DLL override '{rule}' needs its proxy '{proxy}' in files/.");
-            if (!manifest.InstallActions.Any(action => InstallsProxy(action, proxy, entryNames)))
+            // The action's source may sit anywhere in files/; InstallsPath checks it exists.
+            if (!manifest.InstallActions.Any(action => InstallsPath(action, proxy, entryNames)))
                 errors.Add($"The Wine DLL proxy '{proxy}' needs an install action to that game-relative path.");
         }
     }
 
-    private static bool InstallsProxy(InstallAction action, string proxy, HashSet<string> entryNames)
+    private static bool InstallsPath(InstallAction action, string proxy, HashSet<string> entryNames)
     {
         switch (action)
         {
@@ -191,9 +191,12 @@ public static class PluginPackageValidation
                 return Normalize(replace.Target).Equals(proxy, StringComparison.OrdinalIgnoreCase) &&
                        entryNames.Contains("files/" + Normalize(replace.Source));
             case CopyFolderAction folder:
-                var targetPrefix = Normalize(folder.TargetDir).TrimEnd('/') + "/";
+                // An empty target directory copies the folder's contents to the game root.
+                var targetDir = Normalize(folder.TargetDir).TrimEnd('/');
+                var targetPrefix = targetDir.Length == 0 ? "" : targetDir + "/";
                 if (!proxy.StartsWith(targetPrefix, StringComparison.OrdinalIgnoreCase)) return false;
-                var source = Normalize(folder.SourceDir).TrimEnd('/') + "/" + proxy[targetPrefix.Length..];
+                var sourceDir = Normalize(folder.SourceDir).TrimEnd('/');
+                var source = (sourceDir.Length == 0 ? "" : sourceDir + "/") + proxy[targetPrefix.Length..];
                 return entryNames.Contains("files/" + source);
             default:
                 return false;

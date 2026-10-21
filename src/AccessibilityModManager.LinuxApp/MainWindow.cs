@@ -1135,12 +1135,25 @@ internal sealed class MainWindow : Window
                 proton = selection.Value.Proton;
                 if (!await EnsureSteamClosedAsync(mod)) return;
             }
-            await new LinuxModInstaller(httpClient, logger).UninstallAsync(mod,
+            var nativeTarget = mod.InstalledTarget == ReleaseTarget.Linux;
+            var result = await new LinuxModInstaller(httpClient, logger).UninstallAsync(mod,
                 account, proton);
-            await UpdateInstalledStateAsync(mod,
-                mod.InstalledTarget == ReleaseTarget.Linux
-                    ? "Uninstall complete. The native game files were restored."
-                    : "Uninstall complete. The previous Steam launch option was restored.");
+            var message = nativeTarget
+                ? "Uninstall complete. The native game files were restored."
+                : result?.LaunchOptions switch
+                {
+                    LaunchOptionsOutcome.ManagerTextRemoved =>
+                        "Uninstall complete. The mod's part of the Steam launch option was removed and your own options were kept.",
+                    LaunchOptionsOutcome.LeftUnchanged =>
+                        "Uninstall complete. The Steam launch option had already been changed, so it was left as it is.",
+                    LaunchOptionsOutcome.ManualFixNeeded =>
+                        "Uninstall complete, but the game's Steam launch option still names the mod launcher. " +
+                        "Remove that text in the game's Steam properties before playing.",
+                    _ => "Uninstall complete. The previous Steam launch option was restored."
+                };
+            if (result?.RecoveredFiles.Count > 0)
+                message += " Settings files the mod changed were saved in the manager's recovery folder.";
+            await UpdateInstalledStateAsync(mod, message);
         }
         catch (Exception ex) { ReportError(ex, detailsStatus); }
         finally { busy = false; }
