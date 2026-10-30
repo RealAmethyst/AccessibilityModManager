@@ -448,6 +448,71 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
     }
 
     [Fact]
+    public async Task PackagedPrismPlaceholdersAreKeptOrReplacedByThePinnedBridge()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var (game, originalRelease, packagePath) = CreatePackage(includePrism: false);
+        var prism = File.ReadAllBytes(typeof(ProtonLoaderDetector).Assembly.Location);
+        var placeholder = TestPe.Dll(Machine.Amd64);
+        using (var zip = ZipFile.Open(packagePath, ZipArchiveMode.Update))
+        {
+            WriteBinary(zip, "files/BepInEx/plugins/prism.dll", prism);
+            WriteBinary(zip, "files/BepInEx/plugins/prism_orca_bridge.dll", placeholder);
+            WriteBinary(zip, "files/BepInEx/plugins/prism_spiel_bridge.dll", prism);
+        }
+        var release = new ModRelease
+        {
+            GameId = originalRelease.GameId, PluginId = originalRelease.PluginId,
+            Version = originalRelease.Version, Channel = originalRelease.Channel,
+            TargetPlatform = ReleaseTarget.Windows,
+            Sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(packagePath)))
+        };
+        var windowsArchive = Path.Combine(root, "prism-windows.zip");
+        using (var zip = ZipFile.Open(windowsArchive, ZipArchiveMode.Create))
+        {
+            WriteBinary(zip, "dynamic/release/bin/prism.dll", prism);
+            WriteBinary(zip, "dynamic/release/bin/tolk.dll", prism);
+            Write(zip, "NOTICE", "notice");
+            Write(zip, "LICENSES/license.txt", "license");
+        }
+        var linuxArchive = Path.Combine(root, "prism-linux.zip");
+        using (var zip = ZipFile.Open(linuxArchive, ZipArchiveMode.Create))
+            foreach (var name in new[] { "prism_orca_bridge", "prism_speech_dispatcher_bridge",
+                         "prism_spiel_bridge" })
+            {
+                WriteBinary(zip, $"dynamic/release/wine/placeholders/{name}.dll", placeholder);
+                Write(zip, $"dynamic/release/wine/{name}.dll.so", "host");
+            }
+        var bridgeRelease = new PrismBridgeRelease("9.9.9", "x64",
+            new Uri("https://example.test/prism-linux.zip"),
+            Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(linuxArchive))),
+            new Uri("https://example.test/prism-windows.zip"),
+            Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(windowsArchive))));
+        using var client = new HttpClient(new RoutingArchiveHandler(
+            File.ReadAllBytes(linuxArchive), File.ReadAllBytes(windowsArchive)));
+        using var adapted = await new ProtonWindowsPackageAdapter(logger, client,
+            Path.Combine(root, "prism-cache"), bridgeRelease,
+            Convert.ToHexStringLower(SHA256.HashData(prism)))
+            .PrepareAsync(game, release, packagePath, Proton());
+
+        var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
+        Assert.DoesNotContain(local.Manifest.InstallActions, action =>
+            action is CopyFileAction copy && copy.Target is
+                "BepInEx/plugins/prism_orca_bridge.dll" or "BepInEx/plugins/prism_spiel_bridge.dll");
+        Assert.Contains(local.Manifest.InstallActions, action =>
+            action is CopyFileAction copy &&
+            copy.Target == "BepInEx/plugins/prism_speech_dispatcher_bridge.dll");
+        using var adaptedZip = ZipFile.OpenRead(adapted.Path);
+        foreach (var name in new[] { "prism_orca_bridge", "prism_spiel_bridge" })
+        {
+            using var stream = adaptedZip.GetEntry($"files/BepInEx/plugins/{name}.dll")!.Open();
+            using var copy = new MemoryStream();
+            stream.CopyTo(copy);
+            Assert.Equal(placeholder, copy.ToArray());
+        }
+    }
+
+    [Fact]
     public async Task LegacyPrism071KeepsItsAbiThroughTheAdapter()
     {
         if (!OperatingSystem.IsLinux()) return;

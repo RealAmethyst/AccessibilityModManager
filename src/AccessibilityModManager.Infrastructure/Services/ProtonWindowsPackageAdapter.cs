@@ -156,7 +156,7 @@ public sealed class ProtonWindowsPackageAdapter(
                 throw new InvalidOperationException(
                     "The pinned Prism and Tolk Wine bridge is x64, but this game executable is not x64.");
             var prismAssets = prismTargets.Length == 0 && tolkTargets.Length == 0
-                ? null : await PreparePrismBridgeAsync(game, prismTargets, tolkTargets, extracted, ct);
+                ? null : await PreparePrismBridgeAsync(game, prismTargets, tolkTargets, proposed, extracted, ct);
             if (prismAssets is not null)
                 foreach (var asset in prismAssets.Files.Where(asset => asset.Target is not null))
                     if (proposed.ContainsKey(asset.Target!))
@@ -361,7 +361,8 @@ public sealed class ProtonWindowsPackageAdapter(
 
     private async Task<PrismAssets> PreparePrismBridgeAsync(
         GameInstall game, KeyValuePair<string, string>[] prismTargets,
-        KeyValuePair<string, string>[] tolkTargets, string extracted, CancellationToken ct)
+        KeyValuePair<string, string>[] tolkTargets, IReadOnlyDictionary<string, string> proposed,
+        string extracted, CancellationToken ct)
     {
         var prismHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (target, source) in prismTargets)
@@ -436,9 +437,7 @@ public sealed class ProtonWindowsPackageAdapter(
             else if (IsLegacyPrism071(hash))
                 adapter = prism071Adapter ??= await Prism071Compatibility.ExtractAsync(extracted, ct);
             if (adapter is null && hash.Equals(expected, StringComparison.OrdinalIgnoreCase)) continue;
-            var relative = Path.GetRelativePath(Path.Combine(extracted, Manifest.PackageFilesFolder), source)
-                .Replace('\\', '/');
-            replacements["files/" + relative] = adapter ?? bundle.WindowsPrismDll;
+            replacements[PackageEntry(source)] = adapter ?? bundle.WindowsPrismDll;
             if (adapter is null) continue;
             var folder = Path.GetDirectoryName(target.Replace('/', Path.DirectorySeparatorChar))?
                 .Replace('\\', '/') ?? "";
@@ -449,12 +448,8 @@ public sealed class ProtonWindowsPackageAdapter(
         {
             files.Add(new BridgeFile(bundle.WindowsPrismDll,
                 "files/amm-prism/prism.dll", "prism.dll"));
-            var filesDirectory = Path.Combine(extracted, Manifest.PackageFilesFolder);
             foreach (var (_, source) in tolkTargets)
-            {
-                var relative = Path.GetRelativePath(filesDirectory, source).Replace('\\', '/');
-                replacements["files/" + relative] = bundle.WindowsTolkDll;
-            }
+                replacements[PackageEntry(source)] = bundle.WindowsTolkDll;
         }
         var placeholderDirectories = prismTargets.Select(pair =>
                 Path.GetDirectoryName(pair.Key.Replace('/', Path.DirectorySeparatorChar))?
@@ -468,10 +463,24 @@ public sealed class ProtonWindowsPackageAdapter(
             foreach (var name in release.BridgeNames)
             {
                 var placeholder = name + ".dll";
-                files.Add(new BridgeFile(
-                    Path.Combine(bundle.WindowsPlaceholdersDirectory, placeholder),
-                    $"files/amm-prism/placeholders/{directoryIndex}/{placeholder}",
-                    directory.Length == 0 ? placeholder : directory + "/" + placeholder));
+                var pinned = Path.Combine(bundle.WindowsPlaceholdersDirectory, placeholder);
+                var target = directory.Length == 0 ? placeholder : directory + "/" + placeholder;
+                // A Windows package may already ship Prism's placeholders beside prism.dll. Wine
+                // must load the pinned placeholder that pairs with the host module, so a matching
+                // copy is kept and any other file at that path is replaced by the pinned one.
+                if (proposed.TryGetValue(target, out var shipped))
+                {
+                    if (!SameContent(shipped, pinned))
+                    {
+                        replacements[PackageEntry(shipped)] = pinned;
+                        logger.Information(
+                            "Replacing the package's {Target} with the pinned Prism {Version} placeholder",
+                            target, release.Version);
+                    }
+                    continue;
+                }
+                files.Add(new BridgeFile(pinned,
+                    $"files/amm-prism/placeholders/{directoryIndex}/{placeholder}", target));
             }
         }
         foreach (var name in release.BridgeNames)
@@ -487,7 +496,15 @@ public sealed class ProtonWindowsPackageAdapter(
                 "notices/Prism/" + Path.GetRelativePath(bundle.NoticesDirectory, source)
                     .Replace('\\', '/'), null));
         return new PrismAssets(bridgeDirectory, files, replacements);
+
+        string PackageEntry(string source) => "files/" + Path.GetRelativePath(
+            Path.Combine(extracted, Manifest.PackageFilesFolder), source).Replace('\\', '/');
     }
+
+    private static bool SameContent(string first, string second) =>
+        new FileInfo(first).Length == new FileInfo(second).Length &&
+        SHA256.HashData(File.ReadAllBytes(first)).AsSpan()
+            .SequenceEqual(SHA256.HashData(File.ReadAllBytes(second)));
 
     /// <summary>The official Prism 0.7.1 Windows x64 release DLL, which uses PrismConfig version 1.</summary>
     private bool IsLegacyPrism071(string hash) =>
