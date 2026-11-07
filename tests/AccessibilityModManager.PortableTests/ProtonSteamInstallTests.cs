@@ -64,6 +64,7 @@ public sealed class ProtonSteamInstallTests : IDisposable
             Write(zip, "files/Launcher.exe", "launcher");
             Write(zip, "files/prism-wine/prism_orca_bridge.dll.so", "bridge");
             Write(zip, "files/Reloaded-II/Loader/X64/Reloaded.Mod.Loader.dll", "loader");
+            Write(zip, "files/Reloaded-II/Mods/DSTS.Accessibility/ModConfig.json", """{"ModId":"DSTS.Accessibility","SupportedAppId":["Game.exe"]}""");
         }
 
         var definition = new GameDefinition
@@ -301,6 +302,7 @@ public sealed class ProtonSteamInstallTests : IDisposable
             Write(zip, "files/Launcher.exe", "launcher 1.1");
             Write(zip, "files/prism-wine/prism_orca_bridge.dll.so", "bridge");
             Write(zip, "files/Reloaded-II/Loader/X64/Reloaded.Mod.Loader.dll", "loader");
+            Write(zip, "files/Reloaded-II/Mods/Example.Mod/ModConfig.json", """{"ModId":"Example.Mod","SupportedAppId":["Game.exe"]}""");
             Write(zip, "files/Reloaded-II/Apps/game.exe/AppConfig.json", "package config");
         }
         var update = new ModRelease
@@ -385,6 +387,7 @@ public sealed class ProtonSteamInstallTests : IDisposable
             Write(zip, "files/Launcher.exe", "launcher");
             Write(zip, "files/prism-wine/prism_orca_bridge.dll.so", "bridge");
             Write(zip, "files/Reloaded-II/Loader/X64/Reloaded.Mod.Loader.dll", "loader");
+            Write(zip, "files/Reloaded-II/Mods/Example.Mod/ModConfig.json", """{"ModId":"Example.Mod","SupportedAppId":["Game.exe"]}""");
         }
         var game = new GameInstall
         {
@@ -436,6 +439,9 @@ public sealed class ProtonSteamInstallTests : IDisposable
         Directory.CreateSymbolicLink(Path.Combine(prefix, "dosdevices", "z:"), "/");
         File.WriteAllText(pointer, "another loader");
         File.WriteAllText(Path.Combine(gamePath, "Game.exe"), "game");
+        Directory.CreateDirectory(Path.Combine(gamePath, "Reloaded-II", "Mods", "DSTS.Accessibility"));
+        File.WriteAllText(Path.Combine(gamePath, "Reloaded-II", "Mods", "DSTS.Accessibility", "ModConfig.json"),
+            """{"ModId":"DSTS.Accessibility"}""");
         var game = new GameInstall
         {
             Game = new GameDefinition { GameId = "example", DisplayName = "Example", ExeName = "Game.exe" },
@@ -448,7 +454,8 @@ public sealed class ProtonSteamInstallTests : IDisposable
             ReloadedRoot = "Reloaded-II", ReloadedModId = "DSTS.Accessibility"
         };
 
-        Assert.Throws<InvalidOperationException>(() => ProtonReloadedConfig.Plan(game, launch));
+        var refusal = Assert.Throws<InvalidOperationException>(() => ProtonReloadedConfig.Plan(game, launch));
+        Assert.Contains("existing Reloaded II config differs", refusal.Message);
         Assert.Equal("another loader", File.ReadAllText(pointer));
     }
 

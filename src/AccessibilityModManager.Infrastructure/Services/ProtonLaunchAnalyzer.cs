@@ -48,7 +48,10 @@ public static class ProtonLaunchAnalyzer
         // On update, files the mod added earlier are on disk but are not part of the game.
         bool GameShips(string relative) => installedModFiles?.Contains(relative) != true &&
             File.Exists(PathSafety.CombineContained(gameDirectory, relative));
-        var gameRelative = gameExecutable.Replace('\\', '/');
+        var launchRelative = gameExecutable.Replace('\\', '/');
+        // Windows loads a proxy DLL from the folder of the program the game runs as, which for a
+        // packaged Unreal Engine game is the one its Steam-launched bootstrap starts.
+        var gameRelative = UnrealBootstrapStub.ProcessExecutable(gameDirectory, launchRelative);
         var gamePath = PathSafety.CombineContained(gameDirectory, gameRelative);
         PathSafety.EnsureNoReparseTraversal(gameDirectory, gamePath, "game executable");
         var game = PeImage.Read(gamePath) ??
@@ -65,7 +68,8 @@ public static class ProtonLaunchAnalyzer
             if (!IsCode(target)) continue;
             codeFiles++;
             if (!target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
-                target.Equals(gameRelative, StringComparison.OrdinalIgnoreCase))
+                target.Equals(gameRelative, StringComparison.OrdinalIgnoreCase) ||
+                target.Equals(launchRelative, StringComparison.OrdinalIgnoreCase))
                 continue;
             if (PeImage.Read(source) is not { } image || !IsInjector(image)) continue;
             if (image.Machine == game.Machine) launchers.Add(target);

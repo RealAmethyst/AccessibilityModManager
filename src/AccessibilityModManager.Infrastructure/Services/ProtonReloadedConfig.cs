@@ -38,8 +38,12 @@ public static class ProtonReloadedConfig
         var root = PathSafety.CombineContained(game.InstallPath, launch.ReloadedRoot);
         if (!Directory.Exists(root))
             throw new InvalidOperationException("The package did not install its Reloaded II root.");
-        var exeName = Path.GetFileName(game.Game.ExeName);
-        var gameExe = PathSafety.CombineContained(game.InstallPath, game.Game.ExeName);
+        // Reloaded II matches its AppConfig against the process it runs in, which for a packaged
+        // Unreal Engine game is the program the Steam-launched bootstrap starts.
+        var appExecutable = UnrealBootstrapStub.ProcessExecutable(game.InstallPath, game.Game.ExeName);
+        var exeName = Path.GetFileName(appExecutable);
+        var gameExe = PathSafety.CombineContained(game.InstallPath, appExecutable);
+        EnsureModSupports(root, launch.ReloadedModId, exeName);
         var appConfigPath = PathSafety.CombineContained(root, "Apps", exeName.ToLowerInvariant(), "AppConfig.json");
         var pointerPath = Path.Combine(roaming[0], "Reloaded-Mod-Loader-II", "ReloadedII.json");
         EnsureOwnedPath(game, pointerPath);
@@ -133,6 +137,71 @@ public static class ProtonReloadedConfig
         return new OwnedProtonConfigFile(path, Convert.ToBase64String(installed),
             previous is null ? null : Convert.ToBase64String(previous),
             previous is null || !OperatingSystem.IsLinux() ? null : (int)File.GetUnixFileMode(path));
+    }
+
+    /// <summary>
+    /// The package must install exactly one Reloaded II mod with <paramref name="modId"/>, found the
+    /// way the loader finds mods: a ModConfig.json in a folder below Mods, without looking deeper
+    /// once a folder has one. When the mod lists the programs it supports, the game's program
+    /// must be among them, so a wrong program is refused at install instead of loading nothing.
+    /// </summary>
+    private static void EnsureModSupports(string root, string modId, string exeName)
+    {
+        const int MaxFolders = 4096;
+        const long MaxConfigBytes = 1024 * 1024;
+        var options = new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip };
+        var matches = new List<string[]>();
+        var pending = new Queue<string>();
+        var mods = Path.Combine(root, "Mods");
+        if (Directory.Exists(mods))
+            foreach (var child in Directory.EnumerateDirectories(mods)) pending.Enqueue(child);
+        var visited = 0;
+        while (pending.TryDequeue(out var folder))
+        {
+            if (++visited > MaxFolders)
+                throw new InvalidOperationException("The package's Reloaded II Mods folder is too large to check.");
+            if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0) continue;
+            // The loader runs under Wine, where file names match without regard to case.
+            var configs = Directory.EnumerateFiles(folder)
+                .Where(file => Path.GetFileName(file).Equals("ModConfig.json", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (configs.Length == 0)
+            {
+                foreach (var child in Directory.EnumerateDirectories(folder)) pending.Enqueue(child);
+                continue;
+            }
+            foreach (var config in configs)
+            {
+                if (new FileInfo(config).Length > MaxConfigBytes) continue;
+                try
+                {
+                    using var document = JsonDocument.Parse(File.ReadAllBytes(config), options);
+                    var rootElement = document.RootElement;
+                    if (rootElement.ValueKind != JsonValueKind.Object ||
+                        !rootElement.TryGetProperty("ModId", out var id) || id.ValueKind != JsonValueKind.String ||
+                        id.GetString() != modId)
+                        continue;
+                    matches.Add(rootElement.TryGetProperty("SupportedAppId", out var apps) &&
+                                apps.ValueKind == JsonValueKind.Array
+                        ? apps.EnumerateArray().Where(app => app.ValueKind == JsonValueKind.String)
+                            .Select(app => app.GetString()!).ToArray()
+                        : []);
+                }
+                catch (JsonException)
+                {
+                    // The loader skips a config it cannot read, so it cannot be this mod.
+                }
+            }
+        }
+        if (matches.Count == 0)
+            throw new InvalidOperationException($"The package does not install the Reloaded II mod '{modId}'.");
+        if (matches.Count > 1)
+            throw new InvalidOperationException($"The package installs the Reloaded II mod '{modId}' more than once.");
+        var supported = matches[0];
+        if (supported.Length > 0 && !supported.Contains(exeName, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"The Reloaded II mod '{modId}' supports {string.Join(", ", supported)}, " +
+                $"but the game runs {exeName}.");
     }
 
     private static void EnsureOwnedPath(GameInstall game, string path)

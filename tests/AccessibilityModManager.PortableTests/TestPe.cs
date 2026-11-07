@@ -10,7 +10,22 @@ internal static class TestPe
     private const int SectionRva = 0x1000;
     private const int SectionFileOffset = 0x200;
 
-    public static byte[] Build(Machine machine, params (string Dll, string[] Functions)[] imports)
+    public static byte[] Build(Machine machine, params (string Dll, string[] Functions)[] imports) =>
+        Build(machine, null, imports);
+
+    /// <summary>
+    /// An Unreal Engine bootstrap program: RT_RCDATA 201 holds the real program's path relative to
+    /// this one, and 202 the project name, both as UTF-16 text.
+    /// </summary>
+    public static byte[] UnrealBootstrap(Machine machine, string target, string project = "Game\0") =>
+        Build(machine, new Dictionary<int, byte[]>
+        {
+            [201] = Encoding.Unicode.GetBytes(target),
+            [202] = Encoding.Unicode.GetBytes(project)
+        }, ("KERNEL32.dll", ["CreateProcessW", "WaitForSingleObject"]));
+
+    public static byte[] Build(Machine machine, IReadOnlyDictionary<int, byte[]>? rcData,
+        params (string Dll, string[] Functions)[] imports)
     {
         var pe32Plus = machine == Machine.Amd64;
         var thunkSize = pe32Plus ? 8 : 4;
@@ -39,6 +54,17 @@ internal static class TestPe
             WriteInt(section, descriptor, SectionRva + lookup);
             WriteInt(section, descriptor + 12, SectionRva + name);
             WriteInt(section, descriptor + 16, SectionRva + lookup);
+        }
+
+        var resources = -1;
+        var resourcesSize = 0;
+        if (rcData is not null)
+        {
+            while (section.Count % 4 != 0) section.Add(0);
+            resources = section.Count;
+            var tree = ResourceTree(rcData, SectionRva + resources);
+            section.AddRange(tree);
+            resourcesSize = tree.Length;
         }
 
         var rawSize = Align(Math.Max(section.Count, 1), 0x200);
@@ -75,6 +101,11 @@ internal static class TestPe
         var directories = rvaCount + 4;
         BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(directories + 8), SectionRva);
         BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(directories + 12), descriptorsSize);
+        if (resources >= 0)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(directories + 16), SectionRva + resources);
+            BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(directories + 20), resourcesSize);
+        }
 
         var header = optional + optionalSize;
         Encoding.ASCII.GetBytes(".idata").CopyTo(image, header);
@@ -109,6 +140,40 @@ internal static class TestPe
         }
         if (!File.Exists(proton)) File.WriteAllText(proton, "proton");
         return proton;
+    }
+
+    /// <summary>A resource tree with one RT_RCDATA type, one language per id, and data after the tree.</summary>
+    private static byte[] ResourceTree(IReadOnlyDictionary<int, byte[]> rcData, int treeRva)
+    {
+        var ids = rcData.Keys.Order().ToArray();
+        var typeDirectory = 16 + 8;
+        var nameDirectories = typeDirectory + 16 + ids.Length * 8;
+        var dataEntries = nameDirectories + ids.Length * 24;
+        var data = dataEntries + ids.Length * 16;
+        var buffer = new List<byte>(new byte[data]);
+        WriteDirectory(0, [(10, 0x80000000u | (uint)typeDirectory)]);
+        WriteDirectory(typeDirectory, ids.Select((id, index) =>
+            (id, 0x80000000u | (uint)(nameDirectories + index * 24))).ToArray());
+        for (var index = 0; index < ids.Length; index++)
+        {
+            WriteDirectory(nameDirectories + index * 24, [(0x0409, (uint)(dataEntries + index * 16))]);
+            while (buffer.Count % 4 != 0) buffer.Add(0);
+            var offset = buffer.Count;
+            buffer.AddRange(rcData[ids[index]]);
+            WriteInt(buffer, dataEntries + index * 16, treeRva + offset);
+            WriteInt(buffer, dataEntries + index * 16 + 4, rcData[ids[index]].Length);
+        }
+        return buffer.ToArray();
+
+        void WriteDirectory(int offset, (int Id, uint Target)[] entries)
+        {
+            buffer[offset + 14] = (byte)entries.Length;
+            for (var entry = 0; entry < entries.Length; entry++)
+            {
+                WriteInt(buffer, offset + 16 + entry * 8, entries[entry].Id);
+                WriteInt(buffer, offset + 20 + entry * 8, unchecked((int)entries[entry].Target));
+            }
+        }
     }
 
     private static void WriteInt(List<byte> buffer, int offset, int value)

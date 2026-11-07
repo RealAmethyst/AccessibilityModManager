@@ -15,8 +15,9 @@ public static class ProtonLoaderDetector
     public static Finding? Detect(string gameDirectory, string gameExecutable,
         IReadOnlyDictionary<string, string>? proposedFiles = null)
     {
+        // A loader proxy sits beside the program the game runs as, not a bootstrap that starts it.
         var executable = PathSafety.CombineContained(gameDirectory,
-            gameExecutable.Replace('\\', '/'));
+            UnrealBootstrapStub.ProcessExecutable(gameDirectory, gameExecutable).Replace('\\', '/'));
         PathSafety.EnsureNoReparseTraversal(gameDirectory, executable, "game executable");
         if (!File.Exists(executable))
             throw new FileNotFoundException("The game executable is missing.", executable);
