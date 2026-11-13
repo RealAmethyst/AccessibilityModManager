@@ -27,6 +27,21 @@ public sealed class SteamAppInfoTests : IDisposable
     }
 
     [Fact]
+    public void ReadsAnUnspecifiedTypeEntryOnlyWithoutADefaultOne()
+    {
+        Write(true,
+            (10, Launches(("Stub.exe", "none", "windows"), ("Editor.exe", "option1", "windows"))),
+            (20, Launches(("Tool.exe", "none", "windows"), ("Game.exe", "default", "windows"))),
+            (30, Launches(("A.exe", "none", "windows"), ("B.exe", "none", null))),
+            (40, Launches(("game.sh", "none", "linux"))));
+
+        Assert.Equal("Stub.exe", SteamAppInfo.LaunchExecutable(root, "10"));
+        Assert.Equal("Game.exe", SteamAppInfo.LaunchExecutable(root, "20"));
+        Assert.Null(SteamAppInfo.LaunchExecutable(root, "30"));
+        Assert.Null(SteamAppInfo.LaunchExecutable(root, "40"));
+    }
+
+    [Fact]
     public void AmbiguousOrDamagedCacheGivesNoExecutable()
     {
         Write(true, (20, Launches(("A.exe", "default", "windows"), ("B.exe", null, "windows"))));

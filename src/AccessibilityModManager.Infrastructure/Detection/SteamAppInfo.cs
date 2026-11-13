@@ -6,7 +6,8 @@ namespace AccessibilityModManager.Infrastructure.Detection;
 /// <summary>
 /// Reads the executable Steam itself launches for a game from Steam's binary app cache
 /// (<c>appcache/appinfo.vdf</c>, formats 27 to 29). Only a single, unambiguous Windows default
-/// launch entry is returned; anything else, including an unreadable cache, returns null.
+/// launch entry is returned, or a single entry of unspecified type when the game has no default
+/// one; anything else, including an unreadable cache, returns null.
 /// </summary>
 public static class SteamAppInfo
 {
@@ -67,7 +68,10 @@ public static class SteamAppInfo
     private static string? SingleWindowsLaunch(Dictionary<string, object> root)
     {
         if (Child(Child(Child(root, "appinfo"), "config"), "launch") is not { } launch) return null;
-        var executables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Steam writes "none" for a launch entry whose type was left unspecified. It starts such
+        // an entry when the game has no default one, so those are read only in that case.
+        var defaults = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unspecified = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in launch.Values.OfType<Dictionary<string, object>>())
         {
             if (entry.GetValueOrDefault("executable") is not string executable ||
@@ -76,14 +80,17 @@ public static class SteamAppInfo
             var type = entry.GetValueOrDefault("type") as string;
             var config = Child(entry, "config");
             var osList = config?.GetValueOrDefault("oslist") as string;
-            if (type is not (null or "" or "default") ||
+            var executables = type is null or "" or "default" ? defaults
+                : type == "none" ? unspecified : null;
+            if (executables is null ||
                 config?.GetValueOrDefault("betakey") is string ||
                 !string.IsNullOrEmpty(osList) &&
                 !osList.Split(',').Any(os => os.Trim().Equals("windows", StringComparison.OrdinalIgnoreCase)))
                 continue;
             executables.Add(executable.Replace('\\', '/').TrimStart('/'));
         }
-        return executables.Count == 1 ? executables.Single() : null;
+        var chosen = defaults.Count > 0 ? defaults : unspecified;
+        return chosen.Count == 1 ? chosen.Single() : null;
     }
 
     private static Dictionary<string, object>? Child(Dictionary<string, object>? parent, string key) =>
