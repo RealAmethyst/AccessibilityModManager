@@ -306,6 +306,61 @@ public sealed class ProtonWindowsPackageAdapterTests : IDisposable
         Assert.Contains("lifecycle script without a verified Proton equivalent", error.Message);
     }
 
+    [Theory]
+    [InlineData("Game.exe", true)]
+    [InlineData("Other.exe", false)]
+    public async Task LaunchRedirectScriptsAreReplacedByTheSteamLaunchOption(string redirected, bool accepted)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var (game, _, _) = CreatePackage(includePrism: false);
+        // What a registration program holds: the registry path and both program names.
+        byte[] Script() =>
+        [
+            .. TestPe.Build(Machine.Amd64, ("ADVAPI32.dll", ["RegSetValueExW"])),
+            .. System.Text.Encoding.Unicode.GetBytes(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\0" +
+                redirected + "\0Mod_Launcher.exe\0")
+        ];
+        var package = Path.Combine(root, "redirect.zip");
+        using (var archive = ZipFile.Open(package, ZipArchiveMode.Create))
+        {
+            Write(archive, "manifest.json", """
+                {"gameId":"game","pluginId":"author","modVersion":"1.0.0",
+                 "installActions":[{"type":"copyFile","source":"Mod_Launcher.exe","target":"Mod_Launcher.exe"}],
+                 "postInstall":{"executable":"files/scripts/Setup.exe","needsAdmin":true,
+                    "failureFatal":true,"what":"setup","why":"setup","modifies":"registry",
+                    "runFromGameFolder":true},
+                 "postUninstall":{"executable":"files/scripts/Remove.exe","needsAdmin":true,
+                    "failureFatal":true,"what":"remove","why":"remove","modifies":"registry",
+                    "runFromGameFolder":true}}
+                """);
+            WriteBinary(archive, "files/Mod_Launcher.exe", TestPe.Injector(Machine.Amd64));
+            WriteBinary(archive, "files/scripts/Setup.exe", Script());
+            WriteBinary(archive, "files/scripts/Remove.exe", Script());
+        }
+        var release = new ModRelease
+        {
+            GameId = "game", PluginId = "author", Version = "1.0.0", Channel = "stable",
+            TargetPlatform = ReleaseTarget.Windows,
+            Sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(package)))
+        };
+
+        var adapter = new ProtonWindowsPackageAdapter(logger);
+        if (!accepted)
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                adapter.PrepareAsync(game, release, package, Proton()));
+            Assert.Contains("lifecycle script without a verified Proton equivalent", error.Message);
+            return;
+        }
+        using var adapted = await adapter.PrepareAsync(game, release, package, Proton());
+        var local = await LocalProtonPackage.OpenAsync(adapted.Path, logger);
+        Assert.Null(local.Manifest.PostInstall);
+        Assert.Null(local.Manifest.PostUninstall);
+        Assert.Equal("replaceExecutable", local.Manifest.ProtonLaunch!.LaunchMode);
+        Assert.Equal("Mod_Launcher.exe", local.Manifest.ProtonLaunch.LauncherPath);
+    }
+
     [Fact]
     public async Task UnknownTolkBuildNeedsAVerifiedOrcaBridge()
     {

@@ -44,10 +44,7 @@ public sealed class ProtonWindowsPackageAdapter(
         "287cd79e5d6cac5204605ba23e73bd043f48192ade54ddadf50ac4fcd9b94aae";
     private const string CyberSleuthPluginSha256 =
         "0197ba2894e9e5fef8bbd25931d3cfb3f0044bd85faf894590259a3024482156";
-    // The audited native installer only writes the game's IFEO Debugger value. Steam's
-    // reversible launch option replaces that operation under Proton; arbitrary EXEs do not.
-    private const string IfeoOnlyInstallerSha256 =
-        "64c7721bba7a2a1070b3fceb80e8b7b28c45fba223213a720a705d80af8f0c2e";
+    private const long MaxLifecycleScriptBytes = 64L * 1024 * 1024;
     private const string VerifiedLegacyTolkDllSha256 =
         "c4fb11d3ed236f27532c7ab8370ebde75133f322a069450f17e38d7548197225";
     private const string OfficialTolkShimSha256 =
@@ -121,9 +118,13 @@ public sealed class ProtonWindowsPackageAdapter(
                 installedModFiles);
             logger.Information("Proton launch analysis for {PluginId}/{GameId}: {Plan}",
                 release.PluginId, release.GameId, analysis.Description);
-            if (manifest.PreInstall is not null || manifest.PostUninstall is not null ||
-                manifest.PostInstall is not null &&
-                (analysis.LauncherPath is null || !IsReplacedIfeoScript(manifest.PostInstall, extracted)))
+            // A script that only registers the bundled launcher as the game's Windows start
+            // redirect has a Proton equivalent, the Steam launch option, and so does the script
+            // that removes that registration. Neither is run. Any other script is refused.
+            if (manifest.PreInstall is not null ||
+                new[] { manifest.PostInstall, manifest.PostUninstall }.Any(script =>
+                    script is not null && (analysis.LauncherPath is null ||
+                        !IsLaunchRedirectScript(script, extracted, game.Game.ExeName, analysis.LauncherPath))))
                 throw new InvalidOperationException(
                     "This Windows release has a lifecycle script without a verified Proton equivalent.");
             var runtimeMinimum = RequiredDotNetRuntime(proposed);
@@ -192,6 +193,7 @@ public sealed class ProtonWindowsPackageAdapter(
             node["targetPlatform"] = ReleaseTarget.Proton;
             node["protonLaunch"] = JsonSerializer.SerializeToNode(launch, JsonOptions);
             node["postInstall"] = null;
+            node["postUninstall"] = null;
             node["dependencies"] = JsonSerializer.SerializeToNode(
                 DependencyTargeting.ForTarget(game.Game.Dependencies, ReleaseTarget.Proton), JsonOptions);
             if (prismAssets is not null)
@@ -340,14 +342,28 @@ public sealed class ProtonWindowsPackageAdapter(
         return required?.ToString(3);
     }
 
-    private static bool IsReplacedIfeoScript(LifecycleScript script, string extracted)
+    /// <summary>
+    /// True for a Windows program that carries the Image File Execution Options registry path
+    /// together with the names of the program Steam launches and of the package's launcher: the
+    /// parts of a registration that makes Windows start the launcher in the game's place.
+    /// </summary>
+    private static bool IsLaunchRedirectScript(LifecycleScript script, string extracted,
+        string gameExecutable, string launcherPath)
     {
-        if (!script.NeedsAdmin || !script.FailureFatal || !script.RunFromGameFolder ||
-            !script.Executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-            return false;
+        if (!script.Executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
         var path = PathSafety.CombineContained(extracted, script.Executable.Replace('\\', '/'));
-        return File.Exists(path) && Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)))
-            .Equals(IfeoOnlyInstallerSha256, StringComparison.OrdinalIgnoreCase);
+        if (!File.Exists(path) || new FileInfo(path).Length > MaxLifecycleScriptBytes ||
+            PeImage.Read(path) is null)
+            return false;
+        var image = File.ReadAllBytes(path);
+        for (var index = 0; index < image.Length; index++)
+            if (image[index] is >= (byte)'A' and <= (byte)'Z') image[index] += 32;
+        return new[]
+        {
+            "Image File Execution Options",
+            Path.GetFileName(gameExecutable.Replace('\\', '/')),
+            Path.GetFileName(launcherPath)
+        }.All(text => image.AsSpan().IndexOf(Encoding.Unicode.GetBytes(text.ToLowerInvariant())) >= 0);
     }
 
     private static Machine GameMachine(GameInstall game)
